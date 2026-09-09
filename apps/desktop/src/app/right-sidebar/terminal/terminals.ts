@@ -2,6 +2,7 @@ import { atom, computed } from 'nanostores'
 
 import { readKey, writeKey } from '@/lib/storage'
 import { $currentCwd } from '@/store/session'
+import { $revealBackgroundTerminals } from '@/store/terminal-prefs'
 
 import { setTerminalTakeover } from '../store'
 
@@ -191,6 +192,51 @@ export function ensureAgentTerminal(procId: string, title: string): string | nul
   $terminals.set([...$terminals.get(), { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId }])
 
   return id
+}
+
+// Proc ids already considered for auto-reveal in this renderer lifetime —
+// revealed, skipped (closed tab / stack / inactive session), or no-op'd after
+// a first look. Status/output/title churn must not take over again.
+const autoRevealConsidered = new Set<string>()
+
+/**
+ * Surface an agent background process as a read-only tab (once), then maybe
+ * select it and open the terminal pane.
+ *
+ * Reveal fires only when `hermes.desktop.revealBackgroundTerminals === 'auto'`,
+ * `allowAutoReveal` is true (active session), `ensureAgentTerminal` returns a
+ * tab id, and this `procId` has not been considered before. Uses the same
+ * select + `setTerminalTakeover(true)` seam as a status-stack click — does
+ * not call `openAgentTerminal`, so a user-closed tab stays closed.
+ *
+ * Pass `allowAutoReveal: false` for other sessions so first-seen bookkeeping
+ * still runs and a later session switch cannot yank the pane.
+ */
+export function maybeAutoRevealAgentTerminal(
+  procId: string,
+  title: string,
+  allowAutoReveal = true
+): string | null {
+  if (!procId) {
+    return null
+  }
+
+  const tabId = ensureAgentTerminal(procId, title)
+
+  if (autoRevealConsidered.has(procId)) {
+    return tabId
+  }
+
+  autoRevealConsidered.add(procId)
+
+  if (!allowAutoReveal || $revealBackgroundTerminals.get() !== 'auto' || !tabId) {
+    return tabId
+  }
+
+  selectTerminal(tabId)
+  setTerminalTakeover(true)
+
+  return tabId
 }
 
 /** Open + focus an agent process's tab (the status-stack link), recreating it if
