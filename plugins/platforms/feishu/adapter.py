@@ -358,6 +358,32 @@ def _to_boolean(value: Any) -> bool:
     return value is True or value == 1 or value == "true"
 
 
+def _rule_id_set(values: Any) -> set[str]:
+    return {str(u).strip() for u in values if str(u).strip()}
+
+
+def _parse_feishu_group_rule(rule_cfg: dict) -> FeishuGroupRule:
+    return FeishuGroupRule(
+        policy=str(rule_cfg.get("policy", "open")).strip().lower(),
+        allowlist=_rule_id_set(rule_cfg.get("allowlist", [])),
+        blacklist=_rule_id_set(rule_cfg.get("blacklist", [])),
+        # Only override when explicitly set — missing vs false must not collapse.
+        require_mention=_to_boolean(rule_cfg["require_mention"]) if "require_mention" in rule_cfg else None,
+    )
+
+
+def _merge_hot_group_rule(base: Optional[FeishuGroupRule], rule_cfg: dict) -> FeishuGroupRule:
+    """Field-level overlay: hot keys win; omitted keys keep the boot rule (or parse defaults)."""
+    if base is None:
+        return _parse_feishu_group_rule(rule_cfg)
+    return FeishuGroupRule(
+        policy=str(rule_cfg["policy"]).strip().lower() if "policy" in rule_cfg else base.policy,
+        allowlist=_rule_id_set(rule_cfg["allowlist"]) if "allowlist" in rule_cfg else set(base.allowlist),
+        blacklist=_rule_id_set(rule_cfg["blacklist"]) if "blacklist" in rule_cfg else set(base.blacklist),
+        require_mention=_to_boolean(rule_cfg["require_mention"]) if "require_mention" in rule_cfg else base.require_mention,
+    )
+
+
 def _is_style_enabled(style: Dict[str, Any] | None, key: str) -> bool:
     if not style:
         return False
@@ -1274,13 +1300,7 @@ class FeishuAdapter(BasePlatformAdapter):
             for chat_id, rule_cfg in raw_group_rules.items():
                 if not isinstance(rule_cfg, dict):
                     continue
-                group_rules[str(chat_id)] = FeishuGroupRule(
-                    policy=str(rule_cfg.get("policy", "open")).strip().lower(),
-                    allowlist=_id_set(rule_cfg.get("allowlist", [])),
-                    blacklist=_id_set(rule_cfg.get("blacklist", [])),
-                    # Only override when explicitly set — missing vs false must not collapse.
-                    require_mention=_to_boolean(rule_cfg["require_mention"]) if "require_mention" in rule_cfg else None,
-                )
+                group_rules[str(chat_id)] = _parse_feishu_group_rule(rule_cfg)
 
         # Env-only so adapter and gateway auth bypass share one source (yaml feishu.allow_bots
         # is bridged to the env var at config load). Scoped read: under multiplex a secondary
@@ -3248,8 +3268,30 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception:
             logger.exception("[Feishu] Background inbound processing failed")
 
+    def _refresh_group_rules_from_hot_file(self) -> None:
+        """Overlay ``~/.hermes/feishu_group_rules.json`` onto boot ``group_rules`` (mtime-cached)."""
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return
+        try:
+            from plugins.platforms.feishu.feishu_group_rules import load_hot_group_rules
+
+            hot_raw = load_hot_group_rules()
+        except Exception:
+            logger.warning("[Feishu] Failed to refresh group rules from hot file", exc_info=True)
+            return
+        boot = getattr(settings, "group_rules", None) or {}
+        if not hot_raw:
+            self._group_rules = dict(boot)
+            return
+        merged = dict(boot)
+        for chat_id, rule_cfg in hot_raw.items():
+            merged[chat_id] = _merge_hot_group_rule(merged.get(chat_id), rule_cfg)
+        self._group_rules = merged
+
     # --- Inbound admission ---
     def _admit(self, sender: Any, message: Any) -> Optional[RejectReason]:
+        self._refresh_group_rules_from_hot_file()
         sender_ids = _sender_identity(sender)
         self_ids = frozenset(v for v in (self._bot_open_id, self._bot_user_id) if v)
         is_bot = _is_bot_sender(sender)
