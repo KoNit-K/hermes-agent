@@ -27,6 +27,7 @@ import { $tabStripDefault, setTabStripDefault, type TabStripDefault } from '@/st
 import { $retiredTips, $tipsEnabled, resetTips, setTipsEnabled } from '@/store/tips'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { $toursEnabled, setToursEnabled } from '@/store/tours'
+import { $trajectoryCollapsedByDefault, setTrajectoryCollapsedByDefault } from '@/store/trajectory-disclosure'
 import {
   $translucency,
   beginTranslucencyPeek,
@@ -395,6 +396,7 @@ export function AppearanceSettings() {
   const { themeName, mode, resolvedMode, availableThemes, setTheme, setMode } = useTheme()
   const toolViewMode = useStore($toolViewMode)
   const reasoningCollapsedByDefault = useStore($reasoningCollapsedByDefault)
+  const trajectoryCollapsedByDefault = useStore($trajectoryCollapsedByDefault)
   const sessionListDensity = useStore($sessionListDensity)
   const tabStripDefault = useStore($tabStripDefault)
   const zoomPercent = useStore($zoomPercent)
@@ -930,6 +932,24 @@ export function AppearanceSettings() {
             }
             description={a.reasoningCollapsedDesc}
             title={a.reasoningCollapsedTitle}
+          />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                onChange={id => {
+                  triggerHaptic('selection')
+                  setTrajectoryCollapsedByDefault(id === 'on')
+                }}
+                options={[
+                  { id: 'off', label: t.common.off },
+                  { id: 'on', label: t.common.on }
+                ]}
+                value={trajectoryCollapsedByDefault ? 'on' : 'off'}
+              />
+            }
+            description={a.trajectoryCollapsedDesc}
+            title={a.trajectoryCollapsedTitle}
           />
 
           <ListRow

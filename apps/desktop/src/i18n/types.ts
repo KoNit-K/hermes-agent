@@ -476,6 +476,8 @@ export interface Translations {
       toolViewDesc: string
       reasoningCollapsedTitle: string
       reasoningCollapsedDesc: string
+      trajectoryCollapsedTitle: string
+      trajectoryCollapsedDesc: string
       uiScaleTitle: string
       uiScaleDesc: (percent: number) => string
       sessionDensityTitle: string
@@ -3064,6 +3066,8 @@ export interface Translations {
       thought: string
       thoughtBriefly: string
       thoughtFor: (duration: string) => string
+      completedSteps: (count: number) => string
+      completedStepsIn: (count: number, duration: string) => string
       turnDuration: (duration: string) => string
       today: (time: string) => string
       yesterday: (time: string) => string
