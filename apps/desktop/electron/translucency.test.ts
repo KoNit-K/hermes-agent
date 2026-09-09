@@ -43,6 +43,7 @@ import {
   TRANSLUCENCY_MIN,
   TRANSLUCENCY_OPACITY_FLOOR,
   TRANSLUCENCY_REASSERT_SETTLE_DELAY_MS,
+  translucencyReassertForDpiChange,
   type TranslucencyState,
   translucencySupportedOn,
   vibrancyFor,
@@ -70,7 +71,23 @@ describe('mixed-DPI translucency reassert', () => {
     expect(scaleFactorRequiresTranslucencyReassert(1.2, -1)).toBe(false)
   })
 
-  it('wires Windows chat-window events and reasserts only after a display scaleFactor change', () => {
+  it('limits mixed-DPI DWM recovery to active glass and never writes opacity', () => {
+    const base = {
+      fade: 0,
+      material: DEFAULT_GLASS_MATERIAL,
+      scope: DEFAULT_GLASS_SCOPE
+    }
+
+    expect(translucencyReassertForDpiChange({ ...base, intensity: 40, mode: 'clear' })).toBeNull()
+    expect(translucencyReassertForDpiChange({ ...base, intensity: 0, mode: 'glass' })).toBeNull()
+    expect(translucencyReassertForDpiChange({ ...base, intensity: 50, mode: 'glass' })).toEqual({
+      backing: true,
+      material: true,
+      opacity: false
+    })
+  })
+
+  it('reasserts once when continuous move crosses a differently scaled display', () => {
     const handlers = new Map<string, () => void>()
     let destroyed = false
     let scaleFactor = 1
@@ -84,22 +101,33 @@ describe('mixed-DPI translucency reassert', () => {
       }
     }
 
-    const screen = {
-      getDisplayMatching: () => ({ scaleFactor })
-    }
+    installTranslucencyReassertOnWindowEvents(
+      win,
+      { getDisplayMatching: () => ({ scaleFactor }) },
+      () => {
+        calls += 1
+      },
+      new WeakMap(),
+      'win32'
+    )
 
-    installTranslucencyReassertOnWindowEvents(win, screen, () => {
-      calls += 1
-    }, new WeakMap(), 'win32')
+    expect([...handlers.keys()]).toEqual(['show', 'move', 'moved', 'resized'])
 
-    expect([...handlers.keys()]).toEqual(['show', 'moved', 'resized'])
+    handlers.get('move')?.()
+    expect(calls).toBe(1)
+
+    handlers.get('move')?.()
+    handlers.get('move')?.()
     handlers.get('moved')?.()
     expect(calls).toBe(1)
-    handlers.get('moved')?.()
-    expect(calls).toBe(1)
-    scaleFactor = 1.2
+
+    scaleFactor = 1.25
+    handlers.get('move')?.()
+    expect(calls).toBe(2)
+    handlers.get('move')?.()
     handlers.get('moved')?.()
     expect(calls).toBe(2)
+
     destroyed = true
     scaleFactor = 1.5
     handlers.get('resized')?.()
@@ -132,9 +160,13 @@ describe('mixed-DPI translucency reassert', () => {
       }
     }
 
-    installTranslucencyReassertOnDisplayMetrics(screen, () => {
-      calls += 1
-    }, 'win32')
+    installTranslucencyReassertOnDisplayMetrics(
+      screen,
+      () => {
+        calls += 1
+      },
+      'win32'
+    )
     handlers.get('display-metrics-changed')?.({}, {}, ['workArea'])
     expect(calls).toBe(0)
     handlers.get('display-metrics-changed')?.({}, {}, ['scaleFactor'])
@@ -172,6 +204,7 @@ describe('mixed-DPI translucency reassert', () => {
       )
 
       handlers.get('show')?.()
+      handlers.get('move')?.()
       handlers.get('moved')?.()
       vi.advanceTimersByTime(TRANSLUCENCY_REASSERT_SETTLE_DELAY_MS)
       expect(calls).toBe(0)

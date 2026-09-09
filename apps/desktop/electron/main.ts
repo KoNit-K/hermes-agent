@@ -378,6 +378,7 @@ import {
   installTranslucencyReassertOnWindowEvents,
   normalizeState as normalizeTranslucency,
   opacityNeedsSetting,
+  translucencyReassertForDpiChange,
   translucencySupportedOn,
   vibrancyFor as vibrancyForTranslucency,
   windowBackingOptions,
@@ -1094,6 +1095,14 @@ function applyWindowTranslucency(win, changed = { backing: true, material: true,
     }
   } catch (error) {
     rememberLog(`[translucency] apply failed: ${error.message}`)
+  }
+}
+
+function reassertChatWindowTranslucencyForDpi(win) {
+  const changed = translucencyReassertForDpiChange(translucencyState)
+
+  if (changed) {
+    applyWindowTranslucency(win, changed)
   }
 }
 
@@ -13488,7 +13497,7 @@ function spawnSecondaryWindow({
   installTranslucencyReassertOnWindowEvents(
     win,
     screen,
-    () => applyWindowTranslucency(win, { backing: true, material: true, opacity: false }),
+    () => reassertChatWindowTranslucencyForDpi(win),
     translucencyScaleFactors
   )
 
@@ -13580,7 +13589,7 @@ function spawnBrowserWindow(tabId) {
   installTranslucencyReassertOnWindowEvents(
     win,
     screen,
-    () => applyWindowTranslucency(win, { backing: true, material: true, opacity: false }),
+    () => reassertChatWindowTranslucencyForDpi(win),
     translucencyScaleFactors
   )
 
@@ -13681,7 +13690,7 @@ function createInstanceWindow() {
   installTranslucencyReassertOnWindowEvents(
     win,
     screen,
-    () => applyWindowTranslucency(win, { backing: true, material: true, opacity: false }),
+    () => reassertChatWindowTranslucencyForDpi(win),
     translucencyScaleFactors
   )
 
@@ -14650,7 +14659,7 @@ function createWindow() {
   installTranslucencyReassertOnWindowEvents(
     createdMainWindow,
     screen,
-    () => applyWindowTranslucency(createdMainWindow, { backing: true, material: true, opacity: false }),
+    () => reassertChatWindowTranslucencyForDpi(createdMainWindow),
     translucencyScaleFactors
   )
 
@@ -18180,7 +18189,7 @@ app.whenReady().then(() => {
   installTranslucencyReassertOnDisplayMetrics(screen, () => {
     for (const win of BrowserWindow.getAllWindows()) {
       if (translucencyBackedWindows.has(win)) {
-        applyWindowTranslucency(win, { backing: true, material: true, opacity: false })
+        reassertChatWindowTranslucencyForDpi(win)
       }
     }
   })

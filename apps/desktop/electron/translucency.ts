@@ -34,6 +34,19 @@ export function scaleFactorRequiresTranslucencyReassert(previous: number | null,
   return typeof next === 'number' && Number.isFinite(next) && next > 0 && next !== previous
 }
 
+/**
+ * Mixed-DPI DWM recovery writes. Electron 40.10.2's SetBackgroundMaterial('none')
+ * paints white, so Glass-off / Clear must not enter this path. Opacity stays
+ * out: a setOpacity write would layer the window and kill acrylic.
+ */
+export function translucencyReassertForDpiChange(state: TranslucencyState): {
+  backing: true
+  material: true
+  opacity: false
+} | null {
+  return glassActive(state) ? { backing: true, material: true, opacity: false } : null
+}
+
 export function installTranslucencyReassertOnWindowEvents(
   win: TranslucencyReassertWindow,
   displayScreen: TranslucencyReassertScreen,
@@ -85,6 +98,10 @@ export function installTranslucencyReassertOnWindowEvents(
       }
     }, TRANSLUCENCY_REASSERT_SETTLE_DELAY_MS)
   })
+  // Electron 40.10.2 emits `moved` only after a manual drag finishes. `move`
+  // fires while the window crosses displays; the scale-factor gate still
+  // limits the native write to once at the transition.
+  win.on('move', reassertForScaleFactorChange)
   win.on('moved', reassertForScaleFactorChange)
   win.on('resized', reassertForScaleFactorChange)
 }
