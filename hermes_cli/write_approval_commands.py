@@ -9,9 +9,26 @@ from typing import List, Optional
 from tools import write_approval as wa
 
 
+_BG_POLICY_OFF = (
+    "Unattended background review may still stage replace or remove "
+    "(including an entire batch containing either) for /memory pending; "
+    "additions may apply automatically. This unattended-only restriction "
+    "does not apply to attended /refine — the general approval setting "
+    "remains authoritative for attended operations."
+)
+_BG_POLICY_ON = (
+    "The general approval gate already requires approval for all memory writes, "
+    "including background review. Unattended background replace or remove "
+    "remain staged for /memory pending."
+)
+
+
 def _fmt_state(subsystem: str) -> str:
     on = wa.write_approval_enabled(subsystem)
-    return f"{subsystem}.write_approval = {'on' if on else 'off'}"
+    line = f"{subsystem}.write_approval = {'on' if on else 'off'}"
+    if subsystem != wa.MEMORY:
+        return line
+    return f"{line}\n{(_BG_POLICY_ON if on else _BG_POLICY_OFF)}"
 
 
 def _fmt_pending_list(subsystem: str) -> str:
