@@ -286,6 +286,40 @@ def _announce_session_reclaimed(session: dict, end_reason: str) -> None:
         logger.debug("session.reclaimed broadcast failed", exc_info=True)
 
 
+def _announce_cancelled_gateway_approvals(
+    session: dict, reason: str, *, session_id: str = "",
+) -> None:
+    """Tell connected clients pending gateway approvals are being dropped (interrupt/reap/teardown).
+
+    Broadcast, not session-targeted: orphan-reap interrupt runs on timer threads with no live
+    transport / contextvar, so ``_emit`` would miss detached clients (same as session.reclaimed).
+    Fail-open: missing key, empty queue, and broadcast errors never raise or block the caller.
+    """
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return
+    try:
+        from tools.approval import list_gateway_approvals
+        pending = list_gateway_approvals(session_key)
+    except Exception:
+        logger.debug("list_gateway_approvals failed", exc_info=True)
+        return
+    if not pending:
+        return
+    request_ids = [str(item.get("request_id") or "") for item in pending]
+    request_ids = [rid for rid in request_ids if rid]
+    try:
+        _broadcast_global_event("approval.cancelled", {
+            "session_id": str(session_id or session.get("_sid") or ""),
+            "stored_session_id": session_key,
+            "reason": reason,
+            "cancelled_count": len(pending),
+            "request_ids": request_ids,
+        })
+    except Exception:
+        logger.debug("approval.cancelled broadcast failed", exc_info=True)
+
+
 def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
     """Fully tear down a session: finalize, unregister notifier, close agent (``session.close`` + WS reaper). The
     slash-worker is closed in ``_finalize_session`` (the single chokepoint), NOT here. Idempotent via ``_finalized``."""
@@ -293,6 +327,9 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
         return
     _finalize_session(session, end_reason=end_reason)
     _announce_session_reclaimed(session, end_reason)
+    with contextlib.suppress(Exception):
+        # Same user-visible hole as interrupt deny-resolve: pending prompt vanishes with no notice.
+        _announce_cancelled_gateway_approvals(session, end_reason)
     with contextlib.suppress(Exception):
         from tools.approval import unregister_gateway_notify
         if key := session.get("session_key"):
@@ -401,6 +438,10 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
                     session["running"] = False
                     _clear_inflight_turn(session)
     _clear_pending(sid)
+    with contextlib.suppress(Exception):
+        # Missing/empty session_key: helper no-ops. Broadcast failure must not skip the deny-resolve.
+        reason = "ws_orphan_reap" if str(request_id or "").startswith("client-gone-") else "interrupt"
+        _announce_cancelled_gateway_approvals(session, reason, session_id=sid)
     with contextlib.suppress(Exception):
         from tools.approval import resolve_gateway_approval
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
