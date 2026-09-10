@@ -837,7 +837,9 @@ def _run_approval_gate(
         # Every unattended context resolves instantly — never a pending approval nobody can answer.
         deny_messages = {
             "single_query": single_query_deny_message, "cron": cron_deny_message,
-            "unattended": unattended_deny_message, "kanban": "",
+            "unattended": unattended_deny_message,
+            # No kanban_deny_message kwarg; empty falls through to _KANBAN_CTX.block_message.
+            "kanban": "",
         }
         for ctx in _unattended_contexts():
             if ctx.mode() == "deny":
