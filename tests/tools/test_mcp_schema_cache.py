@@ -31,6 +31,19 @@ class TestConfigFingerprint:
             {**base, "timeout": 5, "enabled": True, "lazy": True}
         )
 
+    def test_changes_when_allowed_tools_changes(self):
+        """Top-level allowed_tools is part of the filter; cache must not reuse a pre-filter manifest."""
+        base = {"command": "npx", "args": [], "url": "https://mcp.example.com"}
+        with_safe = {**base, "allowed_tools": ["safe_tool"]}
+        with_other = {**base, "allowed_tools": ["run"]}
+        with_empty = {**base, "allowed_tools": []}
+        assert msc.config_fingerprint(base) != msc.config_fingerprint(with_safe)
+        assert msc.config_fingerprint(with_safe) != msc.config_fingerprint(with_other)
+        assert msc.config_fingerprint(base) != msc.config_fingerprint(with_empty)
+        assert msc.config_fingerprint(with_safe) == msc.config_fingerprint(
+            {**base, "allowed_tools": ["safe_tool"]}
+        )
+
 
 class TestCacheRoundTrip:
     def _isolate(self, monkeypatch, tmp_path):
