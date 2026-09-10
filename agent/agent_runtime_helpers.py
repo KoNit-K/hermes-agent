@@ -519,12 +519,65 @@ def _prune_unanswered_tool_calls(messages: List[Dict]) -> Tuple[List[Dict], int]
     return pruned, repairs
 
 
+_DEFAULT_RETRY_PERSIST_MAX_AGE_SECONDS = 3600
+_STALE_USER_QUOTE_MAX_CHARS = 200
+
+
+def _parse_unix_timestamp(value: Any) -> Optional[float]:
+    """Accept unix float / int / numeric string. Invalid or missing → None (fail-open)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        return None if ts != ts else ts
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            ts = float(text)
+        except ValueError:
+            return None
+        return None if ts != ts else ts
+    return None
+
+
+def _retry_persist_max_age_seconds() -> float:
+    """``agent.retry_persist_max_age_seconds``, else 3600. Unset/invalid fail-open to 3600."""
+    with contextlib.suppress(Exception):
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly().get("agent", {}) or {}).get("retry_persist_max_age_seconds")
+        if raw is not None and not isinstance(raw, bool):
+            age = float(raw)
+            if age == age and age >= 0:
+                return age
+    return _DEFAULT_RETRY_PERSIST_MAX_AGE_SECONDS
+
+
+def _stale_unanswered_user_note(content: str) -> str:
+    """System note for a persisted user turn that is too old to merge as live text."""
+    quote = " ".join((content or "").split())
+    if len(quote) > _STALE_USER_QUOTE_MAX_CHARS:
+        quote = quote[:_STALE_USER_QUOTE_MAX_CHARS].rstrip() + "…"
+    return (
+        "Earlier user message was sent earlier, was never answered, and was NOT processed. "
+        f"Quoted excerpt: {quote}"
+    )
+
+
 def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
-    """Pass 3: merge consecutive plain-text user messages (no user input lost)."""
+    """Pass 3: merge consecutive plain-text user messages (no user input lost).
+
+    Age-gate (#107070): when both unix timestamps are present and the gap exceeds
+    ``agent.retry_persist_max_age_seconds`` (default 3600), do not newline-join the
+    stale turn into the live user prompt. Convert the stale row to a system note
+    instead. Missing/unparseable timestamps fail-open to the existing #7100 merge.
+    """
     from agent.context_compressor import split_user_originated_turn
 
     repairs = 0
     merged: List[Dict] = []
+    max_age = _retry_persist_max_age_seconds()
     for msg in messages:
         prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
         if (
@@ -540,6 +593,15 @@ def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
             and isinstance(prev.get("content", ""), str) and isinstance(msg.get("content", ""), str)
         ):
             prev_content, new_content = prev.get("content", ""), msg.get("content", "")
+            ts_prev = _parse_unix_timestamp(prev.get("timestamp"))
+            ts_msg = _parse_unix_timestamp(msg.get("timestamp"))
+            if ts_prev is not None and ts_msg is not None and (ts_msg - ts_prev) > max_age:
+                prev["role"] = "system"
+                prev["content"] = _stale_unanswered_user_note(prev_content)
+                drop_stale_api_content(prev)
+                repairs += 1
+                merged.append(msg)
+                continue
             prev["content"] = (
                 (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
             )

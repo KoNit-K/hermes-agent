@@ -1494,3 +1494,91 @@ def test_sanitize_drops_bridged_result_whose_call_frame_was_pruned():
     ]
     out = sanitize_api_messages(list(messages))
     assert [m.get("role") for m in out] == ["user"]
+
+
+# ── stale retry-persist age gate (#107070) ─────────────────────────────────
+
+def test_stale_unanswered_user_not_merged_into_live_turn():
+    import time
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    old = time.time() - 3 * 86400
+    now = time.time()
+    messages = [
+        {"role": "user", "content": "Change password for user@example.com to X", "timestamp": old},
+        {"role": "user", "content": "do you have access to sharepoint?", "timestamp": now},
+    ]
+    repair_message_sequence(None, messages)
+    live = [m for m in messages if m.get("role") == "user"]
+    assert len(live) == 1
+    assert live[0]["content"] == "do you have access to sharepoint?"
+    assert "Change password" not in live[0]["content"]
+    note = " ".join(m.get("content", "") for m in messages if m.get("role") == "system")
+    assert "not processed" in note.lower() or "never answered" in note.lower()
+
+
+def test_within_ttl_consecutive_users_still_merge():
+    import time
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    t0 = time.time() - 60
+    t1 = time.time()
+    messages = [
+        {"role": "user", "content": "first", "timestamp": t0},
+        {"role": "user", "content": "second", "timestamp": t1},
+    ]
+    repair_message_sequence(None, messages)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "first\n\nsecond"
+
+
+def test_missing_timestamps_fail_open_merge():
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]
+    repair_message_sequence(None, messages)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "first\n\nsecond"
+
+
+def test_one_missing_timestamp_fail_open_merge():
+    import time
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    messages = [
+        {"role": "user", "content": "first", "timestamp": time.time() - 3 * 86400},
+        {"role": "user", "content": "second"},
+    ]
+    repair_message_sequence(None, messages)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "first\n\nsecond"
+
+
+def test_unparseable_timestamps_fail_open_merge():
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    messages = [
+        {"role": "user", "content": "first", "timestamp": "yesterday"},
+        {"role": "user", "content": "second", "timestamp": "not-a-time"},
+    ]
+    repair_message_sequence(None, messages)
+    assert len(messages) == 1
+    assert messages[0]["content"] == "first\n\nsecond"
+
+
+def test_numeric_string_timestamps_age_gate():
+    import time
+    from agent.agent_runtime_helpers import repair_message_sequence
+
+    messages = [
+        {"role": "user", "content": "stale request", "timestamp": str(time.time() - 3 * 86400)},
+        {"role": "user", "content": "live question", "timestamp": str(time.time())},
+    ]
+    repair_message_sequence(None, messages)
+    live = [m for m in messages if m.get("role") == "user"]
+    assert len(live) == 1
+    assert live[0]["content"] == "live question"
+    assert "stale request" not in live[0]["content"]

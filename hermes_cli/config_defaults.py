@@ -216,6 +216,12 @@ DEFAULT_CONFIG = {
         # only when the last persisted transcript row is younger than this, so stale markers don't
         # revive an unrelated old task. Covers gateway_timeout (1800) plus slack. 0 = always inject.
         "gateway_auto_continue_freshness": 3600,
+        # Consecutive unanswered user turns older than this (seconds) are not newline-joined
+        # into the live prompt by repair_message_sequence. The stale row becomes a system note
+        # ("sent earlier / never answered / NOT processed") so a days-old retry-persist
+        # (#7100) cannot be executed as part of a new inbound message. Missing timestamps
+        # fail-open to the existing merge. See #107070.
+        "retry_persist_max_age_seconds": 3600,
         # Max seconds the gateway waits for boot auto-resume turns before releasing the
         # startup-restore inbound gate (all inbound is QUEUED while shut, so one long resumed turn
         # would leave every channel unanswered). On timeout the gate opens and the resume keeps
