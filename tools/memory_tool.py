@@ -126,6 +126,8 @@ def _validate_single_op(store, action, target, content, old_text) -> Optional[st
     return None
 
 
+# Source of truth for which unattended background-review writes are staged
+# rather than applied. `/memory` status copy joins this with " or ".
 _BG_DELETE_ACTIONS = ("replace", "remove")
 
 

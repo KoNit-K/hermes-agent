@@ -8,19 +8,33 @@ from typing import List, Optional
 
 from tools import write_approval as wa
 
+# Keep this copy aligned with `_background_delete_gate` (action set =
+# `_BG_DELETE_ACTIONS`; unattended-only via `is_unattended_review`, so
+# attended `/refine` is exempt). Update in tandem if that gate's
+# add-vs-stage split or attended carve-out changes.
 
-_BG_POLICY_OFF = (
-    "Unattended background review may still stage replace or remove "
-    "(including an entire batch containing either) for /memory pending; "
-    "additions may apply automatically. This unattended-only restriction "
-    "does not apply to attended /refine — the general approval setting "
-    "remains authoritative for attended operations."
-)
-_BG_POLICY_ON = (
-    "The general approval gate already requires approval for all memory writes, "
-    "including background review. Unattended background replace or remove "
-    "remain staged for /memory pending."
-)
+
+def _bg_restricted_phrase() -> str:
+    """User-facing 'replace or remove' from the gate's action tuple."""
+    from tools.memory_tool import _BG_DELETE_ACTIONS
+    return " or ".join(_BG_DELETE_ACTIONS)
+
+
+def _bg_policy_text(approval_on: bool) -> str:
+    ops = _bg_restricted_phrase()
+    if approval_on:
+        return (
+            "The general approval gate already requires approval for all memory writes, "
+            "including background review. Unattended background "
+            f"{ops} remain staged for /memory pending."
+        )
+    return (
+        f"Unattended background review may still stage {ops} "
+        "(including an entire batch containing either) for /memory pending; "
+        "additions may apply automatically. This unattended-only restriction "
+        "does not apply to attended /refine — the general approval setting "
+        "remains authoritative for attended operations."
+    )
 
 
 def _fmt_state(subsystem: str) -> str:
@@ -28,7 +42,7 @@ def _fmt_state(subsystem: str) -> str:
     line = f"{subsystem}.write_approval = {'on' if on else 'off'}"
     if subsystem != wa.MEMORY:
         return line
-    return f"{line}\n{(_BG_POLICY_ON if on else _BG_POLICY_OFF)}"
+    return f"{line}\n{_bg_policy_text(on)}"
 
 
 def _fmt_pending_list(subsystem: str) -> str:
