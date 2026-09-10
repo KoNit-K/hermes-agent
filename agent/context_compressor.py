@@ -4086,9 +4086,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         onto the handoff carrier instead — after ``_SUMMARY_END_MARKER``, which
         is the boundary the prefix's rule is written against.
 
-        After a successful restatement, drop the pre-handoff protected-head
-        copy of that same turn so the conversation keeps exactly one full
-        task text — the actionable one after the marker.
+        After a successful restatement, hollow out the pre-handoff
+        protected-head copy of that same turn so the conversation keeps
+        exactly one full task text — the actionable one after the marker —
+        while the row itself stays for template-visible alternation.
         """
         if inflight is None or not compressed:
             return compressed
@@ -4182,16 +4183,21 @@ Write only the summary body. Do not include any preamble or prefix."""
         task_text: str,
         carrier_idx: int,
     ) -> None:
-        """Remove the pre-handoff full copy once the task is restated after it.
+        """Hollow the pre-handoff in-flight copy once the task is restated.
 
         Called only after ``_reappend_inflight_user_task`` successfully wrote
         the unfinished request past ``_SUMMARY_END_MARKER``. Fail-open early
         returns never reach here, so ``protect_first_n == 0``, completed
         tasks, and already-actionable carriers keep their existing layout.
+
+        Keep the selected row (Mistral-visible ``user`` before the assistant
+        / tool tail) and displace only its redundant payload. Only the last
+        pre-carrier match is the active in-flight copy — earlier equal-text
+        completed turns stay intact.
         """
         if not task_text or carrier_idx <= 0:
             return
-        drop: list[int] = []
+        target_idx = -1
         for idx in range(carrier_idx):
             msg = compressed[idx]
             if not isinstance(msg, dict) or msg.get("role") != "user":
@@ -4204,9 +4210,12 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # not a prior-cycle header + body.
                 head_text = head_text.rsplit(_INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
             if head_text == task_text:
-                drop.append(idx)
-        for idx in reversed(drop):
-            del compressed[idx]
+                target_idx = idx
+        if target_idx < 0:
+            return
+        msg = compressed[target_idx]
+        msg["content"] = ""
+        drop_stale_api_content(msg)
 
     def _ensure_last_n_user_messages_in_tail(
         self, messages: List[Dict[str, Any]], cut_idx: int, head_end: int, n: int,
