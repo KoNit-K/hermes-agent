@@ -1983,6 +1983,41 @@ class TestGitHubSourcePinnedRawBlobFetch:
         # current main: partial bundle with only SKILL.md; after fix: None
         assert bundle is None
 
+    def test_pinned_raw_retries_transient_http_error(self, monkeypatch):
+        """Pinned raw GET must reuse _github_get's 3x backoff, not fail on first blip."""
+        src = GitHubSource(auth=MagicMock(spec=GitHubAuth))
+        src.auth.get_headers.return_value = {}
+        seen = []
+
+        def flaky_get(url, **kw):
+            seen.append(url)
+            if len(seen) < 3:
+                raise httpx.ConnectError("transient")
+            return MagicMock(status_code=200, content=b"bytes")
+
+        monkeypatch.setattr("tools.skills_hub_github.httpx.get", flaky_get)
+        monkeypatch.setattr("tools.skills_hub_github.time.sleep", lambda *_a, **_k: None)
+        assert src._fetch_file_bytes("owner/repo", "archify/bin/preview.mjs", ref="deadbeef") == b"bytes"
+        assert len(seen) == 3
+        assert all("raw.githubusercontent.com/owner/repo/deadbeef/" in u for u in seen)
+
+    def test_tree_fetch_progress_reaches_stderr(self, monkeypatch, capsys):
+        """Progress must hit stderr during install — logger.info is file-only without -v."""
+        src = GitHubSource(auth=MagicMock(spec=GitHubAuth))
+        md = "---\nname: demo\ndescription: d\n---\n\nSee `assets/a.html`.\n"
+        tree = [
+            {"path": "archify/SKILL.md", "type": "blob", "mode": "100644"},
+            {"path": "archify/assets/a.html", "type": "blob", "mode": "100644"},
+        ]
+        monkeypatch.setattr("tools.skills_hub_github._stderr_is_tty", lambda: False)
+        with patch.object(src, "_fetch_file_content", return_value=md), \
+             patch.object(src, "_get_repo_tree", return_value=("main", tree)), \
+             patch.object(src, "_fetch_file_bytes", return_value=b"<html>"):
+            bundle = src.fetch("owner/repo/archify")
+        assert bundle is not None
+        err = capsys.readouterr().err
+        assert "fetched 1/1" in err
+
     def test_dangling_referenced_path_not_in_tree_still_returns_bundle(self):
         """CONTROL: SKILL.md link absent from the tree is still warn-and-install."""
         md = (
