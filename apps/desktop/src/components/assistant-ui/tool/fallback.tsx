@@ -69,6 +69,7 @@ import {
   toolCopyPayload,
   type ToolPart,
   toolPartDisclosureId,
+  toolPresentation,
   type ToolStatus,
   type ToolTitleAction
 } from './fallback-model'
@@ -359,11 +360,11 @@ function ToolEntry({ part }: ToolEntryProps) {
   // below and re-running buildToolView (full JSON.stringify of result) on every
   // stream delta — the freeze on big `/learn` runs. Re-derive a stable part from
   // the referentially-stable args/result so the memos hold across deltas.
-  const { args, completedAt, isError, result, timestamp, toolCallId, toolName } = part
+  const { args, completedAt, isError, presentation, result, timestamp, toolCallId, toolName } = part
 
   const stablePart = useMemo<ToolPart>(
-    () => ({ args, completedAt, isError, result, timestamp, toolCallId, toolName, type: 'tool-call' }),
-    [args, completedAt, isError, result, timestamp, toolCallId, toolName]
+    () => ({ args, completedAt, isError, presentation, result, timestamp, toolCallId, toolName, type: 'tool-call' }),
+    [args, completedAt, isError, presentation, result, timestamp, toolCallId, toolName]
   )
 
   const disclosureId = toolEntryDisclosureId(messageId, stablePart)
@@ -372,7 +373,7 @@ function ToolEntry({ part }: ToolEntryProps) {
   // Subscribe to this tool's diff only, so a live patch for one tool doesn't
   // re-render every mounted tool row (the factory caches a per-id atom).
   const sideDiff = useStore($toolInlineDiff(toolCallId ?? ''))
-  const inlineDiff = stripInlineDiffChrome(sideDiff) || inlineDiffFromResult(result)
+  const inlineDiff = stripInlineDiffChrome(sideDiff) || inlineDiffFromResult(toolPresentation(stablePart))
   const isFileEdit = isFileEditTool(toolName)
   const defaultOpen = Boolean(inlineDiff)
   const open = useDisclosureOpen(disclosureId, defaultOpen)
@@ -384,14 +385,7 @@ function ToolEntry({ part }: ToolEntryProps) {
   const enterRef = useEnterAnimation(messageRunning && !embedded, `tool-entry:${disclosureId}`)
   const elapsed = useElapsedSeconds(isPending, `tool:${disclosureId}`)
 
-  // Stale parts (no result, but message stopped running) get a synthetic empty
-  // result so buildToolView treats them as completed-no-output. Keyed on
-  // stablePart so it recomputes only when this tool's data changes.
-  const view = useMemo(() => {
-    const p = !isPending && result === undefined ? { ...stablePart, result: {} } : stablePart
-
-    return buildToolView(p, inlineDiff)
-  }, [inlineDiff, isPending, result, stablePart])
+  const view = useMemo(() => buildToolView(stablePart, inlineDiff), [inlineDiff, stablePart])
 
   // Surface a previewable artifact (HTML file / localhost URL) as a compact link
   // in the composer status stack rather than a bulky inline card. Uses the same
@@ -1027,7 +1021,11 @@ export const ToolGroupSlot: FC<PropsWithChildren<{ endIndex: number; startIndex:
  * its return type and the underlying ToolEntry stays mounted across
  * group-shape changes.
  */
-type TimelineToolCallProps = ToolCallMessagePartProps & { completedAt?: number; timestamp?: number }
+type TimelineToolCallProps = ToolCallMessagePartProps & {
+  completedAt?: number
+  presentation?: Record<string, unknown>
+  timestamp?: number
+}
 
 export const ToolFallback = ({
   toolCallId,
@@ -1035,10 +1033,21 @@ export const ToolFallback = ({
   args,
   completedAt,
   isError,
+  presentation,
   result,
   timestamp
 }: TimelineToolCallProps) => {
-  const part: ToolPart = { args, completedAt, isError, result, timestamp, toolCallId, toolName, type: 'tool-call' }
+  const part: ToolPart = {
+    args,
+    completedAt,
+    isError,
+    presentation,
+    result,
+    timestamp,
+    toolCallId,
+    toolName,
+    type: 'tool-call'
+  }
 
   return <ToolEntry part={part} />
 }
