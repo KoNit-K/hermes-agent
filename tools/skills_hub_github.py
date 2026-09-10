@@ -3,6 +3,7 @@
 import json
 import logging
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -56,6 +57,36 @@ def _is_rate_limit_response(resp: httpx.Response) -> bool:
     return resp.status_code == 429 or (
         resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining", "") == "0"
     )
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except Exception:
+        return False
+
+
+def _report_tree_fetch_progress(fetched: int, n: int) -> None:
+    """Show fetch progress on the CLI (stderr). ``logger.info`` is file-only
+    unless ``--verbose``, so a 199-file skill would otherwise look hung after
+    ``Fetching:``. TTY: one rewriting line. Non-TTY: every 25 files + last."""
+    if n <= 0:
+        return
+    if fetched == 1 or fetched == n or fetched % 25 == 0:
+        logger.info("fetched %d/%d", fetched, n)
+    if _stderr_is_tty():
+        print(f"\r  fetched {fetched}/{n}", end="", file=sys.stderr, flush=True)
+        if fetched >= n:
+            print(file=sys.stderr)
+        return
+    if fetched == n or fetched % 25 == 0:
+        print(f"  fetched {fetched}/{n}", file=sys.stderr, flush=True)
+
+
+def _finish_tree_fetch_progress() -> None:
+    """Newline after a mid-loop abort so the next warning is not glued to the progress line."""
+    if _stderr_is_tty():
+        print(file=sys.stderr)
 
 
 class GitHubAuth:
@@ -292,11 +323,12 @@ class GitHubSource(SkillSource):
                 return False
             content = self._fetch_file_bytes(repo, item_path, ref=ref)
             if content is None:
+                _finish_tree_fetch_progress()
                 logger.warning("Failed to fetch skill tree member; aborting bundle: %s", item_path)
                 return False
             files[rel_path] = content
             fetched += 1
-            logger.info("fetched %d/%d", fetched, n)
+            _report_tree_fetch_progress(fetched, n)
         for rel_path in sorted(referenced):
             # A SKILL.md-linked support path that isn't in the tree is a dangling link — a repo-only dev
             # tool, prose over-match, or a file the author forgot to push. Warn and install without it
@@ -463,22 +495,19 @@ class GitHubSource(SkillSource):
     def _fetch_file_bytes(self, repo: str, path: str, ref: Optional[str] = None) -> Optional[bytes]:
         """Fetch exact file bytes. ``ref`` pins to a tree SHA (see ``fetch`` on
         the TOCTOU) via raw.githubusercontent.com so blob downloads do not burn
-        Contents-API quota. None keeps the legacy unpinned Contents-API behavior."""
+        Contents-API quota. None keeps the legacy unpinned Contents-API behavior.
+        Pinned raw GETs reuse ``_github_get`` so a transient CDN blip retries
+        with the same 3x backoff as the Contents path instead of fail-closed
+        on the first ``httpx.HTTPError``."""
         quoted = quote(path, safe="/")
         if ref:
             url = f"https://raw.githubusercontent.com/{repo}/{ref}/{quoted}"
-            try:
-                resp = httpx.get(
-                    url, headers=self.auth.get_headers(), timeout=15.0, follow_redirects=True,
-                )
-            except httpx.HTTPError as e:
-                logger.debug("Raw GitHub GET %s failed: %s", url, e)
-                return None
-            return resp.content if resp.status_code == 200 else None
-        resp = self._github_get(
-            f"{_API}/{repo}/contents/{quoted}",
-            headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
-        )
+            resp = self._github_get(url)
+        else:
+            resp = self._github_get(
+                f"{_API}/{repo}/contents/{quoted}",
+                headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
+            )
         return resp.content if resp is not None and resp.status_code == 200 else None
 
     def _get_skillsh_groupings(self, repo: str) -> Optional[Dict[str, str]]:
