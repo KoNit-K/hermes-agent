@@ -70,3 +70,34 @@ def test_task_copy_controls(compress_task, protect_first_n, completed, repeat):
     task, messages = compress_task(protect_first_n=protect_first_n, completed=completed)
     copies = sum(message.get("content", "").count(task) for message in messages)
     assert copies == 1, f"repeat={repeat}: control full task copies={copies}"
+
+
+def test_elide_keeps_user_row_and_older_equal_text_turn():
+    """Review #106867: displace the in-flight payload only.
+
+    Deleting the protected-head user row made Mistral-visible roles start on
+    assistant. Matching every equal-text user row also dropped a completed
+    earlier turn that happened to repeat the active request.
+    """
+    from agent.context_compressor import ContextCompressor, _SUMMARY_END_MARKER
+
+    compressor = ContextCompressor("synthetic-model")
+    task = "repeat this request"
+    compressed = [
+        {"role": "user", "content": task},
+        {"role": "assistant", "content": "Finished the first pass."},
+        {"role": "user", "content": task},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "accepted"},
+        {"role": "assistant", "content": f"summary{_SUMMARY_END_MARKER}"},
+        {"role": "user", "content": task},
+    ]
+
+    compressor._elide_protected_head_inflight_copy(compressed, task, 5)
+
+    assert compressed[0]["content"] == task, "completed equal-text turn must stay"
+    assert compressed[0]["role"] == "user"
+    assert compressed[2]["role"] == "user", "in-flight row must remain for alternation"
+    assert compressed[2]["content"] == "", "only the active pre-handoff copy is hollowed"
+    assert compressed[6]["content"] == task, "post-handoff restatement stays intact"
+    assert sum(1 for msg in compressed if msg.get("content") == task) == 2
