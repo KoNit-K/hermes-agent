@@ -885,6 +885,7 @@ export interface DesktopConnectionTestResult {
     | 'unknown'
     | null
   error?: string | null
+  detail?: string | null
   host?: string
   remoteHermesPath?: string
   remoteHermesVersion?: string
