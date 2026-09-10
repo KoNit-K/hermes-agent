@@ -34,6 +34,14 @@ def config_fingerprint(config: dict) -> str:
         "transport": config.get("transport"),
         "tools_include": sorted(tools_filter.get("include") or []),
         "tools_exclude": sorted(tools_filter.get("exclude") or [])}
+    # Include top-level allowed_tools when it is a real whitelist so a cache entry
+    # written before the filter cannot be reused after the list changes (#106983).
+    # Absent / invalid types are omitted (same hash as pre-key configs — fail-open).
+    allowed = config.get("allowed_tools")
+    if isinstance(allowed, str):
+        payload["allowed_tools"] = [allowed]
+    elif isinstance(allowed, (list, tuple, set)):
+        payload["allowed_tools"] = sorted(str(item) for item in allowed)
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 

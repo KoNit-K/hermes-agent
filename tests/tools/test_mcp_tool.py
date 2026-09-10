@@ -2613,6 +2613,35 @@ class TestMCPSelectiveToolLoading:
         )
         assert registered == []
 
+    def test_top_level_allowed_tools_whitelists_like_include(self):
+        config = {"url": "https://mcp.example.com", "allowed_tools": ["safe_tool"]}
+        registered, _ = self._run_discover(
+            "shared", ["safe_tool", "run", "exec"], config, session=SimpleNamespace())
+        assert registered == ["mcp__shared__safe_tool"]
+
+    def test_allowed_tools_empty_registers_nothing(self):
+        config = {"url": "https://mcp.example.com", "allowed_tools": []}
+        registered, _ = self._run_discover(
+            "shared", ["safe_tool", "run"], config, session=SimpleNamespace())
+        assert registered == []
+
+    def test_tools_include_wins_over_allowed_tools(self):
+        config = {
+            "url": "https://mcp.example.com",
+            "allowed_tools": ["run"],
+            "tools": {"include": ["safe_tool"]},
+        }
+        registered, _ = self._run_discover(
+            "shared", ["safe_tool", "run"], config, session=SimpleNamespace())
+        assert registered == ["mcp__shared__safe_tool"]
+
+    def test_allowed_tools_invalid_type_fail_open(self):
+        """Non-collection allowed_tools is ignored; existing include/exclude/all apply."""
+        config = {"url": "https://mcp.example.com", "allowed_tools": {"safe_tool": True}}
+        registered, _ = self._run_discover(
+            "shared", ["safe_tool", "run"], config, session=SimpleNamespace())
+        assert registered == ["mcp__shared__safe_tool", "mcp__shared__run"]
+
     def test_enabled_false_skips_connection_attempt(self):
         from tools.mcp_tool_discovery import discover_mcp_tools
 
