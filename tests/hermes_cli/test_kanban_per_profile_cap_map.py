@@ -302,6 +302,12 @@ def test_pick_auto_assign_profile_unit():
         ["missing"], ["cloud"], running={}, cap_for=lambda _n: None,
         profile_usable=lambda n: n == "cloud",
     ) == "cloud"
+    # Uncapped pool member stays eligible even when its running count is high.
+    assert pick_auto_assign_profile(
+        ["uncapped"], ["cloud"], running={"uncapped": 99, "cloud": 0},
+        cap_for=lambda n: None if n == "uncapped" else 2,
+        profile_usable=lambda _n: True,
+    ) == "uncapped"
 
 
 def test_resolve_per_profile_cap_unit():

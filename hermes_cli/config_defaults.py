@@ -1737,6 +1737,9 @@ DEFAULT_CONFIG = {
         # Optional capability-aware routing for unassigned ready tasks. Unset / disabled /
         # unknown strategy keeps today's default_assignee then skipped_unassigned path.
         # strategy local-first-overflow: first unsaturated local_pool profile, else cloud_pool.
+        # A pool member with no resolved cap (no map entry and no ``default``) is
+        # unbounded and always eligible — set ``default`` or a per-profile cap on
+        # every pool name if auto-assign should stay inside those bounds.
         # Auto-run the decomposer on Triage tasks every tick. False = manual via `hermes kanban
         # decompose <id>` or the dashboard's Decompose button.
         "auto_decompose": True,
