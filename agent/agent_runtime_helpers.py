@@ -519,65 +519,40 @@ def _prune_unanswered_tool_calls(messages: List[Dict]) -> Tuple[List[Dict], int]
     return pruned, repairs
 
 
-_DEFAULT_RETRY_PERSIST_MAX_AGE_SECONDS = 3600
 _STALE_USER_QUOTE_MAX_CHARS = 200
 
 
-def _parse_unix_timestamp(value: Any) -> Optional[float]:
-    """Accept unix float / int / numeric string. Invalid or missing → None (fail-open)."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        ts = float(value)
-        return None if ts != ts else ts
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            ts = float(text)
-        except ValueError:
-            return None
-        return None if ts != ts else ts
-    return None
+def _unanswered_user_boundary(content: str) -> Dict:
+    """Assistant closer for a persisted user turn that must not stay current.
 
-
-def _retry_persist_max_age_seconds() -> float:
-    """``agent.retry_persist_max_age_seconds``, else 3600. Unset/invalid fail-open to 3600."""
-    with contextlib.suppress(Exception):
-        from hermes_cli.config import load_config_readonly
-        raw = (load_config_readonly().get("agent", {}) or {}).get("retry_persist_max_age_seconds")
-        if raw is not None and not isinstance(raw, bool):
-            age = float(raw)
-            if age == age and age >= 0:
-                return age
-    return _DEFAULT_RETRY_PERSIST_MAX_AGE_SECONDS
-
-
-def _stale_unanswered_user_note(content: str) -> str:
-    """System note for a persisted user turn that is too old to merge as live text."""
+    Stays out of ``role=system`` so Anthropic conversion cannot replace the
+    trusted Hermes prompt. Quotes are history context, not a live instruction.
+    """
     quote = " ".join((content or "").split())
     if len(quote) > _STALE_USER_QUOTE_MAX_CHARS:
         quote = quote[:_STALE_USER_QUOTE_MAX_CHARS].rstrip() + "…"
-    return (
-        "Earlier user message was sent earlier, was never answered, and was NOT processed. "
-        f"Quoted excerpt: {quote}"
-    )
+    return {
+        "role": "assistant",
+        "content": (
+            "Earlier user message was sent earlier, was never answered, and was NOT processed. "
+            f"Quoted excerpt: {quote}"
+        ),
+    }
 
 
 def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
-    """Pass 3: merge consecutive plain-text user messages (no user input lost).
+    """Pass 3: close a leftover unanswered user before the next live user turn.
 
-    Age-gate (#107070): when both unix timestamps are present and the gap exceeds
-    ``agent.retry_persist_max_age_seconds`` (default 3600), do not newline-join the
-    stale turn into the live user prompt. Convert the stale row to a system note
-    instead. Missing/unparseable timestamps fail-open to the existing #7100 merge.
+    A bare newline-join is unsafe even inside the age window: timestamps do not
+    prove retry intent, and missing/invalid stamps used to fail-open into a
+    merged live prompt (#107070 review). Insert an assistant boundary instead
+    so the earlier request is non-current, role alternation holds, and the
+    trusted system prompt is untouched.
     """
     from agent.context_compressor import split_user_originated_turn
 
     repairs = 0
     merged: List[Dict] = []
-    max_age = _retry_persist_max_age_seconds()
     for msg in messages:
         prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
         if (
@@ -589,26 +564,16 @@ def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
             # A /steer row that ended the previous run is already persisted; merging the next
             # prompt into it would rewrite it in place and re-break replay parity.
             and prev.get("display_kind") != STEER_DISPLAY_KIND
-            # Only merge plain-text content; leave multimodal (list) content alone.
+            # Only close plain-text leftovers; leave multimodal (list) content alone.
             and isinstance(prev.get("content", ""), str) and isinstance(msg.get("content", ""), str)
         ):
-            prev_content, new_content = prev.get("content", ""), msg.get("content", "")
-            ts_prev = _parse_unix_timestamp(prev.get("timestamp"))
-            ts_msg = _parse_unix_timestamp(msg.get("timestamp"))
-            if ts_prev is not None and ts_msg is not None and (ts_msg - ts_prev) > max_age:
-                prev["role"] = "system"
-                prev["content"] = _stale_unanswered_user_note(prev_content)
+            prev_text = str(prev.get("content", "") or "")
+            if not prev_text.strip():
+                merged.pop()
+            else:
+                merged.append(_unanswered_user_boundary(prev_text))
                 drop_stale_api_content(prev)
-                repairs += 1
-                merged.append(msg)
-                continue
-            prev["content"] = (
-                (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
-            )
-            # Merged content invalidates the api_content sidecar; drop it so replay cannot use stale bytes.
-            drop_stale_api_content(prev)
             repairs += 1
-            continue
         merged.append(msg)
     return merged, repairs
 
@@ -624,8 +589,9 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
     Providers require strict alternation after the system message (violations: silent empty
     responses or 400s); this is the pre-call belt for host-fed, resumed or replayed histories.
     Passes in order: merge consecutive assistant turns (BEFORE orphan detection so the merged
-    tool_call-id union is known); drop stray tool results; prune unanswered tool_calls; merge
-    consecutive user turns. A user turn directly after an assistant turn is valid and left alone.
+    tool_call-id union is known); drop stray tool results; prune unanswered tool_calls; close
+    leftover unanswered user turns with an assistant boundary. A user turn directly after an
+    assistant turn is valid and left alone.
     """
     if not messages:
         return 0
@@ -641,15 +607,24 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
 
 
 def repair_message_sequence_with_cursor(agent, messages: List[Dict]) -> int:
-    """Run :func:`repair_message_sequence` and keep ``_last_flushed_db_idx`` consistent. Repair
-    shrinks the list in place; counting identity-preserved survivors of the flushed prefix gives
-    the exact new cursor, whereas a ``min()`` clamp would skip unflushed rows (used only without a snapshot)."""
+    """Run :func:`repair_message_sequence` and keep ``_last_flushed_db_idx`` consistent.
+
+    Repair may shrink (assistant merge) or grow (unanswered-user boundary). A single
+    prefix cursor cannot skip a newly inserted row inside the flushed region: walk
+    until the first message that was not in the flushed prefix so the synthetic
+    boundary is still written once. A ``min()`` clamp is used only without a snapshot.
+    """
     flush_cursor = getattr(agent, "_last_flushed_db_idx", None)
     flushed_ids = {id(m) for m in messages[:flush_cursor]} if isinstance(flush_cursor, int) and flush_cursor > 0 else None
     repairs = repair_message_sequence(agent, messages)
     if repairs > 0 and hasattr(agent, "_last_flushed_db_idx"):
         if flushed_ids is not None:
-            agent._last_flushed_db_idx = sum(1 for m in messages if id(m) in flushed_ids)
+            idx = 0
+            for msg in messages:
+                if id(msg) not in flushed_ids:
+                    break
+                idx += 1
+            agent._last_flushed_db_idx = idx
         else:
             agent._last_flushed_db_idx = min(agent._last_flushed_db_idx, len(messages))
     return repairs

@@ -1,8 +1,9 @@
-"""``prepare_iteration`` runs the alternation repair, which merges adjacent user rows in place
-(after a compaction the role=user summary sits next to the protected first user message). The
-index recorded at turn start then points past this turn's user row; hosts that settle the
-transcript by that index (WebUI) write the current turn to the FRONT of the context. The
-iteration prep must hand back a re-anchored index and mirror it into the persist override."""
+"""``prepare_iteration`` runs the alternation repair, which may insert an assistant
+boundary between adjacent user rows (after a compaction the role=user summary sits
+next to the protected first user message). The index recorded at turn start then
+points at the wrong row; hosts that settle the transcript by that index (WebUI)
+write the current turn to the FRONT of the context. The iteration prep must hand
+back a re-anchored index and mirror it into the persist override."""
 
 
 def _agent(tmp_path, monkeypatch):
@@ -38,7 +39,7 @@ def test_prepare_iteration_reanchors_after_the_repair_merges_rows(tmp_path, monk
             user_message="NEW question", current_turn_user_idx=recorded_idx,
         )
         assert prep.action == "fallthrough"
-        assert len(prep.messages) < len(messages) + 1 and recorded_idx >= len(prep.messages)
+        assert prep.current_turn_user_idx != recorded_idx
         assert prep.messages[prep.current_turn_user_idx]["content"] == "NEW question"
         assert agent._persist_user_message_idx == prep.current_turn_user_idx
     finally:

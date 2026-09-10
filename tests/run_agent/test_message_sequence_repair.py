@@ -42,7 +42,7 @@ def test_drop_scaffolding_rewinds_orphan_tool_tail():
 
 # ── _repair_message_sequence ───────────────────────────────────────────────
 
-def test_repair_merges_consecutive_user_messages():
+def test_repair_closes_consecutive_user_messages_with_assistant_boundary():
     agent = _bare_agent()
     messages = [
         {"role": "user", "content": "first"},
@@ -52,9 +52,11 @@ def test_repair_merges_consecutive_user_messages():
     repairs = AIAgent._repair_message_sequence(agent, messages)
 
     assert repairs == 1
-    assert len(messages) == 1
-    assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == "first\n\nsecond"
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"] == "first"
+    assert messages[-1]["content"] == "second"
+    assert "first\n\nsecond" not in messages[-1]["content"]
+    assert "never answered" in messages[1]["content"].lower()
 
 
 def test_repair_preserves_user_content_when_one_side_empty():
@@ -435,30 +437,33 @@ def test_tool_executor_uses_canonical_responses_pairing_id():
 from agent.agent_runtime_helpers import repair_message_sequence_with_cursor
 
 
-def test_cursor_clamped_when_compaction_shrinks_below_cursor():
-    """Cursor past the new end of the list must come back in range so the
-    turn-end flush doesn't skip the assistant/tool chain (#44837)."""
+def test_cursor_stops_at_inserted_unanswered_user_boundary():
+    """A flushed user;user pair gains a synthetic assistant boundary. The
+    cursor must stop at that new row so it is written once (#107070)."""
     agent = _bare_agent()
-    messages = [
-        {"role": "user", "content": "first"},
-        {"role": "user", "content": "second"},
-    ]
+    first = {"role": "user", "content": "first"}
+    second = {"role": "user", "content": "second"}
+    messages = [first, second]
     agent._last_flushed_db_idx = 2  # both rows already flushed
 
     repairs = repair_message_sequence_with_cursor(agent, messages)
 
     assert repairs == 1
-    assert len(messages) == 1
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[0] is first and messages[2] is second
     assert agent._last_flushed_db_idx == 1
+    assert messages[1]["role"] == "assistant"
+    assert "never answered" in messages[1]["content"].lower()
 
 
-def test_cursor_rewinds_when_compaction_happens_before_cursor():
-    """Repair that drops/merges messages at indexes BELOW the cursor must
-    rewind it by the number removed, or unflushed rows get skipped.
-    A plain min() clamp does NOT catch this case."""
+def test_cursor_rewinds_when_repair_inserts_before_unflushed_tail():
+    """Inserting a boundary inside the flushed prefix must not skip the
+    still-unflushed assistant. A survivor-count cursor would land on the
+    second user; a leading-flushed-prefix cursor lands on the new row so
+    flush still reaches the assistant."""
     agent = _bare_agent()
     flushed_a = {"role": "user", "content": "first"}
-    flushed_b = {"role": "user", "content": "second"}  # merged into flushed_a
+    flushed_b = {"role": "user", "content": "second"}
     unflushed_assistant = {"role": "assistant", "content": "answer"}
     messages = [flushed_a, flushed_b, unflushed_assistant]
     agent._last_flushed_db_idx = 2  # the two user rows are flushed
@@ -466,11 +471,11 @@ def test_cursor_rewinds_when_compaction_happens_before_cursor():
     repairs = repair_message_sequence_with_cursor(agent, messages)
 
     assert repairs == 1
-    assert len(messages) == 2
-    # Cursor must now point at the assistant (index 1), not stay at 2 —
-    # min(2, len=2) would leave it at 2 and the flush would skip it.
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
+    assert messages[-1] is unflushed_assistant
     assert agent._last_flushed_db_idx == 1
-    assert messages[agent._last_flushed_db_idx] is unflushed_assistant
+    assert messages[agent._last_flushed_db_idx]["role"] == "assistant"
+    assert messages[agent._last_flushed_db_idx] is not unflushed_assistant
 
 
 
@@ -1206,11 +1211,12 @@ def test_repair_drops_turn_when_pruned_calls_were_only_payload():
     repairs = AIAgent._repair_message_sequence(agent, messages)
 
     assert repairs >= 2
-    assert all(m.get("role") != "assistant" for m in messages)
-    # The two user turns merge (Pass 3); nothing was lost.
+    assistants = [m for m in messages if m.get("role") == "assistant"]
+    assert assistants, "Pass 3 closes the leftover user with an assistant boundary"
+    assert all(not m.get("tool_calls") for m in assistants)
+    assert all("never answered" in str(m.get("content", "")).lower() for m in assistants)
     users = [m for m in messages if m.get("role") == "user"]
-    assert len(users) == 1
-    assert "do it" in users[0]["content"] and "redirected" in users[0]["content"]
+    assert [u["content"] for u in users] == ["do it", "redirected"]
 
 
 def test_repair_keeps_calls_answered_within_following_run():
@@ -1496,7 +1502,19 @@ def test_sanitize_drops_bridged_result_whose_call_frame_was_pruned():
     assert [m.get("role") for m in out] == ["user"]
 
 
-# ── stale retry-persist age gate (#107070) ─────────────────────────────────
+# ── unanswered leftover user (#107070) ─────────────────────────────────────
+
+def _assert_unanswered_user_closed(messages, live_text, stale_excerpt):
+    roles = [m.get("role") for m in messages]
+    assert roles == ["user", "assistant", "user"]
+    assert messages[-1]["content"] == live_text
+    assert stale_excerpt not in messages[-1]["content"]
+    assert messages[0]["role"] == "user"
+    note = messages[1]["content"]
+    assert messages[1]["role"] == "assistant"
+    assert "not processed" in note.lower() or "never answered" in note.lower()
+    assert "system" not in roles
+
 
 def test_stale_unanswered_user_not_merged_into_live_turn():
     import time
@@ -1509,15 +1527,11 @@ def test_stale_unanswered_user_not_merged_into_live_turn():
         {"role": "user", "content": "do you have access to sharepoint?", "timestamp": now},
     ]
     repair_message_sequence(None, messages)
-    live = [m for m in messages if m.get("role") == "user"]
-    assert len(live) == 1
-    assert live[0]["content"] == "do you have access to sharepoint?"
-    assert "Change password" not in live[0]["content"]
-    note = " ".join(m.get("content", "") for m in messages if m.get("role") == "system")
-    assert "not processed" in note.lower() or "never answered" in note.lower()
+    _assert_unanswered_user_closed(
+        messages, "do you have access to sharepoint?", "Change password")
 
 
-def test_within_ttl_consecutive_users_still_merge():
+def test_recent_consecutive_users_are_not_merged_as_live_text():
     import time
     from agent.agent_runtime_helpers import repair_message_sequence
 
@@ -1528,11 +1542,11 @@ def test_within_ttl_consecutive_users_still_merge():
         {"role": "user", "content": "second", "timestamp": t1},
     ]
     repair_message_sequence(None, messages)
-    assert len(messages) == 1
-    assert messages[0]["content"] == "first\n\nsecond"
+    _assert_unanswered_user_closed(messages, "second", "first\n\nsecond")
+    assert "Quoted excerpt: first" in messages[1]["content"]
 
 
-def test_missing_timestamps_fail_open_merge():
+def test_missing_timestamps_still_close_earlier_request():
     from agent.agent_runtime_helpers import repair_message_sequence
 
     messages = [
@@ -1540,11 +1554,10 @@ def test_missing_timestamps_fail_open_merge():
         {"role": "user", "content": "second"},
     ]
     repair_message_sequence(None, messages)
-    assert len(messages) == 1
-    assert messages[0]["content"] == "first\n\nsecond"
+    _assert_unanswered_user_closed(messages, "second", "first\n\nsecond")
 
 
-def test_one_missing_timestamp_fail_open_merge():
+def test_one_missing_timestamp_still_close_earlier_request():
     import time
     from agent.agent_runtime_helpers import repair_message_sequence
 
@@ -1553,11 +1566,10 @@ def test_one_missing_timestamp_fail_open_merge():
         {"role": "user", "content": "second"},
     ]
     repair_message_sequence(None, messages)
-    assert len(messages) == 1
-    assert messages[0]["content"] == "first\n\nsecond"
+    _assert_unanswered_user_closed(messages, "second", "first\n\nsecond")
 
 
-def test_unparseable_timestamps_fail_open_merge():
+def test_unparseable_timestamps_still_close_earlier_request():
     from agent.agent_runtime_helpers import repair_message_sequence
 
     messages = [
@@ -1565,11 +1577,10 @@ def test_unparseable_timestamps_fail_open_merge():
         {"role": "user", "content": "second", "timestamp": "not-a-time"},
     ]
     repair_message_sequence(None, messages)
-    assert len(messages) == 1
-    assert messages[0]["content"] == "first\n\nsecond"
+    _assert_unanswered_user_closed(messages, "second", "first\n\nsecond")
 
 
-def test_numeric_string_timestamps_age_gate():
+def test_numeric_string_timestamps_close_earlier_request():
     import time
     from agent.agent_runtime_helpers import repair_message_sequence
 
@@ -1578,7 +1589,35 @@ def test_numeric_string_timestamps_age_gate():
         {"role": "user", "content": "live question", "timestamp": str(time.time())},
     ]
     repair_message_sequence(None, messages)
-    live = [m for m in messages if m.get("role") == "user"]
-    assert len(live) == 1
-    assert live[0]["content"] == "live question"
-    assert "stale request" not in live[0]["content"]
+    _assert_unanswered_user_closed(messages, "live question", "stale request")
+
+
+def test_unanswered_user_note_does_not_replace_anthropic_system_prompt():
+    import time
+    from agent.agent_runtime_helpers import repair_message_sequence
+    from agent.anthropic_message_convert import convert_messages_to_anthropic
+
+    trusted = "You are Hermes. Follow the trusted system prompt."
+    messages = [
+        {"role": "system", "content": trusted},
+        {"role": "user", "content": "Change password for user@example.com to X",
+         "timestamp": time.time() - 3 * 86400},
+        {"role": "user", "content": "do you have access to sharepoint?",
+         "timestamp": time.time()},
+    ]
+    repair_message_sequence(None, messages)
+    system, converted = convert_messages_to_anthropic(messages)
+    system_text = system if isinstance(system, str) else str(system)
+    assert trusted in system_text
+    assert "Change password" not in system_text
+    assert "never answered" not in system_text.lower()
+    user_texts = [
+        "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in (row.get("content") or [])
+        )
+        for row in converted
+        if row.get("role") == "user"
+    ]
+    assert any("sharepoint" in text for text in user_texts)
+    assert not any("Change password" in text and "sharepoint" in text for text in user_texts)
