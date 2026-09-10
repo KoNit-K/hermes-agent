@@ -99,6 +99,18 @@ class OpenCodeGoProfile(ProviderProfile):
                 return {}, {}
             return _thinking_toggle_extras(reasoning_config, re_.KIMI_K2_EFFORTS)
         if _is_deepseek_thinking_model(model):
+            # deepseek-flash is newly matched here. Do not start emitting
+            # reasoning_effort: #106654 documents that the Go relay 400s when
+            # that field co-occurs with reasoning_content echo-back. Keep the
+            # explicit thinking-off switch; leave versioned V4 slugs on the
+            # existing toggle path until that PR lands.
+            if _flat_model_name(model) == "deepseek-flash":
+                if (
+                    isinstance(reasoning_config, dict)
+                    and reasoning_config.get("enabled") is False
+                ):
+                    return {"thinking": {"type": "disabled"}}, {}
+                return {}, {}
             return _thinking_toggle_extras(reasoning_config, re_.DEEPSEEK_V4_EFFORTS, re_.DEEPSEEK_V4_OVERRIDES)
         return {}, {}
 

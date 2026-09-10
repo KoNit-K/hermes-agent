@@ -182,21 +182,30 @@ class TestOpenCodeGoDeepSeekThinking:
             assert extra_body == {}
             assert top_level == {"reasoning_effort": "max"}
 
-    def test_deepseek_flash_high_emits_reasoning_effort(self, opencode_go_profile):
+    def test_deepseek_flash_does_not_emit_reasoning_effort(self, opencode_go_profile):
+        """#106654: Go relay 400s when reasoning_effort + reasoning_content echo."""
         extra_body, top_level = opencode_go_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "high"},
             model="deepseek-flash",
         )
         assert extra_body == {}
-        assert top_level == {"reasoning_effort": "high"}
+        assert top_level == {}
 
-    def test_prefixed_deepseek_flash_high_emits_reasoning_effort(self, opencode_go_profile):
+    def test_prefixed_deepseek_flash_does_not_emit_reasoning_effort(self, opencode_go_profile):
         extra_body, top_level = opencode_go_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "high"},
             model="deepseek/deepseek-flash",
         )
         assert extra_body == {}
-        assert top_level == {"reasoning_effort": "high"}
+        assert top_level == {}
+
+    def test_deepseek_flash_disabled_emits_thinking_disabled(self, opencode_go_profile):
+        extra_body, top_level = opencode_go_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": False},
+            model="deepseek-flash",
+        )
+        assert extra_body == {"thinking": {"type": "disabled"}}
+        assert top_level == {}
 
     def test_deepseek_v4_pro_high_still_works(self, opencode_go_profile):
         """CONTROL: versioned V4 slugs keep the existing toggle path."""
