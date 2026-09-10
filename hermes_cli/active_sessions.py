@@ -356,6 +356,8 @@ def _prune_dead(
     Unknown liveness on an unrelated sibling must not fail a claim for a
     different session id: leave that sibling intact instead of raising.
     Unknown liveness on ``target_session_id`` still fails closed.
+    Missing or empty ``session_id`` also counts as unrelated, so those
+    malformed rows stay in the live set and still count toward capacity.
     """
     live: list[dict[str, Any]] = []
     target = str(target_session_id or "")
@@ -437,10 +439,12 @@ def _read_live_entries(
         return raw_entries, _prune_dead(
             raw_entries, strict=track_liveness, target_session_id=target_session_id
         )
-    except ActiveSessionRegistryError:
+    except ActiveSessionRegistryError as exc:
         if track_liveness and not target_session_id:
             raise
-        logger.warning(warn)
+        # File was readable; attach the prune error so logs distinguish
+        # unprovable target liveness from an unreadable registry.
+        logger.warning("%s: %s", warn, exc)
         return None
 
 

@@ -508,7 +508,7 @@ def test_desktop_claim_new_session_ignores_unrelated_unknown_liveness(
 
 
 def test_desktop_claim_target_unknown_liveness_is_coordination_unavailable(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog
 ):
     home = tmp_path / ".hermes"
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -525,6 +525,7 @@ def test_desktop_claim_target_unknown_liveness_is_coordination_unavailable(
         "gateway.status._pid_exists",
         lambda _pid: (_ for _ in ()).throw(OSError("pid lookup unavailable")),
     )
+    caplog.set_level(logging.WARNING)
     lease, msg = active_sessions.try_acquire_active_session(
         session_id="target",
         surface="desktop",
@@ -537,6 +538,10 @@ def test_desktop_claim_target_unknown_liveness_is_coordination_unavailable(
         active_sessions.SESSION_COORDINATION_UNAVAILABLE
     )
     assert "target" in state.read_text(encoding="utf-8")
+    assert any(
+        "active session owner liveness is unknown" in record.message
+        for record in caplog.records
+    )
 
 
 def test_desktop_claim_live_owner_stays_session_not_owned_with_unknown_sibling(
