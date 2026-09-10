@@ -200,9 +200,11 @@ tool (`tools[0].model`) together with the catalog quality. It does not rewrite
 `gpt-image-2-medium` default are unchanged. Text-to-image and reference-image
 edits both use Responses `input_image` parts.
 
-Codex backend support for 2.5 is best-effort: if the hosted tool rejects an
-unknown or unsupported model, Hermes surfaces a compatibility `api_error` and
-does **not** silently fall back to `OPENAI_API_KEY` or FAL. If you need
+Codex backend support for 2.5 is best-effort: if the backend rejects a request,
+Hermes preserves its error message in an `api_error` and does **not** silently
+fall back to `OPENAI_API_KEY` or FAL. Host-model availability, image-model
+support, and invalid parameters are separate failures; error prose alone is
+not used to blame the selected image model. If you need
 deterministic 2.5 routing, use the **OpenAI** API-key provider or **FAL**.
 
 ## Usage
@@ -268,8 +270,8 @@ invoke the tool, the call fails with `empty_response`. Whether the hosted
 image tool is reachable at all has also been reported to vary between
 accounts. GPT Image 2.5 Flare/Sunburst are selectable in this provider and are
 forwarded to the tool's `model` field, but the Codex backend may still reject
-an unknown or unsupported model; that surfaces as a compatibility error rather
-than a Hermes-side rewrite or provider switch. The backend can also return a
+an unknown or unsupported model; Hermes preserves that rejection as an
+`api_error` rather than rewriting the selection or switching providers. The backend can also return a
 successful image with a different or opaque tool model label, such as
 `gpt-image-2-codex`. HTTP success does not confirm Flare/Sunburst selection, and
 an opaque label does not establish that GPT Image 2.5 is unavailable.

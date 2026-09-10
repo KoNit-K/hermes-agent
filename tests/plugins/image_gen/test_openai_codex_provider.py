@@ -399,7 +399,7 @@ class TestGenerate:
         # The account-entitlement misdiagnosis must not come back.
         assert "not enabled for the current Codex account" not in result["error"]
         assert result["error_type"] != "capability_unsupported"
-        # Model-compatibility labeling is only for unknown/unsupported image models.
+        # Do not infer account entitlement or image-model rejection from error prose.
         assert "compatibility" not in result["error"].lower()
 
 
@@ -611,7 +611,7 @@ class TestGptImage25Payload:
         assert result["model"] == "gpt-image-2-medium"
         assert captured["tools"][0]["model"] == "gpt-image-2"
 
-    def test_unsupported_model_http_error_is_compatibility_api_error_not_fallback(
+    def test_unsupported_model_http_error_is_preserved_as_api_error_not_fallback(
         self, provider, monkeypatch, tmp_path
     ):
         """Unknown/unsupported model from Codex must surface; never silently switch providers."""
@@ -648,9 +648,9 @@ class TestGptImage25Payload:
         result = provider.generate("a cat")
         assert seen["json"]["tools"][0]["model"] == "gpt-image-2.5-flare"
         assert result["success"] is False
-        assert result["error_type"] in ("compatibility", "api_error")
+        assert result["error_type"] == "api_error"
         err = result["error"].lower()
-        assert "compatibility" in err
+        assert "Unknown model: gpt-image-2.5-flare is not supported" in result["error"]
         assert "gpt-image-2.5-flare" in result["error"]
         assert "unknown model" in err or "not supported" in err
         assert "not enabled for the current Codex account" not in result["error"]

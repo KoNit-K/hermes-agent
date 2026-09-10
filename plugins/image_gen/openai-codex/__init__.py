@@ -11,9 +11,9 @@ server-reported tool metadata is preserved separately, not treated as engine ide
 Do NOT reintroduce an "account capability" classifier keyed on ``Tool choice
 'image_generation' not found in 'tools' parameter``: that 400 is a request-shape
 rejection for every account, fixed by omitting tool_choice (``_build_responses_payload``);
-any remaining HTTP error must surface verbatim. Unknown/unsupported image-model
-rejections are labeled as compatibility ``api_error`` and must not silently fall
-through to another provider.
+any remaining HTTP error must surface verbatim as ``api_error`` and must not
+silently fall through to another provider. Error text alone does not identify
+whether the host model, image model, or another parameter was rejected.
 """
 
 from __future__ import annotations
@@ -98,25 +98,6 @@ def _summarize_error_body(body: str) -> str:
     except (TypeError, ValueError):
         pass
     return text[:_MAX_ERROR_BODY_CHARS]
-
-
-def _is_unsupported_image_model_error(message: str) -> bool:
-    """True when Codex rejected the image_generation tool's ``model`` (not request-shape)."""
-    text = (message or "").lower()
-    if "tool choice" in text:
-        return False
-    needles = (
-        "unknown model",
-        "unsupported model",
-        "model is not supported",
-        "invalid model",
-        "unrecognized model",
-        "model_not_found",
-        "model does not exist",
-        "does not have access to model",
-        "unknown or invalid model",
-    )
-    return any(needle in text for needle in needles)
 
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
@@ -459,12 +440,6 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
                         attempt + 1, attempts)
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
-            message = str(exc)
-            if _is_unsupported_image_model_error(message):
-                return fail(
-                    f"Codex image_generation compatibility error: the backend rejected "
-                    f"model {api_model!r}. {exc} The selected image model was not rewritten.",
-                    "api_error")
             return fail(f"OpenAI image generation via Codex auth failed: {exc}", "api_error")
 
         if not collected or not collected.get("b64"):
