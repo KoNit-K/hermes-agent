@@ -5,7 +5,8 @@ optional GPT Image 2.5 Flare/Sunburst quality variants), routed through the Code
 Responses API ``image_generation`` tool, so no ``OPENAI_API_KEY`` is needed. Output
 is PNG; source images travel as Responses ``input_image`` parts. Selected catalog
 ids are sent as ``tools[0].model`` (quality from catalog meta) and are never rewritten
-to ``gpt-image-2``.
+to ``gpt-image-2`` by Hermes. Codex may normalize the model even on HTTP success;
+server-reported tool metadata is preserved separately, not treated as engine identity.
 
 Do NOT reintroduce an "account capability" classifier keyed on ``Tool choice
 'image_generation' not found in 'tools' parameter``: that 400 is a request-shape
@@ -63,7 +64,7 @@ MODELS = {
     },
 }
 
-# Hosts the ``image_generation`` tool call; catalog ``api_model`` does the image work.
+# Hosts ``image_generation``; catalog ``api_model`` requests (not verifies) an image model.
 _CODEX_CHAT_MODEL = "gpt-5.5"
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_INSTRUCTIONS = (
@@ -323,12 +324,29 @@ def _iter_sse_json(response: Any):
         yield payload
 
 
+def _extract_reported_image_model(event: Dict[str, Any]) -> Optional[str]:
+    """Read only image-tool metadata, never the host model or arbitrary output text."""
+    response = event.get("response")
+    tools = response.get("tools") if isinstance(response, dict) else None
+    if not isinstance(tools, list):
+        return None
+    for tool in tools:
+        if isinstance(tool, dict) and tool.get("type") == "image_generation":
+            model = tool.get("model")
+            if isinstance(model, str) and model.strip():
+                return model
+    return None
+
+
 def _collect_image_b64(
     token: str, *, prompt: str, size: str, quality: str, api_model: str = API_MODEL,
     input_images: Optional[List[Dict[str, str]]] = None
 ) -> Optional[Dict[str, str]]:
-    """Stream a Codex Responses image_generation call → ``{"b64", "source": "final"|"partial"}`` or
-    ``None``. A partial is kept only when no final arrives; callers must not treat it as success."""
+    """Collect image bytes and optional ``reported_model`` from the same response stream.
+
+    A partial is kept only when no final arrives; callers must not treat it as success.
+    Reported tool configuration is not verified image-engine identity.
+    """
     import httpx
     from agent.codex_headers import codex_cloudflare_headers
 
@@ -344,6 +362,7 @@ def _collect_image_b64(
 
     final_b64: Optional[str] = None
     partial_b64: Optional[str] = None
+    reported_model: Optional[str] = None
     with httpx.Client(timeout=timeout, headers=headers) as http:
         with http.stream("POST", f"{_CODEX_BASE_URL}/responses", json=payload) as response:
             try:
@@ -355,11 +374,15 @@ def _collect_image_b64(
                     f"{_summarize_error_body(exc.response.text)}"
                 ) from exc
             for event in _iter_sse_json(response):
+                reported_model = _extract_reported_image_model(event) or reported_model
                 result_b64, event_partial = _extract_image_candidates(event)
                 final_b64 = result_b64 or final_b64
                 partial_b64 = event_partial or partial_b64
     if final_b64:
-        return {"b64": final_b64, "source": "final"}
+        result = {"b64": final_b64, "source": "final"}
+        if reported_model is not None:
+            result["reported_model"] = reported_model
+        return result
     return {"b64": partial_b64, "source": "partial"} if partial_b64 else None
 
 
@@ -386,7 +409,8 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
             "env_vars": [],
             "post_setup_hint": (
                 "Sign in with `hermes auth codex` (or `hermes setup` → Codex) "
-                "if you haven't already. No API key needed."),
+                "if you haven't already. No API key needed. The selected image model "
+                "is a request; Hermes cannot confirm the exact image variant on Codex."),
         }
 
     def capabilities(self) -> Dict[str, Any]:
@@ -476,6 +500,12 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
             extra={
                 "size": size, "quality": meta["quality"], "input_image_count": len(input_images),
                 "image_source": image_source, "requested_size": size, "pixel_size": pixel_size,
+                "requested_model": api_model, "reported_model": collected.get("reported_model"),
+                "model_selection_verified": False,
+                "model_selection_note": (
+                    "Exact image model unverified. 'model' is the configured selection; "
+                    "'requested_model' is the sent image-tool model; 'reported_model' is "
+                    "server-reported tool configuration, not proof of the image engine."),
             })
 
 

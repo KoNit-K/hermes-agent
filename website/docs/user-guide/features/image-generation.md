@@ -269,9 +269,30 @@ image tool is reachable at all has also been reported to vary between
 accounts. GPT Image 2.5 Flare/Sunburst are selectable in this provider and are
 forwarded to the tool's `model` field, but the Codex backend may still reject
 an unknown or unsupported model; that surfaces as a compatibility error rather
-than a silent rewrite or provider switch. If you need image generation to work
-deterministically, configure the **OpenAI** (API key), **FAL**, or **xAI**
-backend instead.
+than a Hermes-side rewrite or provider switch. The backend can also return a
+successful image with a different or opaque tool model label, such as
+`gpt-image-2-codex`. HTTP success does not confirm Flare/Sunburst selection, and
+an opaque label does not establish that GPT Image 2.5 is unavailable.
+
+Successful Codex tool results distinguish:
+
+- `model`: the configured catalog selection, retained for compatibility.
+- `requested_model`: the image-tool model sent to Codex, without the catalog's
+  quality suffix (quality is sent separately).
+- `reported_model`: the last nonempty image-generation model string observed in
+  `response.tools` in the successful attempt, or `null` if none was reported.
+  This is tool-configuration metadata, **not verified image-engine identity**;
+  even a label matching the request may merely echo its configuration.
+- `model_selection_verified`: `false`; `model_selection_note` explains the
+  uncertainty. Hermes does not infer a mapping from an opaque backend alias.
+
+Missing or different model metadata does not discard a usable final image,
+trigger another request, or switch providers. For example: "Image generated
+successfully. Flare was requested, but the service reported `gpt-image-2-codex`;
+the exact image variant is unverified."
+
+If you need a different image-generation interface, configure the **OpenAI**
+(API key), **FAL**, or **xAI** backend explicitly instead.
 
 :::
 

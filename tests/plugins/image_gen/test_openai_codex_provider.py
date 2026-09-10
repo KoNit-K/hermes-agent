@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -656,6 +657,116 @@ class TestGptImage25Payload:
         # Must not silently retarget OPENAI_API_KEY or FAL.
         assert "OPENAI_API_KEY" not in result["error"]
         assert " fal" not in err
+
+
+def _mock_codex_stream(monkeypatch, responses, requests):
+    """Replace only HTTP transport; keep request construction, SSE parsing and saving real."""
+    import httpx
+
+    streams = iter(responses)
+
+    def respond(request):
+        assert str(request.url) == f"{codex_plugin._CODEX_BASE_URL}/responses"
+        requests.append(json.loads(request.content))
+        wire = "".join(f"data: {json.dumps(event)}\n\n" for event in next(streams))
+        return httpx.Response(200, text=wire, headers={"content-type": "text/event-stream"})
+
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs: real_client(
+        transport=httpx.MockTransport(respond), **kwargs,
+    ))
+
+
+@pytest.mark.parametrize("model_id", [
+    "gpt-image-2-medium", *[f"{model}-low" for model in _GPT_IMAGE_25_MODELS],
+])
+@pytest.mark.parametrize("with_reference", [False, True], ids=["generate", "edit"])
+@pytest.mark.parametrize("report", ["alias", "echo", "missing"])
+@pytest.mark.parametrize("metadata_event", ["response.created", "response.completed"])
+def test_success_separates_requested_model_from_unverified_server_report(
+    provider, monkeypatch, tmp_path, model_id, with_reference, report, metadata_event,
+):
+    monkeypatch.delenv("OPENAI_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+    _set_codex_model(tmp_path, model_id)
+    original_config = (tmp_path / "config.yaml").read_bytes()
+    api_model = codex_plugin.MODELS[model_id]["api_model"]
+    reported = {"alias": "gpt-image-2-codex", "echo": api_model, "missing": None}[report]
+    tools = [{"type": "function", "name": "unrelated", "model": "not-the-image-model"}]
+    if reported is not None:
+        tools.append({"type": "image_generation", "model": reported})
+    events: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {"model": "host-model"}},
+        {"type": "response.completed", "response": {
+            "model": "host-model", "output": [{
+                "type": "image_generation_call", "status": "completed", "result": _b64_png(),
+            }],
+        }},
+    ]
+    for event in events:
+        if event["type"] == metadata_event:
+            event["response"]["tools"] = tools
+    requests = []
+    _mock_codex_stream(monkeypatch, [events], requests)
+    kwargs = {}
+    if with_reference:
+        source = tmp_path / "reference.png"
+        source.write_bytes(bytes.fromhex(_PNG_HEX))
+        kwargs["image_url"] = str(source)
+
+    result = provider.generate("A blue circle on white.", **kwargs)
+
+    assert len(requests) == 1  # A model label must not cause retries or a provider switch.
+    assert requests[0]["tools"][0]["model"] == api_model
+    content = requests[0]["input"][0]["content"]
+    assert any(part["type"] == "input_image" for part in content) == with_reference
+    assert result["success"] is True
+    assert Path(result["image"]).read_bytes() == bytes.fromhex(_PNG_HEX)
+    assert result["provider"] == "openai-codex"
+    assert result["model"] == model_id  # Preserve the existing catalog-selection field.
+    assert result["requested_model"] == api_model
+    assert result["reported_model"] == reported
+    # Even an echoed tool configuration is not verified image-engine identity.
+    assert result["model_selection_verified"] is False
+    assert "unverified" in result["model_selection_note"].lower()
+    assert not result.get("error")
+    assert (tmp_path / "config.yaml").read_bytes() == original_config
+
+
+@pytest.mark.parametrize("created_tools,completed_tools,expected", [
+    ([{"type": "image_generation", "model": "initial-label"}],
+     [{"type": "image_generation", "model": "final-label"}], "final-label"),
+    ([{"type": "image_generation", "model": "initial-label"}], None, "initial-label"),
+    (None, None, None),
+    (None, {"type": "image_generation", "model": "not-a-tools-list"}, None),
+    (None, [None, {"type": "image_generation", "model": {"unexpected": "object"}}], None),
+    (None, [{"type": "image_generation", "model": "   "}], None),
+])
+def test_reported_model_belongs_to_successful_attempt_not_a_previous_partial(
+    provider, monkeypatch, created_tools, completed_tools, expected,
+):
+    monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+    partial_attempt = [{"type": "response.created", "response": {"tools": [
+        {"type": "image_generation", "model": "discarded-attempt-label"},
+    ]}}, {"type": "response.image_generation_call.partial_image", "partial_image_b64": _b64_png()}]
+    final_attempt = [
+        {"type": "response.created", "response": {"tools": created_tools}},
+        {"type": "response.completed", "response": {
+            "model": "host-model", "tools": completed_tools,
+            "output": [{"type": "image_generation_call", "result": _b64_png()}],
+        }},
+    ]
+    requests = []
+    _mock_codex_stream(monkeypatch, [partial_attempt, final_attempt], requests)
+
+    result = provider.generate("A blue circle on white.")
+
+    assert len(requests) == 2
+    assert result["success"] is True
+    assert result["image_source"] == "final"
+    assert Path(result["image"]).read_bytes() == bytes.fromhex(_PNG_HEX)
+    assert result["reported_model"] == expected
+    assert result["model_selection_verified"] is False
 
 
 # ── Plugin entry point ──────────────────────────────────────────────────────
