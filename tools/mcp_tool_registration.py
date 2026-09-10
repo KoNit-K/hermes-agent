@@ -190,7 +190,8 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
     # Top-level allowed_tools is a whitelist alias for configs that never nested under tools.include
     # (#106983). Precedence: tools.include (if present as str/list/tuple/set, including []) wins;
     # else allowed_tools of those types (including []) is the whitelist; else exclude / register-all.
-    # Invalid allowed_tools types (null, dict, number) are ignored — fail-open to include/exclude/all.
+    # A present-but-invalid allowed_tools (null, dict, number) fail-closes: register nothing.
+    # Absent key keeps backward-compatible include/exclude/all.
     include_raw = tools_filter.get("include")
     include_set = _normalize_name_filter(include_raw, f"mcp_servers.{name}.tools.include")
     exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
@@ -202,8 +203,10 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
         return lambda tool_name: matches_name_filter(tool_name, allowed_set)
     if "allowed_tools" in config:
         logger.warning(
-            "MCP config mcp_servers.%s.allowed_tools must be a string or list of strings; ignoring %r",
+            "MCP config mcp_servers.%s.allowed_tools must be a string or list of strings; "
+            "refusing all tools for this server (got %r)",
             name, allowed_raw)
+        return lambda _tool_name: False
     return lambda tool_name: not (exclude_set and matches_name_filter(tool_name, exclude_set))
 
 
