@@ -27,7 +27,18 @@ def _flat_model_name(model: str | None) -> str:
 
 def _is_deepseek_thinking_model(model: str | None) -> bool:
     m = _flat_model_name(model)
-    return (m.startswith("deepseek-v") and not m.startswith("deepseek-v3")) or m == "deepseek-reasoner"
+    # Version-less V4.1 Flash slug (`deepseek-flash`) has no `v` segment.
+    return (
+        (m.startswith("deepseek-v") and not m.startswith("deepseek-v3"))
+        or m == "deepseek-reasoner"
+        or m == "deepseek-flash"
+    )
+
+
+def _is_glm_5_3_model(model: str | None) -> bool:
+    """GLM-5.3 across alias spellings (glm-5.3 / glm-5-3 / glm-5p3)."""
+    m = _flat_model_name(model)
+    return any(token in m for token in ("glm-5.3", "glm-5-3", "glm-5p3"))
 
 
 def _is_glm_5_2_model(model: str | None) -> bool:
@@ -69,6 +80,13 @@ class OpenCodeGoProfile(ProviderProfile):
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if _is_glm_5_3_model(model):
+            # Graded low/medium/high/max knob; server default when unset/disabled.
+            effort = _requested_effort(reasoning_config)
+            if effort is None:
+                return {}, {}
+            clamped = re_.clamp_effort(effort, re_.GLM53_EFFORTS, re_.GLM53_OVERRIDES)
+            return {}, {"reasoning_effort": clamped if clamped in re_.GLM53_EFFORTS else "low"}
         if _is_glm_5_2_model(model):
             # Native reasoning_effort knob (high/max); server default when unset/disabled.
             effort = _requested_effort(reasoning_config)
