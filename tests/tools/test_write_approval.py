@@ -204,9 +204,10 @@ def test_handle_approval_off(hermes_home):
 def _assert_memory_bg_policy_when_off(text):
     """Effective unattended background-review policy must be visible beside the
     general write_approval setting (#106918)."""
+    from tools.memory_tool import _BG_DELETE_ACTIONS
     assert "memory.write_approval = off" in text
     lowered = text.lower()
-    assert "replace" in lowered and "remove" in lowered
+    assert " or ".join(_BG_DELETE_ACTIONS) in lowered
     assert "refine" in lowered
     assert "add" in lowered or "addition" in lowered
     assert "pending" in lowered
@@ -236,6 +237,7 @@ def test_memory_approval_status_explains_bg_policy_when_off(hermes_home):
 def test_memory_status_explains_bg_policy_when_approval_on(hermes_home):
     from hermes_cli.write_approval_commands import handle_pending_subcommand
     from tools import write_approval as wa
+    from tools.memory_tool import _BG_DELETE_ACTIONS
 
     _set_approval("memory", True)
     text = handle_pending_subcommand(wa.MEMORY, [])
@@ -243,7 +245,7 @@ def test_memory_status_explains_bg_policy_when_approval_on(hermes_home):
     lowered = text.lower()
     # General gate already covers all writes; still mention the
     # background replace/remove protection.
-    assert "replace" in lowered and "remove" in lowered
+    assert " or ".join(_BG_DELETE_ACTIONS) in lowered
     assert "background" in lowered
 
 
