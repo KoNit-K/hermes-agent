@@ -190,3 +190,22 @@ class TestStandaloneDesktopPlugin:
         (desktop / "plugin.js").write_text(_DESKTOP_OK, encoding="utf-8")
         report = validate_plugin_dir(d)
         assert not report.ok
+
+    def test_missing_desktop_register_is_rejected(self, tmp_path):
+        d = _write_desktop_plugin(
+            tmp_path / "no-reg",
+            "import { host } from '@hermes/plugin-sdk'\n"
+            "export default { id: 'no-reg', name: 'No Reg' }\n",
+        )
+        report = validate_plugin_dir(d)
+        assert not report.ok
+        assert any("register" in failure for failure in report.failures)
+
+    def test_jsx_dev_runtime_import_is_allowed(self, tmp_path):
+        d = _write_desktop_plugin(
+            tmp_path / "hello",
+            "import { jsxDEV } from 'react/jsx-dev-runtime'\n"
+            "export default { id: 'hello', name: 'Hello', register() { void jsxDEV } }\n",
+        )
+        report = validate_plugin_dir(d)
+        assert report.ok, report.failures

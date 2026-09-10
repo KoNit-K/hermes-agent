@@ -503,7 +503,9 @@ _DESKTOP_ALLOWED_IMPORTS = frozenset({
     "@hermes/plugin-sdk",
     "react",
     "react/jsx-runtime",
+    "react/jsx-dev-runtime",
 })
+_JS_URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.I)
 _JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _JS_LINE_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
 _JS_FROM_SPEC_RE = re.compile(r"""\bfrom\s+['"]([^'"]+)['"]""")
@@ -575,7 +577,10 @@ def _desktop_import_specifiers(source: str) -> List[str]:
 def _is_allowed_desktop_import(spec: str) -> bool:
     if spec in _DESKTOP_ALLOWED_IMPORTS:
         return True
-    return spec.startswith("./") or spec.startswith("../")
+    # Match apps/desktop/src/contrib/runtime-loader.ts unsupportedImports().
+    if spec.startswith(("./", "../", "/")):
+        return True
+    return bool(_JS_URL_SCHEME_RE.match(spec))
 
 
 def _toplevel_string_bindings(source: str) -> Dict[str, str]:
@@ -629,6 +634,48 @@ def _default_export_id_token(obj_body: str) -> Optional[Tuple[str, str]]:
     return None
 
 
+def _default_export_has_register(obj_body: str) -> bool:
+    """True when the export object has a function-like ``register`` at depth 0."""
+    depth = 0
+    i = 0
+    n = len(obj_body)
+    while i < n:
+        ch = obj_body[i]
+        if ch in ("'", '"'):
+            i = _skip_js_string(obj_body, i)
+            continue
+        if ch == "{":
+            depth += 1
+            i += 1
+            continue
+        if ch == "}":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if depth == 0:
+            boundary = i == 0 or not (obj_body[i - 1].isalnum() or obj_body[i - 1] in "_$")
+            if boundary and obj_body.startswith("register", i):
+                after = obj_body[i + 8:]
+                if after[:1] and (after[0].isalnum() or after[0] in "_$"):
+                    i += 1
+                    continue
+                rest = after.lstrip()
+                if rest.startswith("("):
+                    return True
+                if rest.startswith(":"):
+                    value = rest[1:].lstrip()
+                    if value.startswith("async"):
+                        nxt = value[5:6]
+                        if nxt and (nxt.isalnum() or nxt in "_$"):
+                            i += 1
+                            continue
+                        value = value[5:].lstrip()
+                    if value.startswith("function") or value.startswith("("):
+                        return True
+        i += 1
+    return False
+
+
 def _validate_desktop_plugin(
     report: ValidationReport,
     plugin_dir: Path,
@@ -637,7 +684,8 @@ def _validate_desktop_plugin(
     """Static admission checks for a standalone Desktop UI package.
 
     Does not import, eval, or subprocess-execute ``plugin.js``. Agent
-    capability probing is skipped — there is no ``register(ctx)`` contract.
+    capability probing is skipped; the Desktop loader still requires a
+    callable ``register`` on the default export.
     """
     plugin_js = plugin_dir / "plugin.js"
     try:
@@ -661,7 +709,8 @@ def _validate_desktop_plugin(
             "desktop sdk imports",
             False,
             "disallowed import specifier(s): " + ", ".join(repr(s) for s in disallowed)
-            + " (allowed: @hermes/plugin-sdk, react, react/jsx-runtime, ./, ../)",
+            + " (allowed: @hermes/plugin-sdk, react, react/jsx-runtime,"
+            + " react/jsx-dev-runtime, ./, ../, /, URL schemes)",
         )
     else:
         report.add(
@@ -687,6 +736,14 @@ def _validate_desktop_plugin(
         )
         return report
     report.add("desktop plugin export", True, "export default { ... } object present")
+
+    has_register = _default_export_has_register(obj_body)
+    report.add(
+        "desktop plugin register",
+        has_register,
+        "default export has a register function" if has_register
+        else "default export must contain a register function",
+    )
 
     token = _default_export_id_token(obj_body)
     resolved = ""

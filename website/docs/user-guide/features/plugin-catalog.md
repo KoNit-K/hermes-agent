@@ -74,7 +74,8 @@ repository. Review the code of anything you give credentials to.
 
 The catalog admits standalone Desktop UI packages: the selected directory has
 a root `plugin.js` (importing `@hermes/plugin-sdk`, and optionally `react` /
-`react/jsx-runtime`) and **no** Agent `plugin.yaml` / `plugin.json`. Catalog
+`react/jsx-runtime` / `react/jsx-dev-runtime`, with a callable `register`)
+and **no** Agent `plugin.yaml` / `plugin.json`. Catalog
 CI runs `hermes plugins validate` against that `plugin.js` instead of
 requiring an Agent manifest. Hybrid packages that ship an Agent manifest plus
 `desktop/plugin.js` keep the existing Agent validation path.
