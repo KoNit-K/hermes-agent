@@ -3728,7 +3728,9 @@ export const en: Translations = {
         ran: 'Ran',
         running: 'Running',
         ranCode: 'Ran code',
-        runningCode: 'Scripting'
+        runningCode: 'Scripting',
+        loaded: 'Loaded',
+        loading: 'Loading'
       },
       prefixes: {
         browser: 'Browser',
@@ -3772,6 +3774,7 @@ export const en: Translations = {
           pending: 'Searching session history',
           pendingAction: 'Searching'
         },
+        skill_view: { done: 'Loaded skill', pending: 'Loading skill', pendingAction: 'Loading' },
         terminal: { done: 'Ran command', pending: 'Running command', pendingAction: 'Running' },
         todo: { done: 'Updated todos', pending: 'Updating todos', pendingAction: 'Updating' },
         vision_analyze: { done: 'Analyzed image', pending: 'Analyzing image', pendingAction: 'Analyzing' },

@@ -27,6 +27,7 @@ export type ToolTitleKey =
   | 'read_file'
   | 'search_files'
   | 'session_search_recall'
+  | 'skill_view'
   | 'terminal'
   | 'todo'
   | 'vision_analyze'
@@ -3262,6 +3263,8 @@ export interface Translations {
         running: string
         ranCode: string
         runningCode: string
+        loaded: string
+        loading: string
       }
       prefixes: {
         browser: string
