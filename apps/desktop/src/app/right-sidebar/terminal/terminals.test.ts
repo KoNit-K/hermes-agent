@@ -253,12 +253,44 @@ describe('auto-reveal background agent terminals', () => {
     closeAgentTerminalByProc('proc-closed')
     expect($activeTerminalId.get()).toBe(userId)
 
+    // Wrapper-layer pin: stay-closed is delegated to ensureAgentTerminal
+    // (surfacedProcs → null). maybeAutoReveal must not resurrect the tab.
+    expect(ensureAgentTerminal('proc-closed', 'sleep 10')).toBeNull()
     const result = maybeAutoRevealAgentTerminal('proc-closed', 'sleep 10')
 
     expect(result).toBeNull()
     expect($terminals.get().some(term => term.procId === 'proc-closed')).toBe(false)
     expect($activeTerminalId.get()).toBe(userId)
     expect($terminalTakeover.get()).toBe(false)
+  })
+
+  it('auto: close prunes first-sight so a re-surfaced / reused procId can reveal again', async () => {
+    window.localStorage.setItem('hermes.desktop.revealBackgroundTerminals', 'auto')
+
+    const {
+      $activeTerminalId,
+      $terminalTakeover,
+      closeAgentTerminalByProc,
+      createTerminal,
+      maybeAutoRevealAgentTerminal,
+      openAgentTerminal,
+      selectTerminal
+    } = await loadRevealStore()
+
+    const userId = createTerminal('/repo')
+    maybeAutoRevealAgentTerminal('proc-reuse', 'sleep 10')
+    closeAgentTerminalByProc('proc-reuse')
+
+    openAgentTerminal('proc-reuse', 'sleep 10')
+    selectTerminal(userId)
+    const { setTerminalTakeover } = await import('../store')
+    setTerminalTakeover(false)
+
+    const agentId = maybeAutoRevealAgentTerminal('proc-reuse', 'sleep 10')
+
+    expect(agentId).toBeTruthy()
+    expect($activeTerminalId.get()).toBe(agentId)
+    expect($terminalTakeover.get()).toBe(true)
   })
 
   it('auto: status updates for an already revealed or skipped id do not take over again', async () => {

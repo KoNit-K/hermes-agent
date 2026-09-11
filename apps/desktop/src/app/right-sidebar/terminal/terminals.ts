@@ -221,6 +221,8 @@ export function maybeAutoRevealAgentTerminal(
     return null
   }
 
+  // No-resurrection lives in ensureAgentTerminal (surfacedProcs). This wrapper
+  // must not call openAgentTerminal or otherwise recreate a user-closed tab.
   const tabId = ensureAgentTerminal(procId, title)
 
   if (autoRevealConsidered.has(procId)) {
@@ -350,10 +352,15 @@ export function closeTerminal(id: string): void {
 /** Close the read-only agent tab mirroring a background process. The agent
  *  drives this via the desktop-gated `close_terminal` tool → `terminal.close`.
  *  The process is NOT killed — only the view is dropped; `surfacedProcs` keeps
- *  it from auto-resurfacing, and the status-stack row can reopen it on demand.
+ *  it from auto-resurfacing, `autoRevealConsidered` is pruned so a reused
+ *  procId can auto-reveal later, and the status-stack row can reopen it.
  *  No-op when no such tab exists. */
 export function closeAgentTerminalByProc(procId: string): boolean {
   const term = $terminals.get().find(t => t.kind === 'agent' && t.procId === procId)
+
+  // Drop first-sight bookkeeping so a later process that reuses this procId
+  // (or a tab re-opened via the status stack) can be auto-revealed again.
+  autoRevealConsidered.delete(procId)
 
   if (!term) {
     return false
