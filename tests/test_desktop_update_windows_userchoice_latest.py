@@ -2,16 +2,16 @@
 
 `Get-DefaultBrowserExe` in ``scripts/desktop-update/windows.ps1`` used to read
 only the legacy ``UrlAssociations\\<scheme>\\UserChoice\\ProgId``. On Windows 11
-25H2 / build 26200, Settings writes the real choice to ``UserChoiceLatest``
-and no longer mirrors it into ``UserChoice``. A stale ``MSEdgeHTM`` UserChoice
-then makes the updater miss Chrome, skip the HTML shim, and degrade to a blank
-WinForms ghost window (#108051).
+25H2 / build 26200, Settings writes the real choice to the
+``UserChoiceLatest\\ProgId`` subkey and no longer mirrors it into
+``UserChoice``. Some builds expose the value on the ``UserChoiceLatest``
+parent, so that remains a compatibility fallback.
 
 This test is source-level because Linux/macOS CI cannot execute the PowerShell
-hand-off. It guards the ProgId SOURCE order (Latest → ASSOCSTR_PROGID →
-legacy UserChoice), the existence-gated fallthrough for a missing Chromium
-exe, and the forbidden naive heuristics that return stale Edge on the
-reporter's machine.
+hand-off. It guards the ProgId SOURCE order (nested Latest → parent Latest →
+ASSOCSTR_PROGID → legacy UserChoice), source de-duplication, the
+existence-gated fallthrough for a missing Chromium exe, and the forbidden
+naive heuristics that return stale Edge on the reporter's machine.
 """
 
 from __future__ import annotations
@@ -56,29 +56,45 @@ def _browser_detection_scope() -> str:
     return "\n".join(parts)
 
 
-def test_get_default_browser_exe_prefers_userchoice_latest_then_assoc_progid() -> None:
+def test_get_default_browser_exe_prefers_nested_then_parent_userchoice_latest() -> None:
     scope = _browser_detection_scope()
     source = _read()
 
-    latest_idx = scope.find("\\UserChoiceLatest")
-    assert latest_idx != -1, (
-        "Get-DefaultBrowserExe must look up UrlAssociations\\<scheme>\\UserChoiceLatest "
-        "before the legacy UserChoice key. Windows 11 25H2 Settings writes the default "
-        "browser there and no longer mirrors it into UserChoice (#108051)."
+    nested_latest_idx = scope.find(
+        '\\UserChoiceLatest\\ProgId" -Name ProgId'
     )
+    parent_latest_idx = scope.find(
+        '\\UserChoiceLatest" -Name ProgId',
+        nested_latest_idx + 1,
+    )
+    assoc_idx = scope.find("Get-AssocQueryStringProgId $proto")
+    legacy_idx = scope.find('\\UserChoice" -Name ProgId')
 
-    # Do not use a naive find("UserChoice") -- that also matches UserChoiceLatest.
-    legacy_candidates = [
-        idx
-        for needle in ('\\UserChoice"', "\\UserChoice\\", "\\UserChoice'")
-        if (idx := scope.find(needle, latest_idx + len("\\UserChoiceLatest"))) != -1
-    ]
-    assert legacy_candidates, (
-        "Get-DefaultBrowserExe must keep the legacy UrlAssociations\\<scheme>\\UserChoice "
-        "fallback after UserChoiceLatest (Win10 / older 11 still write it)."
+    assert nested_latest_idx != -1, (
+        "Get-DefaultBrowserExe must first read the ProgId value from the "
+        "UrlAssociations\\<scheme>\\UserChoiceLatest\\ProgId subkey used by "
+        "Windows 11 25H2 (#108051)."
     )
-    assert min(legacy_candidates) > latest_idx, (
-        "UserChoiceLatest must be consulted as a ProgId source before legacy UserChoice."
+    assert parent_latest_idx != -1, (
+        "Get-DefaultBrowserExe must retain the UserChoiceLatest parent-value "
+        "compatibility fallback after the nested subkey."
+    )
+    assert assoc_idx != -1
+    assert legacy_idx != -1, (
+        "Get-DefaultBrowserExe must keep the legacy UserChoice fallback for "
+        "Win10 and older Windows 11 builds."
+    )
+    assert nested_latest_idx < parent_latest_idx < assoc_idx < legacy_idx, (
+        "ProgId sources must remain ordered as nested UserChoiceLatest, parent "
+        "UserChoiceLatest, ASSOCSTR_PROGID, then legacy UserChoice."
+    )
+    assert scope.count("-notcontains") >= 4, (
+        "Each ProgId source must retain ordered de-duplication before browser "
+        "resolution."
+    )
+    assert scope.count("catch {}") >= 3, (
+        "Registry source failures must remain fail-open so later ProgId "
+        "sources are still consulted."
     )
 
     assoc_scope = scope + "\n" + source

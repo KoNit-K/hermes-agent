@@ -147,26 +147,31 @@ public static extern int AssocQueryStringW(uint flags, uint str, string pszAssoc
 
 function Get-DefaultBrowserExe {
     # The OS default browser. Win11 25H2 / build 26200 Settings writes the
-    # choice to UserChoiceLatest\ProgId and no longer mirrors it into the
-    # legacy UserChoice\ProgId (#108051). Resolve a ProgId per scheme
-    # (https then http) from UserChoiceLatest, then AssocQueryStringW
-    # (ASSOCSTR_PROGID), then legacy UserChoice. Only Chromium-family
-    # browsers (ChromeHTML / MSEdgeHTM) support the --app + --user-data-dir
-    # combo the shim relies on; any other default browser returns $null
-    # and degrades to the WinForms card. A Chromium-family ProgId whose
-    # exe is missing on disk (stale uninstalled Edge) falls through to
-    # the next ProgId source instead of returning $null.
+    # choice to UserChoiceLatest\ProgId\ProgId and no longer mirrors it into
+    # the legacy UserChoice\ProgId (#108051). Some builds instead expose the
+    # value on the UserChoiceLatest parent, so keep that compatibility read.
+    # Resolve a ProgId per scheme (https then http) from the nested latest key,
+    # the parent latest key, AssocQueryStringW (ASSOCSTR_PROGID), then legacy
+    # UserChoice. Only Chromium-family browsers (ChromeHTML / MSEdgeHTM)
+    # support the --app + --user-data-dir combo the shim relies on; any other
+    # default browser returns $null and degrades to the WinForms card. A
+    # Chromium-family ProgId whose exe is missing on disk (stale uninstalled
+    # Edge) falls through to the next ProgId source instead of returning $null.
     foreach ($proto in @("https", "http")) {
         $sources = @()
         try {
-            $latest = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$proto\UserChoiceLatest" -Name ProgId -ErrorAction Stop).ProgId
-            if ($latest) { $sources += @($latest) }
+            $nestedLatest = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$proto\UserChoiceLatest\ProgId" -Name ProgId -ErrorAction Stop).ProgId
+            if ($nestedLatest -and $sources -notcontains $nestedLatest) { $sources += @($nestedLatest) }
+        } catch {}
+        try {
+            $parentLatest = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$proto\UserChoiceLatest" -Name ProgId -ErrorAction Stop).ProgId
+            if ($parentLatest -and $sources -notcontains $parentLatest) { $sources += @($parentLatest) }
         } catch {}
         $assoc = Get-AssocQueryStringProgId $proto
-        if ($assoc) { $sources += @($assoc) }
+        if ($assoc -and $sources -notcontains $assoc) { $sources += @($assoc) }
         try {
             $legacy = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$proto\UserChoice" -Name ProgId -ErrorAction Stop).ProgId
-            if ($legacy) { $sources += @($legacy) }
+            if ($legacy -and $sources -notcontains $legacy) { $sources += @($legacy) }
         } catch {}
         foreach ($progId in $sources) {
             if (-not $progId) { continue }
