@@ -276,16 +276,24 @@ def test_deferred_resume_skips_inprocess_build_when_isolation_on(isolation_env, 
 
 
 class _BoomSupervisor:
+    def __init__(self):
+        self.interrupts = []
+
     def submit_turn(self, frame, *, on_complete=None):
         raise RuntimeError("pipe broken")
+
+    def interrupt(self, sid, *, request_id=None):
+        self.interrupts.append((sid, request_id))
 
 
 def test_session_create_isolation_dispatch_failure_still_starts_inline_build(isolation_env, monkeypatch):
     """Fail-open: a broken HostSupervisor must still start the in-process AIAgent."""
-    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: _BoomSupervisor())
+    supervisor = _BoomSupervisor()
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: supervisor)
     monkeypatch.setattr(server, "_persist_session_row_for_submit", lambda *_a, **_k: None)
     started: list = []
     ran_after: list = []
+    interrupted: list = []
     real_start = server._start_agent_build
 
     def _track_start(sid, session):
@@ -296,6 +304,9 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
     monkeypatch.setattr(
         server, "_run_after_agent_ready",
         lambda *a, **k: ran_after.append(a[1] if a else None))
+    monkeypatch.setattr(
+        "agent.interrupt_compat.request_hard_interrupt",
+        lambda agent: interrupted.append(agent))
 
     sid = _create_session()
     session = _flush_prewarm(sid)
@@ -317,3 +328,15 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
     if thread is not None:
         thread.join(timeout=2.0)
     assert isinstance(session.get("agent"), _DummyAgent)
+    assert session.get("_compute_host_active") is None
+    assert server._session_uses_compute_host(session) is False
+
+    interrupt = server.handle_request({
+        "id": "interrupt",
+        "method": "session.interrupt",
+        "params": {"session_id": sid},
+    })
+    assert interrupt.get("result", {}).get("status") == "interrupted", interrupt
+    assert interrupt["result"].get("turn_isolation") is not True
+    assert interrupted == [session["agent"]]
+    assert supervisor.interrupts == []
