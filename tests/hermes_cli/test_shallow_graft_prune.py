@@ -228,8 +228,44 @@ def test_prune_preserves_grafts_reachable_only_from_reflogs(tmp_path, monkeypatc
         assert not (clone / ".git" / "shallow.lock").exists()
     assert injected
 
-    # Once the reflog no longer reaches c2, its graft is genuinely stale.
+    # Keep c2 reachable only as an ancestor of a reflog entry. Collecting just
+    # reflog entry SHAs would miss this load-bearing boundary.
+    _git(clone, "config", "user.email", "t@example.com")
+    _git(clone, "config", "user.name", "t")
+    tree = _git(clone, "rev-parse", f"{reflog_only_sha}^{{tree}}")
+    descendant = _git(
+        clone, "commit-tree", tree, "-p", reflog_only_sha, "-m", "local descendant"
+    )
+    head_sha = _git(clone, "rev-parse", "HEAD")
+    _git(clone, "update-ref", "--create-reflog", "refs/heads/keeper", descendant)
+    _git(clone, "update-ref", "refs/heads/keeper", head_sha)
     _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    assert reflog_only_sha not in _git(
+        clone, "for-each-ref", "--format=%(objectname)"
+    ).splitlines()
+    assert reflog_only_sha not in _git(
+        clone, "rev-list", "--no-walk", "--all", "--reflog"
+    ).splitlines()
+    assert reflog_only_sha in _git(
+        clone, "rev-list", "--all", "--reflog"
+    ).splitlines()
+    candidate_validations = []
+
+    def record_candidate_validation(repo, args, **kwargs):
+        if (kwargs.get("env") or {}).get("GIT_SHALLOW_FILE"):
+            candidate_validations.append(True)
+        return real_query(repo, args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            gitlock_module, "_git_stdout_lines", record_candidate_validation
+        )
+        assert prune_stale_shallow_grafts(clone) == 0
+    assert not candidate_validations
+    assert reflog_only_sha in _shallow_lines(clone)
+
+    # Once the descendant reflog expires, c2 is genuinely stale.
+    _git(clone, "reflog", "expire", "--expire=now", "refs/heads/keeper")
     assert prune_stale_shallow_grafts(clone) == 1
     assert reflog_only_sha not in _shallow_lines(clone)
     _assert_repo_healthy(clone)
