@@ -106,3 +106,25 @@ def test_empty_chat_id_inherits_global_require_mention(hermes_home):
     )
 
     assert _admits_group(adapter, _unmentioned_group_message(), _sender(), "") is False
+
+
+def test_same_mtime_different_size_reloads_without_utime_bump(hermes_home):
+    adapter = _make_adapter()
+    message = _unmentioned_group_message()
+    sender = _sender()
+
+    path = _write_rules(
+        hermes_home,
+        {"group_rules": {"oc_hot": {"require_mention": True}}},
+    )
+    first = path.stat()
+    assert _admits_group(adapter, message, sender, "oc_hot") is False
+
+    path.write_text(
+        json.dumps({"group_rules": {"oc_hot": {"require_mention": False, "note": "bigger"}}}),
+        encoding="utf-8",
+    )
+    os.utime(path, (first.st_mtime, first.st_mtime))
+    assert path.stat().st_mtime == first.st_mtime
+    assert path.stat().st_size != first.st_size
+    assert _admits_group(adapter, message, sender, "oc_hot") is True

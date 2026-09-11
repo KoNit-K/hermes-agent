@@ -1282,9 +1282,6 @@ class FeishuAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _load_settings(extra: Dict[str, Any]) -> FeishuAdapterSettings:
-        def _id_set(values: Any) -> set[str]:
-            return {str(u).strip() for u in values if str(u).strip()}
-
         def _secret(name: str, default: str = "") -> str:
             return _get_scoped_secret(name, default).strip()
 
@@ -1325,7 +1322,7 @@ class FeishuAdapter(BasePlatformAdapter):
             encrypt_key=_extra_or_secret("encrypt_key", "FEISHU_ENCRYPT_KEY"),
             verification_token=_extra_or_secret("verification_token", "FEISHU_VERIFICATION_TOKEN"),
             group_policy=_secret("FEISHU_GROUP_POLICY", "allowlist").lower(),
-            allowed_group_users=frozenset(_id_set(_get_scoped_secret("FEISHU_ALLOWED_USERS", "").split(","))),
+            allowed_group_users=frozenset(_rule_id_set(_get_scoped_secret("FEISHU_ALLOWED_USERS", "").split(","))),
             bot_open_id=_secret("FEISHU_BOT_OPEN_ID"),
             bot_user_id=_secret("FEISHU_BOT_USER_ID"),
             bot_name=_secret("FEISHU_BOT_NAME"),
@@ -1342,7 +1339,7 @@ class FeishuAdapter(BasePlatformAdapter):
             ws_reconnect_interval=_coerce_required_int(extra.get("ws_reconnect_interval"), default=120, min_value=1),
             ws_ping_interval=_coerce_int(extra.get("ws_ping_interval"), default=None, min_value=1),
             ws_ping_timeout=_coerce_int(extra.get("ws_ping_timeout"), default=None, min_value=1),
-            admins=frozenset(_id_set(extra.get("admins", []))),
+            admins=frozenset(_rule_id_set(extra.get("admins", []))),
             default_group_policy=str(extra.get("default_group_policy", "")).strip().lower(),
             group_rules=group_rules, allow_bots=allow_bots, allow_all_dm=allow_all_dm,
             require_mention=_to_boolean(extra.get("require_mention", _get_scoped_secret("FEISHU_REQUIRE_MENTION", "true"))),

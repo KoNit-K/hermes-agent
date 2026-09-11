@@ -1,4 +1,4 @@
-"""Feishu per-group admission rules: ``~/.hermes/feishu_group_rules.json`` (mtime-cached).
+"""Feishu per-group admission rules: ``~/.hermes/feishu_group_rules.json`` (mtime+size cached).
 
 Hot file supplements/overrides boot ``config.extra.group_rules`` per chat_id. Missing
 file → no overrides (boot config unchanged). Invalid/unreadable JSON → last
@@ -26,31 +26,37 @@ def rules_file() -> Path:
 
 
 class _MtimeCache:
-    """Mtime-based JSON file cache: ``stat()`` per access, re-read only on change.
+    """JSON file cache: ``stat()`` per access, re-read only when ``(mtime, size)`` changes.
 
-    Fail-open: missing file → empty dict; invalid/unreadable → last good payload
-    (or empty if nothing has loaded successfully yet).
+    Size is part of the fingerprint so coarse-timestamp filesystems or same-second
+    rewrites still reload. Fail-open: missing file → empty dict; invalid/unreadable
+    → last good payload (or empty if nothing has loaded successfully yet).
     """
 
     def __init__(self, path: Optional[Path] = None):
         self._fixed_path = path
         self._mtime = 0.0
+        self._size = -1
         self._data: Optional[dict] = None
         self._bound_path: Optional[Path] = None
 
     def _path(self) -> Path:
         return self._fixed_path if self._fixed_path is not None else rules_file()
 
+    def _reset_bound(self, path: Path) -> None:
+        self._mtime, self._size, self._data, self._bound_path = 0.0, -1, None, path
+
     def load(self) -> dict:
         path = self._path()
         if self._bound_path != path:
-            self._mtime, self._data, self._bound_path = 0.0, None, path
+            self._reset_bound(path)
         try:
-            mtime = path.stat().st_mtime
+            st = path.stat()
         except FileNotFoundError:
-            self._mtime, self._data = 0.0, {}
+            self._mtime, self._size, self._data = 0.0, -1, {}
             return {}
-        if mtime == self._mtime and self._data is not None:
+        mtime, size = st.st_mtime, st.st_size
+        if mtime == self._mtime and size == self._size and self._data is not None:
             return self._data
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -61,16 +67,16 @@ class _MtimeCache:
                 path,
                 exc,
             )
-            self._mtime = mtime
+            self._mtime, self._size = mtime, size
             return self._data if self._data is not None else {}
         if not isinstance(data, dict):
             logger.warning(
                 "[Feishu-GroupRules] %s is not a JSON object, keeping last loaded rules",
                 path,
             )
-            self._mtime = mtime
+            self._mtime, self._size = mtime, size
             return self._data if self._data is not None else {}
-        self._mtime, self._data = mtime, data
+        self._mtime, self._size, self._data = mtime, size, data
         return self._data
 
 
