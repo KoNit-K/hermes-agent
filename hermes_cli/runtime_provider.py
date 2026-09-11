@@ -22,7 +22,8 @@ from agent.credential_pool import (  # custom_provider_pool_key_candidates is re
 )
 from agent.secret_scope import get_secret as _get_secret
 from hermes_cli.auth import (  # resolve_external_process_provider_credentials is read via origin by runtime_provider_backends
-    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, AuthError, DEFAULT_CODEX_BASE_URL, DEFAULT_QWEN_BASE_URL, DEFAULT_XAI_OAUTH_BASE_URL,
+    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL, AuthError,
+    DEFAULT_CODEX_BASE_URL, DEFAULT_QWEN_BASE_URL, DEFAULT_XAI_OAUTH_BASE_URL,
     PROVIDER_REGISTRY, _agent_key_is_usable, _nous_inference_env_override, format_auth_error, resolve_provider,
     resolve_nous_runtime_credentials, resolve_codex_runtime_credentials, resolve_xai_oauth_runtime_credentials,
     resolve_qwen_runtime_credentials, resolve_api_key_provider_credentials,
@@ -287,11 +288,15 @@ def _anthropic_cfg_base_url(model_cfg: Dict[str, Any]) -> str:
     return cfg_base_url if _anthropic_base_url_override_ok(cfg_base_url) else ""
 
 
-def _anthropic_token_or_raise() -> str:
+def _anthropic_token_or_raise(*, classify_missing: bool = True) -> str:
     from agent.anthropic_credentials import resolve_anthropic_token
     token = resolve_anthropic_token()
     if not token:
-        raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
+        raise AuthError(
+            _NO_ANTHROPIC_CREDENTIALS_MSG,
+            provider="anthropic",
+            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL if classify_missing else None,
+        )
     return token
 
 
@@ -685,7 +690,14 @@ def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, A
     pconfig = PROVIDER_REGISTRY.get(provider)
     if not (pconfig and pconfig.auth_type == "oauth_minimax"):
         return None
-    creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
+    try:
+        creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
+    except AuthError as exc:
+        # Preserve the historical auto-route behavior: only an explicitly selected provider
+        # gets fail-closed missing-credential semantics.
+        if requested_provider == "auto" and exc.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL:
+            exc.category = None
+        raise
     return _runtime(provider, "anthropic_messages", creds["base_url"], creds["api_key"], source=creds.get("source", "oauth"),
                     requested_provider=requested_provider)
 
@@ -713,10 +725,14 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -
     if base_url_host_matches(base_url, "azure.com"):
         token = _azure_anthropic_env_key(model_cfg)
         if not token:
-            raise AuthError("No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or ANTHROPIC_API_KEY, or point "
-                            "key_env/api_key_env in your config.yaml model section at a custom env var.")
+            raise AuthError(
+                "No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or ANTHROPIC_API_KEY, or point "
+                "key_env/api_key_env in your config.yaml model section at a custom env var.",
+                provider="anthropic",
+                category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+            )
     else:
-        token = _anthropic_token_or_raise()
+        token = _anthropic_token_or_raise(classify_missing=requested_provider != "auto")
     return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
 
 
@@ -733,7 +749,12 @@ def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, 
     # to the first request and make a later fallback look like a silent provider switch.
     if not has_usable_secret(creds.get("api_key")):
         hint = f" Set {', '.join(pconfig.api_key_env_vars)}." if pconfig.api_key_env_vars else ""
-        raise AuthError(f"No usable credentials found for provider '{provider}'.{hint}", provider=provider, code="missing_api_key")
+        raise AuthError(
+            f"No usable credentials found for provider '{provider}'.{hint}",
+            provider=provider,
+            code="missing_api_key",
+            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+        )
     # Honour model.base_url when the configured provider matches (e.g. api.minimaxi.com China endpoint).
     base_url = _actual_url(provider, _config_base_url_for_provider(model_cfg, provider) or creds.get("base_url", "").rstrip("/"))
     api_mode = _api_key_provider_api_mode(provider, model_cfg, creds.get("api_key", ""), base_url,
@@ -767,10 +788,14 @@ def _resolve_vertex_runtime(requested_provider: str) -> Dict[str, Any]:
     from agent.vertex_adapter import get_vertex_config
     token, base_url = get_vertex_config()
     if not token or not base_url:
-        raise AuthError("Vertex AI credentials could not be resolved. Vertex uses OAuth2 (not a static API key): provide a "
-                        "service-account JSON via GOOGLE_APPLICATION_CREDENTIALS (or VERTEX_CREDENTIALS_PATH) in ~/.hermes/.env, "
-                        "or run 'gcloud auth application-default login' for ADC. Set the GCP project/region under vertex: in "
-                        "config.yaml if they aren't embedded in the credentials. Run `hermes setup` to install Vertex support.")
+        raise AuthError(
+            "Vertex AI credentials could not be resolved. Vertex uses OAuth2 (not a static API key): provide a "
+            "service-account JSON via GOOGLE_APPLICATION_CREDENTIALS (or VERTEX_CREDENTIALS_PATH) in ~/.hermes/.env, "
+            "or run 'gcloud auth application-default login' for ADC. Set the GCP project/region under vertex: in "
+            "config.yaml if they aren't embedded in the credentials. Run `hermes setup` to install Vertex support.",
+            provider="vertex",
+            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+        )
     return _runtime("vertex", "chat_completions", base_url.rstrip("/"), token, source="vertex-oauth", requested_provider=requested_provider)
 
 
@@ -783,8 +808,15 @@ def _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_
     # bypass _resolve_named_custom_runtime (which would yield custom/chat_completions/no key).
     eff_base = (explicit_base_url or "").strip()
     if requested_provider == "anthropic" and base_url_host_matches(eff_base, "azure.com"):
+        api_key = (explicit_api_key or "").strip() or _azure_anthropic_env_key(_get_model_config())
+        if not api_key:
+            raise AuthError(
+                "No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or ANTHROPIC_API_KEY.",
+                provider="anthropic",
+                category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+            )
         return _runtime("anthropic", "anthropic_messages", eff_base.rstrip("/"),
-                        (explicit_api_key or "").strip() or _azure_anthropic_env_key({}), source="azure-explicit",
+                        api_key, source="azure-explicit",
                         requested_provider=requested_provider)
     # Azure Foundry resolves before the custom-runtime / pool / generic paths so its config is
     # always picked up from model.base_url + model.api_mode, with or without explicit_* args.

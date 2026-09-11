@@ -56,7 +56,9 @@ def _azure_foundry_api_key(rp, explicit_api_key: str) -> str:
             "~/.hermes/.env or run 'hermes model' to configure. To use "
             "keyless Microsoft Entra ID auth instead, set "
             "model.auth_mode: entra_id in config.yaml (or pick "
-            "'Microsoft Entra ID' in 'hermes model')."
+            "'Microsoft Entra ID' in 'hermes model').",
+            provider="azure-foundry",
+            category=rp.AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
         )
     return api_key
 
@@ -189,7 +191,13 @@ def _resolve_bedrock_runtime(requested_provider: str, model_cfg: Dict[str, Any],
             "  - AWS_PROFILE (for SSO / named profiles)\n"
             "  - IAM instance role (EC2, ECS, Lambda)\n"
             "Or run 'aws configure' to set up credentials.",
+            provider="bedrock",
             code="no_aws_credentials",
+            category=(
+                rp.AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+                if requested_provider != "auto"
+                else None
+            ),
         )
     bedrock_cfg = load_config().get("bedrock", {})
     # Region priority (config.yaml bedrock.region → env → us-east-1) lives in the adapter.

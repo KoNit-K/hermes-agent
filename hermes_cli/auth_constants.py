@@ -128,6 +128,8 @@ ACTUAL_LOCAL_NOAUTH_PLACEHOLDER = "dummy-actual-local-api-key"
 # Upstream rate-limit / usage-quota exhaustion (HTTP 429): transient, re-authenticating cannot resolve
 # it, so it must stay distinct from missing/expired-credential errors.
 CODEX_RATE_LIMITED_CODE = "codex_rate_limited"
+# Resolve-time absence only. Never use for quota, refresh/network failures, or runtime 401/403.
+AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL = "missing_credential"
 
 
 class AuthError(RuntimeError):
@@ -135,16 +137,30 @@ class AuthError(RuntimeError):
 
     def __init__(
         self, message: str, *, provider: str = "", code: Optional[str] = None, relogin_required: bool = False,
+        category: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.code = code
         self.relogin_required = relogin_required
+        self.category = category
 
 
 def _provider_error_factory(provider: str) -> Callable[..., AuthError]:
-    def factory(message: str, code: Optional[str] = None, *, relogin: bool = False) -> AuthError:
-        return AuthError(message, provider=provider, code=code, relogin_required=relogin)
+    def factory(
+        message: str,
+        code: Optional[str] = None,
+        *,
+        relogin: bool = False,
+        category: Optional[str] = None,
+    ) -> AuthError:
+        return AuthError(
+            message,
+            provider=provider,
+            code=code,
+            relogin_required=relogin,
+            category=category,
+        )
 
     return factory
 
