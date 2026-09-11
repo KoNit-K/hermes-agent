@@ -1,9 +1,11 @@
 """Docs: statement / passport / tax PDFs are blobs, not vault items.
 
-Issue #107705 — Phase 0 docs only. No SecretSource or VAULT_KINDS change.
-Reads files from repo root via Path().
+Issue #107705 — docs plus the VAULT_KINDS boundary.
+Reads documentation from repo root via Path().
 """
 from pathlib import Path
+
+from agent.vault_store import VAULT_KINDS
 
 
 def _read(rel: str) -> str:
@@ -30,6 +32,6 @@ def test_credential_vault_excludes_file_blobs() -> None:
     assert "get_secret" in doc or "not a vault" in low or "not vault" in low
 
 
-def test_vault_kinds_unchanged() -> None:
-    src = _read("agent/vault_store.py")
-    assert 'VAULT_KINDS = ("login", "payment", "address")' in src
+def test_vault_kinds_exclude_file_blobs() -> None:
+    assert {"login", "payment", "address"} <= set(VAULT_KINDS)
+    assert {"document", "file", "blob"}.isdisjoint(VAULT_KINDS)
