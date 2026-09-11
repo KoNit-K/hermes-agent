@@ -11,6 +11,7 @@ the gate remains True *after* that timer would have fired.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -294,12 +295,20 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
     started: list = []
     ran_after: list = []
     interrupted: list = []
+    build_entered = threading.Event()
+    release_build = threading.Event()
     real_start = server._start_agent_build
 
     def _track_start(sid, session):
         started.append(sid)
         return real_start(sid, session)
 
+    def _blocking_make_agent(*_args, **_kwargs):
+        build_entered.set()
+        assert release_build.wait(timeout=2.0)
+        return _DummyAgent()
+
+    monkeypatch.setattr(server, "_make_agent", _blocking_make_agent)
     monkeypatch.setattr(server, "_start_agent_build", _track_start)
     monkeypatch.setattr(
         server, "_run_after_agent_ready",
@@ -313,6 +322,12 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
 
     assert server._session_uses_compute_host(session) is True
     assert session.get("agent") is None
+    session.update({
+        "_metadata_mirror": {"model": "stale-host"},
+        "_metadata_mirror_updated_at": 1.0,
+        "_metadata_message_count": 7,
+        "_compute_host_pending_clarify": {"request_id": "stale"},
+    })
     ready = session.get("agent_ready")
     assert ready is not None and not ready.is_set()
 
@@ -322,21 +337,79 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
     assert resp["result"].get("turn_isolation") is not True
     assert started == [sid], "fallback must invoke _start_agent_build"
     assert ran_after == [sid]
-    if ready is not None:
-        ready.wait(timeout=2.0)
+    assert build_entered.wait(timeout=1.0)
+    assert session.get("agent") is None, "the ownership assertion must precede agent attach"
+    assert session.get("_compute_host_active") is None
+    assert session.get("_compute_host_released") is True
+    assert server._session_uses_compute_host(session) is False
+    for stale_key in (
+        "_metadata_mirror", "_metadata_mirror_updated_at", "_metadata_message_count",
+        "_compute_host_pending_clarify",
+    ):
+        assert stale_key not in session
+    assert server._arm_isolated_compute_host_session(session) is False
+    assert session.get("_compute_host_released") is True
+    assert session.get("_compute_host_active") is None
+    assert server._session_uses_compute_host(session) is False
+    server._apply_compute_host_metadata_mirror(session, {
+        "message_count": 99,
+        "session_info": {"model": "late-stale-host"},
+    })
+    assert "_metadata_mirror" not in session
+    assert "_metadata_message_count" not in session
+
+    local_interrupt_entered = threading.Event()
+    real_sess = server._sess
+
+    def _track_local_sess(params, rid):
+        local_interrupt_entered.set()
+        return real_sess(params, rid)
+
+    monkeypatch.setattr(server, "_sess", _track_local_sess)
+    interrupt_responses: list[dict] = []
+    interrupt_thread = threading.Thread(
+        target=lambda: interrupt_responses.append(server.handle_request({
+            "id": "interrupt",
+            "method": "session.interrupt",
+            "params": {"session_id": sid},
+        })),
+    )
+    interrupt_thread.start()
+    assert local_interrupt_entered.wait(timeout=1.0)
+    assert session.get("agent") is None
+    assert supervisor.interrupts == []
+
+    release_build.set()
+    interrupt_thread.join(timeout=2.0)
+    assert not interrupt_thread.is_alive()
+    assert ready.wait(timeout=2.0)
     thread = session.get("_agent_build_thread")
     if thread is not None:
         thread.join(timeout=2.0)
     assert isinstance(session.get("agent"), _DummyAgent)
-    assert session.get("_compute_host_active") is None
     assert server._session_uses_compute_host(session) is False
 
-    interrupt = server.handle_request({
-        "id": "interrupt",
-        "method": "session.interrupt",
-        "params": {"session_id": sid},
-    })
+    assert len(interrupt_responses) == 1
+    interrupt = interrupt_responses[0]
     assert interrupt.get("result", {}).get("status") == "interrupted", interrupt
     assert interrupt["result"].get("turn_isolation") is not True
     assert interrupted == [session["agent"]]
     assert supervisor.interrupts == []
+    assert session.get("running") is False
+
+
+def test_queued_drain_dispatch_failure_keeps_compute_host_ownership(isolation_env, monkeypatch):
+    """A drain reports host dispatch failure; it must not silently switch ownership inline."""
+    supervisor = _BoomSupervisor()
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: supervisor)
+
+    sid = _create_session()
+    session = server._sessions[sid]
+    session["queued_prompt"] = {"text": "continue after crash", "transport": None}
+    session["queued_prompts"] = []
+
+    assert server._drain_queued_prompt("drain", sid, session) is True
+    assert session.get("running") is False
+    assert session.get("_compute_host_active") is True
+    assert not session.get("_compute_host_released")
+    assert server._session_uses_compute_host(session) is True
