@@ -294,6 +294,9 @@ def _announce_cancelled_gateway_approvals(
     Broadcast, not session-targeted: orphan-reap interrupt runs on timer threads with no live
     transport / contextvar, so ``_emit`` would miss detached clients (same as session.reclaimed).
     Fail-open: missing key, empty queue, and broadcast errors never raise or block the caller.
+
+    ``cancelled_count`` is ``len(pending)``. ``request_ids`` omits empty/missing
+    ids, so the two can disagree when an entry has no request_id.
     """
     session_key = str(session.get("session_key") or "")
     if not session_key:
@@ -410,9 +413,15 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
-def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None) -> bool:
+def _interrupt_session_turn(
+    sid: str, session: dict, *, request_id: str | None = None, orphan: bool = False,
+) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
-    channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics."""
+    channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics.
+
+    ``orphan=True`` (reaper path) labels dropped approvals as ``ws_orphan_reap``; do not
+    infer that from ``request_id`` prefixes — a future orphan caller may use another id.
+    """
     use_compute_host = _session_uses_compute_host(session)
     should_interrupt = bool(session.get("running"))
     run_thread_alive = False
@@ -440,7 +449,7 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
     _clear_pending(sid)
     with contextlib.suppress(Exception):
         # Missing/empty session_key: helper no-ops. Broadcast failure must not skip the deny-resolve.
-        reason = "ws_orphan_reap" if str(request_id or "").startswith("client-gone-") else "interrupt"
+        reason = "ws_orphan_reap" if orphan else "interrupt"
         _announce_cancelled_gateway_approvals(session, reason, session_id=sid)
     with contextlib.suppress(Exception):
         from tools.approval import resolve_gateway_approval
@@ -612,7 +621,9 @@ def _schedule_ws_orphan_reap(
                 _pending_ws_reaps.pop(sid, None)
         if interrupt_session is not None:
             try:
-                isolated = _interrupt_session_turn(sid, interrupt_session, request_id=f"client-gone-{sid}")
+                isolated = _interrupt_session_turn(
+                    sid, interrupt_session, request_id=f"client-gone-{sid}", orphan=True,
+                )
                 logger.info("client_gone sid=%s action=interrupt turn_isolation=%s", sid, isolated)
             except Exception:
                 logger.exception("client_gone interrupt failed sid=%s", sid)
