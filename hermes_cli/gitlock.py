@@ -145,6 +145,55 @@ def _git_stdout_lines(
         return []
 
 
+def _before_publish_candidate(repo_root: Path) -> None:
+    """Test seam after candidate validation and before the publish guard."""
+
+
+def _fetch_head_tips(repo_root: Path, query_env: dict) -> List[str]:
+    """Every FETCH_HEAD entry. ``rev-parse FETCH_HEAD`` only returns the first."""
+    rel = _git_stdout_lines(
+        repo_root, ["rev-parse", "--git-path", "FETCH_HEAD"], env=query_env
+    )
+    if not rel:
+        return []
+    fetch_head = Path(rel[0])
+    if not fetch_head.is_absolute():
+        fetch_head = Path(repo_root) / fetch_head
+    if not fetch_head.is_file():
+        return []
+    tips: List[str] = []
+    try:
+        for line in fetch_head.read_text(encoding="utf-8").splitlines():
+            sha = line.split()[0] if line.split() else ""
+            if len(sha) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in sha):
+                tips.append(sha)
+    except OSError:
+        return []
+    return tips
+
+
+def _rev_list_roots(repo_root: Path, query_env: dict) -> List[str]:
+    """Traversal roots Git maintenance walks, plus every FETCH_HEAD tip."""
+    return ["--all", "--reflog", *_fetch_head_tips(repo_root, query_env)]
+
+
+def _reachable_grafts(
+    repo_root: Path,
+    lines: List[str],
+    query_env: dict,
+    *,
+    env: Optional[dict] = None,
+) -> Optional[set]:
+    reachable = _git_stdout_lines(
+        repo_root,
+        ["rev-list", *_rev_list_roots(repo_root, query_env)],
+        env=env or query_env,
+    )
+    if not reachable:
+        return None
+    return set(lines) & set(reachable)
+
+
 def prune_stale_shallow_grafts(repo_root: Path) -> int:
     """Drop ``.git/shallow`` graft lines no ref or reflog still reaches (#105951).
 
@@ -152,11 +201,12 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
     graft and never removes the previous one, so a long-lived shallow installer checkout
     accumulates one graft per update check (57 observed in the wild). The stale grafts
     break ``merge-base`` and push ``hermes update`` into the orphan-divergence reset path
-    on every run. Keep boundaries that protect commits reachable from refs or reflogs:
-    dropping a graft for a reflog-only commit exposes its unfetched parent and breaks git
-    maintenance. The dropped commits are genuinely unreachable and their objects are left
-    for ``git gc``. Returns the number of graft lines removed; never raises, and validates
-    the candidate through Git's lockfile before replacing the original.
+    on every run. Keep boundaries that protect commits reachable from refs, reflogs, or
+    any ``FETCH_HEAD`` entry: dropping a graft for a still-reachable commit exposes its
+    unfetched parent and breaks git maintenance. The dropped commits are genuinely
+    unreachable and their objects are left for ``git gc``. Returns the number of graft
+    lines removed; never raises, and validates the candidate through Git's lockfile
+    before replacing the original.
     """
     try:
         query_env = os.environ.copy()
@@ -175,22 +225,11 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
         lines = [line for line in original.splitlines() if line]
         if not lines:
             return 0
-        reachable = _git_stdout_lines(
-            repo_root, ["rev-list", "--all", "--reflog"], env=query_env
-        )
-        if not reachable:
+        keep = _reachable_grafts(repo_root, lines, query_env)
+        if keep is None:
             # A failed reachability probe is indistinguishable from an empty result here.
             # This repository has shallow commits, so either way retaining them is safe.
             return 0
-        keep = set(lines) & {
-            *(_git_stdout_lines(repo_root, ["rev-parse", "HEAD"], env=query_env) or []),
-            *(_git_stdout_lines(
-                repo_root,
-                ["rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
-                env=query_env,
-            ) or []),
-            *reachable,
-        }
         if not keep or len(keep) == len(lines):
             return 0
 
@@ -224,11 +263,19 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
             candidate_env["GIT_SHALLOW_FILE"] = str(lock_path)
             still_walks = _git_stdout_lines(
                 repo_root,
-                ["rev-list", "--count", "HEAD", "--all", "--reflog"],
+                ["rev-list", "--count", *_rev_list_roots(repo_root, query_env)],
                 env=candidate_env,
             )
             if not still_walks:
                 logger.debug("shallow prune self-check failed; original retained")
+                return 0
+
+            # Refs and reflogs can move while we hold only shallow.lock. Recheck
+            # reachability immediately before publish so a newly live boundary is kept.
+            _before_publish_candidate(repo_root)
+            fresh = _reachable_grafts(repo_root, lines, query_env)
+            if fresh is None or (fresh - keep):
+                logger.debug("shallow prune aborted; reachability changed before publish")
                 return 0
 
             # Git's lock file is the candidate itself; rename publishes the trim and

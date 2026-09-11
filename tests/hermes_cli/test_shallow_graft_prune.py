@@ -51,7 +51,7 @@ def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def _shallow_lines(repo: Path) -> list:
     return [
-        line for line in (repo / ".git" / "shallow").read_text().splitlines() if line
+        line for line in (repo / ".git" / "shallow").read_text(encoding="utf-8").splitlines() if line
     ]
 
 
@@ -215,7 +215,7 @@ def test_prune_preserves_grafts_reachable_only_from_reflogs(tmp_path, monkeypatc
 
     def omit_reflog_boundary(repo, args, **kwargs):
         lines = real_query(repo, args, **kwargs)
-        if args == ["rev-list", "--all", "--reflog"]:
+        if args[:3] == ["rev-list", "--all", "--reflog"]:
             injected.append(True)
             return [line for line in lines if line != reflog_only_sha]
         return lines
@@ -295,7 +295,8 @@ def test_prune_fails_open_when_reflog_walk_is_already_broken(tmp_path):
 
     shallow_path = clone / ".git" / "shallow"
     shallow_path.write_text(
-        "\n".join(line for line in _shallow_lines(clone) if line != broken_tip) + "\n"
+        "\n".join(line for line in _shallow_lines(clone) if line != broken_tip) + "\n",
+        encoding="utf-8",
     )
     assert _run_git(clone, "rev-list", "--all", "--reflog").returncode != 0
     before = shallow_path.read_bytes()
@@ -312,8 +313,107 @@ def test_prune_skips_while_git_holds_shallow_lock(tmp_path):
     shallow_path = clone / ".git" / "shallow"
     lock_path = clone / ".git" / "shallow.lock"
     before = shallow_path.read_bytes()
-    lock_path.write_text("")
+    lock_path.write_text("", encoding="utf-8")
 
     assert prune_stale_shallow_grafts(clone) == 0
     assert shallow_path.read_bytes() == before
     assert lock_path.exists()
+
+
+def _fetch_head_shas(repo: Path) -> list[str]:
+    return [
+        line.split()[0]
+        for line in (repo / ".git" / "FETCH_HEAD").read_text(encoding="utf-8").splitlines()
+        if line.split()
+    ]
+
+
+def test_prune_keeps_fetch_head_ancestor_boundary(tmp_path):
+    """FETCH_HEAD is not in --all/--reflog; its ancestor graft must still survive."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for message in ("c1", "c2", "c3"):
+        _git(origin, "commit", "--allow-empty", "-q", "-m", message)
+    tip = _git(origin, "rev-parse", "HEAD")
+    ancestor = _git(origin, "rev-parse", "HEAD^")
+    _git(clone, "fetch", "-q", "--depth", "2", "origin", tip)
+
+    assert ancestor in _shallow_lines(clone)
+    assert ancestor not in _git(clone, "rev-list", "--all", "--reflog").splitlines()
+    assert _git(clone, "rev-parse", "FETCH_HEAD") == tip
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert ancestor in _shallow_lines(clone)
+    assert _run_git(clone, "rev-list", "FETCH_HEAD").returncode == 0
+
+
+def test_prune_keeps_every_fetch_head_entry(tmp_path):
+    """A multi-ref fetch must keep every FETCH_HEAD tip, not only the first."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "m0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "m1")
+    main_tip = _git(origin, "rev-parse", "HEAD")
+    _git(origin, "checkout", "-q", "-b", "topic")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "t1")
+    topic_tip = _git(origin, "rev-parse", "HEAD")
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main", "topic")
+    _git(clone, "update-ref", "-d", "refs/remotes/origin/main")
+    _git(clone, "update-ref", "-d", "refs/remotes/origin/topic")
+    _git(clone, "reflog", "expire", "--expire=now", "--all")
+
+    fetch_heads = _fetch_head_shas(clone)
+    assert main_tip in fetch_heads
+    assert topic_tip in fetch_heads
+    assert main_tip in _shallow_lines(clone)
+    assert topic_tip in _shallow_lines(clone)
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert main_tip in _shallow_lines(clone)
+    assert topic_tip in _shallow_lines(clone)
+    assert _run_git(clone, "rev-list", main_tip).returncode == 0
+    assert _run_git(clone, "rev-list", topic_tip).returncode == 0
+
+
+def test_prune_aborts_when_ref_becomes_live_before_publish(tmp_path, monkeypatch):
+    """A ref created after validation must stop publication of its boundary."""
+    clone = _mk_shallow_scenario(tmp_path)
+    head_sha = _git(clone, "rev-parse", "HEAD")
+    tip_sha = _git(clone, "rev-parse", "origin/main")
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    orphan = next(sha for sha in _shallow_lines(clone) if sha not in {head_sha, tip_sha})
+
+    def revive_orphan(_repo: Path) -> None:
+        _git(clone, "update-ref", "refs/heads/race", orphan)
+
+    monkeypatch.setattr(gitlock_module, "_before_publish_candidate", revive_orphan)
+    before = (clone / ".git" / "shallow").read_bytes()
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert (clone / ".git" / "shallow").read_bytes() == before
+    assert orphan in _shallow_lines(clone)
+    assert _run_git(clone, "rev-list", "--all", "--reflog").returncode == 0
+    assert not (clone / ".git" / "shallow.lock").exists()
