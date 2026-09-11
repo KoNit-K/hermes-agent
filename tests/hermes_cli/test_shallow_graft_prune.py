@@ -17,10 +17,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
+from hermes_cli import gitlock as gitlock_module
 from hermes_cli.gitlock import prune_stale_shallow_grafts
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(tmp_path, monkeypatch):
+    config = tmp_path / "empty-gitconfig"
+    config.write_text("", encoding="utf-8")
+    template = tmp_path / "empty-git-template"
+    template.mkdir()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(config))
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(template))
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -39,6 +53,20 @@ def _shallow_lines(repo: Path) -> list:
     return [
         line for line in (repo / ".git" / "shallow").read_text().splitlines() if line
     ]
+
+
+def _assert_repo_healthy(repo: Path) -> None:
+    results = {
+        "walk": _run_git(repo, "rev-list", "--count", "--all", "--reflog"),
+        "fsck": _run_git(repo, "fsck", "--connectivity-only"),
+        "gc": _run_git(repo, "gc", "-q"),
+    }
+    failures = "\n".join(
+        f"{name}: rc={result.returncode}\n{result.stdout}{result.stderr}"
+        for name, result in results.items()
+        if result.returncode != 0
+    )
+    assert not failures, failures
 
 
 def _mk_shallow_scenario(tmp_path: Path) -> Path:
@@ -75,6 +103,7 @@ def test_prunes_orphaned_grafts_keeps_referenced_boundaries(tmp_path):
 
     assert removed == 1  # the middle, now-unreferenced tip
     assert set(_shallow_lines(clone)) == {head_sha, tip_sha}
+    assert not (clone / ".git" / "shallow.lock").exists()
     # Boundaries that survive must still walk cleanly.
     assert _git(clone, "rev-list", "--count", "HEAD") == "1"
     assert _git(clone, "rev-list", "--count", "origin/main") == "1"
@@ -133,7 +162,7 @@ def test_update_check_prunes_and_reports_count(tmp_path, monkeypatch, capsys):
     assert "pruned 2 stale shallow graft(s)" in out
 
 
-def test_prune_preserves_grafts_reachable_only_from_reflogs(tmp_path):
+def test_prune_preserves_grafts_reachable_only_from_reflogs(tmp_path, monkeypatch):
     """A reflog-only depth-1 tip must remain a valid shallow boundary."""
     origin = tmp_path / "origin"
     origin.mkdir()
@@ -179,7 +208,76 @@ def test_prune_preserves_grafts_reachable_only_from_reflogs(tmp_path):
     assert removed == 0
     assert reflog_only_sha in _shallow_lines(clone)
 
+    # Even if keep-set computation misses the live boundary, validation against
+    # the candidate lock file must reject it without touching the original.
+    real_query = gitlock_module._git_stdout_lines
+    injected = []
+
+    def omit_reflog_boundary(repo, args, **kwargs):
+        lines = real_query(repo, args, **kwargs)
+        if args == ["rev-list", "--all", "--reflog"]:
+            injected.append(True)
+            return [line for line in lines if line != reflog_only_sha]
+        return lines
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gitlock_module, "_git_stdout_lines", omit_reflog_boundary)
+        before = (clone / ".git" / "shallow").read_bytes()
+        assert prune_stale_shallow_grafts(clone) == 0
+        assert (clone / ".git" / "shallow").read_bytes() == before
+        assert not (clone / ".git" / "shallow.lock").exists()
+    assert injected
+
     # Once the reflog no longer reaches c2, its graft is genuinely stale.
     _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
     assert prune_stale_shallow_grafts(clone) == 1
     assert reflog_only_sha not in _shallow_lines(clone)
+    _assert_repo_healthy(clone)
+
+
+def test_prune_fails_open_when_reflog_walk_is_already_broken(tmp_path):
+    """An earlier bad prune must not trigger another destructive rewrite."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c1")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    broken_tip = _git(clone, "rev-parse", "HEAD")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c2")
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+    _git(clone, "reset", "-q", "--hard", "origin/main")
+
+    shallow_path = clone / ".git" / "shallow"
+    shallow_path.write_text(
+        "\n".join(line for line in _shallow_lines(clone) if line != broken_tip) + "\n"
+    )
+    assert _run_git(clone, "rev-list", "--all", "--reflog").returncode != 0
+    before = shallow_path.read_bytes()
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert shallow_path.read_bytes() == before
+    assert not (clone / ".git" / "shallow.lock").exists()
+
+
+def test_prune_skips_while_git_holds_shallow_lock(tmp_path):
+    """Never race a git process that is updating shallow boundaries."""
+    clone = _mk_shallow_scenario(tmp_path)
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    shallow_path = clone / ".git" / "shallow"
+    lock_path = clone / ".git" / "shallow.lock"
+    before = shallow_path.read_bytes()
+    lock_path.write_text("")
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert shallow_path.read_bytes() == before
+    assert lock_path.exists()

@@ -128,12 +128,14 @@ def is_ancestor_of_head(repo_root: Path, rev: str) -> bool:
 # ---- END PLUGIN-COMPAT ----
 
 
-def _git_stdout_lines(repo_root: Path, args: List[str]) -> List[str]:
+def _git_stdout_lines(
+    repo_root: Path, args: List[str], *, env: Optional[dict] = None
+) -> List[str]:
     """Run a read-only git query in ``repo_root``; [] on any failure."""
     try:
         result = subprocess.run(
             ["git", *args], cwd=str(repo_root),
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=env,
         )
         if result.returncode != 0:
             return []
@@ -153,11 +155,15 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
     on every run. Keep boundaries that protect commits reachable from refs or reflogs:
     dropping a graft for a reflog-only commit exposes its unfetched parent and breaks git
     maintenance. The dropped commits are genuinely unreachable and their objects are left
-    for ``git gc``. Returns the number of graft lines removed; never raises, and restores
-    the original file if the trimmed set breaks history walking.
+    for ``git gc``. Returns the number of graft lines removed; never raises, and validates
+    the candidate through Git's lockfile before replacing the original.
     """
     try:
-        shallow_rel = _git_stdout_lines(repo_root, ["rev-parse", "--git-path", "shallow"])
+        query_env = os.environ.copy()
+        query_env.pop("GIT_SHALLOW_FILE", None)
+        shallow_rel = _git_stdout_lines(
+            repo_root, ["rev-parse", "--git-path", "shallow"], env=query_env
+        )
         if not shallow_rel:
             return 0
         shallow_path = Path(shallow_rel[0])
@@ -165,35 +171,83 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
             shallow_path = Path(repo_root) / shallow_path
         if not shallow_path.is_file():
             return 0
-        lines = [line for line in shallow_path.read_text(encoding="utf-8").splitlines() if line]
+        original = shallow_path.read_text(encoding="utf-8")
+        lines = [line for line in original.splitlines() if line]
         if not lines:
             return 0
-        reachable = _git_stdout_lines(repo_root, ["rev-list", "--all", "--reflog"])
+        reachable = _git_stdout_lines(
+            repo_root, ["rev-list", "--all", "--reflog"], env=query_env
+        )
         if not reachable:
             # A failed reachability probe is indistinguishable from an empty result here.
             # This repository has shallow commits, so either way retaining them is safe.
             return 0
         keep = set(lines) & {
-            *(_git_stdout_lines(repo_root, ["rev-parse", "HEAD"]) or []),
-            *(_git_stdout_lines(repo_root, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD"]) or []),
+            *(_git_stdout_lines(repo_root, ["rev-parse", "HEAD"], env=query_env) or []),
+            *(_git_stdout_lines(
+                repo_root,
+                ["rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
+                env=query_env,
+            ) or []),
             *reachable,
         }
-        if len(keep) == len(lines):
+        if not keep or len(keep) == len(lines):
             return 0
-        original = shallow_path.read_text(encoding="utf-8")
-        tmp_path = shallow_path.with_name(shallow_path.name + ".hermes-prune")
-        tmp_path.write_text("\n".join(sorted(keep)) + "\n", encoding="utf-8")
-        os.replace(tmp_path, shallow_path)
-        # Fail-safe: if any reachable walk now crosses a boundary we wrongly removed,
-        # put the grafts back — a growing file beats a broken repo.
-        still_walks = _git_stdout_lines(repo_root, ["rev-list", "--count", "HEAD"]) and \
-            _git_stdout_lines(repo_root, ["rev-list", "--count", "--all", "--reflog"])
-        if not still_walks:
-            shallow_path.write_text(original, encoding="utf-8")
-            logger.debug("shallow prune self-check failed; grafts restored")
+
+        lock_path = shallow_path.with_name(shallow_path.name + ".lock")
+        mode = shallow_path.stat().st_mode & 0o777
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+        except FileExistsError:
+            # Git owns this lock while changing shallow boundaries. Skipping prevents
+            # our read-modify-write from discarding a boundary added by a concurrent fetch.
             return 0
-        logger.info("Pruned %d stale shallow graft(s) in %s", len(lines) - len(keep), repo_root)
-        return len(lines) - len(keep)
+        lock_owned = True
+        open_fd: Optional[int] = lock_fd
+        try:
+            # Reachability was computed without holding Git's lock. If another process
+            # updated the file before we acquired it, discard this stale proposal.
+            if shallow_path.read_text(encoding="utf-8") != original:
+                return 0
+
+            handle = os.fdopen(lock_fd, "w", encoding="utf-8")
+            open_fd = None
+            with handle:
+                handle.write("\n".join(sorted(keep)) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(lock_path, mode)
+
+            # Validate against the candidate shallow file before publishing it. The
+            # original remains untouched if the proposed trim breaks any reachable walk.
+            candidate_env = query_env.copy()
+            candidate_env["GIT_SHALLOW_FILE"] = str(lock_path)
+            still_walks = _git_stdout_lines(
+                repo_root,
+                ["rev-list", "--count", "HEAD", "--all", "--reflog"],
+                env=candidate_env,
+            )
+            if not still_walks:
+                logger.debug("shallow prune self-check failed; original retained")
+                return 0
+
+            # Git's lock file is the candidate itself; rename publishes the trim and
+            # releases the lock atomically, matching Git's own lockfile protocol.
+            os.replace(lock_path, shallow_path)
+            lock_owned = False
+            logger.info("Pruned %d stale shallow graft(s) in %s", len(lines) - len(keep), repo_root)
+            return len(lines) - len(keep)
+        finally:
+            if open_fd is not None:
+                try:
+                    os.close(open_fd)
+                except OSError:
+                    pass
+            if lock_owned:
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    logger.warning("Could not remove shallow prune lock %s", lock_path, exc_info=True)
     except Exception:
         logger.debug("shallow graft prune failed for %s", repo_root, exc_info=True)
         return 0
