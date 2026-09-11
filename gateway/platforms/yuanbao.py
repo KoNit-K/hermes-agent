@@ -2632,6 +2632,10 @@ class MessageSender:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
         if not isinstance(response, dict):
+            logger.warning(
+                "[%s] send rejected: non-dict response type=%s req_id=%s",
+                adapter.name, type(response).__name__, req_id,
+            )
             return {"success": False, "error": "malformed send response"}
         return MessageSender._ack_from_response(adapter, response)
 

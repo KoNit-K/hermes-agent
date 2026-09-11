@@ -63,6 +63,11 @@ def test_fail_open_status0_no_data_is_success():
     assert result["success"] is True
 
 
+def test_fail_open_empty_dict_is_success():
+    result = _dispatch({})
+    assert result == {"success": True, "msg_key": ""}
+
+
 @pytest.mark.parametrize("response", [None, [], "unexpected", 42])
 def test_non_dict_send_response_is_malformed(response):
     result = _dispatch(response)
