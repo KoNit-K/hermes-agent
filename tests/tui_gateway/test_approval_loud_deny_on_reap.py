@@ -66,7 +66,7 @@ def _cancelled_events(captured):
 
 def test_interrupt_with_pending_broadcasts_approval_cancelled(captured, session, pending_entry):
     """RED on main: deny-resolve happens, but nothing tells the client the prompt died."""
-    server._interrupt_session_turn(SID, session, request_id=f"client-gone-{SID}")
+    server._interrupt_session_turn(SID, session, request_id=f"client-gone-{SID}", orphan=True)
 
     cancelled = _cancelled_events(captured)
     assert cancelled, "interrupt/reap must broadcast approval.cancelled when it drops a pending prompt"
@@ -109,19 +109,29 @@ def test_broadcast_failure_still_deny_resolves(monkeypatch, session, pending_ent
     monkeypatch.setattr(server, "_session_uses_compute_host", lambda *_a, **_k: False)
     monkeypatch.setattr(server, "_clear_pending", lambda *_a, **_k: None)
 
-    server._interrupt_session_turn(SID, session, request_id=f"client-gone-{SID}")
+    server._interrupt_session_turn(SID, session, request_id=f"client-gone-{SID}", orphan=True)
 
     assert pending_entry.result == "deny"
     assert pending_entry.event.is_set()
 
 
 def test_user_interrupt_reason_is_interrupt(captured, session, pending_entry):
-    """session.interrupt (no client-gone request_id) labels the drop as interrupt, not reap."""
-    server._interrupt_session_turn(SID, session)
+    """session.interrupt (orphan=False, even with a client-gone request_id) labels interrupt, not reap."""
+    server._interrupt_session_turn(SID, session, request_id=f"client-gone-{SID}")
 
     cancelled = _cancelled_events(captured)
     assert cancelled
     assert cancelled[0][1]["reason"] == "interrupt"
+    assert pending_entry.result == "deny"
+
+
+def test_orphan_kwarg_labels_ws_orphan_reap_without_client_gone_prefix(captured, session, pending_entry):
+    """Reason comes from orphan=, not request_id prefix sniffing."""
+    server._interrupt_session_turn(SID, session, request_id="interrupt-manual", orphan=True)
+
+    cancelled = _cancelled_events(captured)
+    assert cancelled
+    assert cancelled[0][1]["reason"] == "ws_orphan_reap"
     assert pending_entry.result == "deny"
 
 
