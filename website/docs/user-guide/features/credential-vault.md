@@ -88,9 +88,9 @@ the page.
 
 ## What does not belong
 
-Vault kinds stay login, payment, and address — there is no document kind.
-Statement PDFs, passport scans, and tax PDFs are not vault items. Putting a
-PDF in the vault and `read_file`ing it is equivalent to `get_secret`.
+Documents and scans are not vault items: there is no document or blob kind.
+Statement PDFs, passport scans, and tax PDFs belong outside the vault. Putting
+a PDF in the vault and `read_file`ing it is equivalent to `get_secret`.
 File-input (`type=file`) uploads are not `browser_vault_fill`.
 
 ## Headless sessions
