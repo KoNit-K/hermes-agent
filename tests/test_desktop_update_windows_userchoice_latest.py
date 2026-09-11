@@ -4,8 +4,8 @@
 only the legacy ``UrlAssociations\\<scheme>\\UserChoice\\ProgId``. On Windows 11
 25H2 / build 26200, Settings writes the real choice to the
 ``UserChoiceLatest\\ProgId`` subkey and no longer mirrors it into
-``UserChoice``. Some builds expose the value on the ``UserChoiceLatest``
-parent, so that remains a compatibility fallback.
+``UserChoice``. The ``UserChoiceLatest`` parent value remains only as a
+defensive compatibility probe.
 
 This test is source-level because Linux/macOS CI cannot execute the PowerShell
 hand-off. It guards the ProgId SOURCE order (nested Latest → parent Latest →
@@ -56,19 +56,40 @@ def _browser_detection_scope() -> str:
     return "\n".join(parts)
 
 
+def _prog_id_source_scope() -> str:
+    """The function that owns the ordered ProgId source probes."""
+    source = _read()
+    try:
+        return _extract_function(source, "Get-SchemeProgIds")
+    except AssertionError:
+        return _extract_function(source, "Get-DefaultBrowserExe")
+
+
+def _code_only(source: str) -> str:
+    """Drop comments so path anchors only inspect executable source."""
+    return "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _index(source: str, pattern: str) -> int:
+    match = re.search(pattern, source)
+    return match.start() if match else -1
+
+
 def test_get_default_browser_exe_prefers_nested_then_parent_userchoice_latest() -> None:
     scope = _browser_detection_scope()
+    source_scope = _code_only(_prog_id_source_scope())
     source = _read()
 
-    nested_latest_idx = scope.find(
-        '\\UserChoiceLatest\\ProgId" -Name ProgId'
+    nested_latest_idx = _index(
+        source_scope, r"\\UserChoiceLatest\\ProgId\b"
     )
-    parent_latest_idx = scope.find(
-        '\\UserChoiceLatest" -Name ProgId',
-        nested_latest_idx + 1,
+    parent_latest_idx = _index(
+        source_scope, r"\\UserChoiceLatest(?!\\ProgId)\b"
     )
-    assoc_idx = scope.find("Get-AssocQueryStringProgId $proto")
-    legacy_idx = scope.find('\\UserChoice" -Name ProgId')
+    assoc_idx = source_scope.find("Get-AssocQueryStringProgId")
+    legacy_idx = _index(source_scope, r"\\UserChoice(?!Latest)\b")
 
     assert nested_latest_idx != -1, (
         "Get-DefaultBrowserExe must first read the ProgId value from the "
@@ -92,9 +113,11 @@ def test_get_default_browser_exe_prefers_nested_then_parent_userchoice_latest() 
         "Each ProgId source must retain ordered de-duplication before browser "
         "resolution."
     )
-    assert scope.count("catch {}") >= 3, (
-        "Registry source failures must remain fail-open so later ProgId "
-        "sources are still consulted."
+    # Five fail-open boundaries: nested latest, parent latest, Assoc API /
+    # Add-Type, legacy UserChoice, and the selected ProgId's command lookup.
+    assert scope.count("catch {}") == 5, (
+        "All five browser-resolution probes must remain fail-open so a failed "
+        "source or path lookup does not abort the Desktop update hand-off."
     )
 
     assoc_scope = scope + "\n" + source
