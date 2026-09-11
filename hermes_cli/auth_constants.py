@@ -132,6 +132,14 @@ CODEX_RATE_LIMITED_CODE = "codex_rate_limited"
 AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL = "missing_credential"
 
 
+def missing_credential_category_for_state(state: Any) -> Optional[str]:
+    """Classify absence only when no terminal quarantine proves credentials existed before."""
+    marker = state.get("last_auth_error") if isinstance(state, dict) else None
+    if isinstance(marker, dict) and marker.get("relogin_required") is True:
+        return None
+    return AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+
 class AuthError(RuntimeError):
     """Structured auth error with UX mapping hints."""
 

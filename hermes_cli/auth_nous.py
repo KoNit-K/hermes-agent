@@ -20,12 +20,11 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, FrozenSet, List, Optional
 from urllib.parse import urlparse
 from hermes_cli.auth_codex import _pool_entries
 from hermes_cli.auth_constants import (
-    _decode_jwt_claims, AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL, AUTH_LOCK_TIMEOUT_SECONDS,
-    AuthError, DEFAULT_NOUS_CLIENT_ID,
+    _decode_jwt_claims, AUTH_LOCK_TIMEOUT_SECONDS, AuthError, DEFAULT_NOUS_CLIENT_ID,
     DEFAULT_NOUS_INFERENCE_URL, DEFAULT_NOUS_PORTAL_URL, DEFAULT_NOUS_SCOPE, DEFAULT_NOUS_WELCOME_URL,
     DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS, NOUS_AUTH_PATH_INVOKE_JWT, NOUS_BILLING_MANAGE_SCOPE,
     NOUS_DEVICE_CODE_SOURCE, NOUS_INFERENCE_INVOKE_SCOPE, NOUS_INVOKE_JWT_MIN_TTL_SECONDS,
-    _nous_err, httpx)
+    _nous_err, httpx, missing_credential_category_for_state)
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
@@ -953,7 +952,7 @@ class _NousRuntimeResolve:
             raise _nous_err(
                 "No access token found for Nous Portal login.",
                 relogin=True,
-                category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+                category=missing_credential_category_for_state(self.state),
             )
         invoke_jwt_status = self.invoke_jwt_status()
         self.skip_refresh_if_peer_rotated()
@@ -1011,7 +1010,7 @@ def _resolve_nous_runtime_credentials(
             raise _nous_err(
                 "Hermes is not logged into Nous Portal.",
                 relogin=True,
-                category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+                category=missing_credential_category_for_state(state),
             )
         run = _NousRuntimeResolve(
             auth_store, state, state_source_path, force_refresh=force_refresh,

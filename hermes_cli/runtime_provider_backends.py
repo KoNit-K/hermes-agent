@@ -191,13 +191,7 @@ def _resolve_bedrock_runtime(requested_provider: str, model_cfg: Dict[str, Any],
             "  - AWS_PROFILE (for SSO / named profiles)\n"
             "  - IAM instance role (EC2, ECS, Lambda)\n"
             "Or run 'aws configure' to set up credentials.",
-            provider="bedrock",
             code="no_aws_credentials",
-            category=(
-                rp.AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
-                if requested_provider != "auto"
-                else None
-            ),
         )
     bedrock_cfg = load_config().get("bedrock", {})
     # Region priority (config.yaml bedrock.region → env → us-east-1) lives in the adapter.

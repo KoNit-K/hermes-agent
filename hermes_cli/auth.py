@@ -105,7 +105,8 @@ from hermes_cli.auth_constants import (  # noqa: F401  re-exported
     DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL, DEFAULT_SPOTIFY_API_BASE_URL, SPOTIFY_DOCS_URL,
     DEFAULT_SPOTIFY_SCOPE, SERVICE_PROVIDER_NAMES, LMSTUDIO_NOAUTH_PLACEHOLDER,
     ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, CODEX_RATE_LIMITED_CODE,
-    AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL, AuthError, _nous_err, httpx)
+    AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL, missing_credential_category_for_state,
+    AuthError, _nous_err, httpx)
 
 logger = logging.getLogger(__name__)
 

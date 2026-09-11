@@ -16,10 +16,10 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 from urllib.parse import urlparse
 from hermes_cli.auth_codex import _load_auth_store_maybe_locked, _refresh_payload_access_token
 from hermes_cli.auth_constants import (
-    AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL, AUTH_LOCK_TIMEOUT_SECONDS, AuthError,
-    DEFAULT_XAI_OAUTH_BASE_URL, DEVICE_CODE_GRANT_TYPE,
+    AUTH_LOCK_TIMEOUT_SECONDS, AuthError, DEFAULT_XAI_OAUTH_BASE_URL, DEVICE_CODE_GRANT_TYPE,
     XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, XAI_OAUTH_CLIENT_ID, XAI_OAUTH_DEVICE_CODE_URL,
     XAI_OAUTH_DISCOVERY_URL, XAI_OAUTH_SCOPE, _FORM_JSON_HEADERS, _xai_err, httpx,
+    missing_credential_category_for_state,
 )
 from utils import env_float
 
@@ -81,7 +81,9 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     if not state:
         raise _xai_err(
             "No xAI OAuth credentials stored. Select xAI Grok OAuth (SuperGrok / Premium+) in `hermes model`.",
-            "xai_auth_missing", relogin=True, category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+            "xai_auth_missing",
+            relogin=True,
+            category=missing_credential_category_for_state(state),
         )
     tokens = state.get("tokens")
     if not isinstance(tokens, dict):
@@ -89,7 +91,7 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
             f"xAI OAuth state is missing tokens. {_RELOGIN}",
             "xai_auth_invalid_shape",
             relogin=True,
-            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+            category=missing_credential_category_for_state(state),
         )
     access_token, refresh_token = _token_pair(tokens)
     for value, field in ((access_token, "access_token"), (refresh_token, "refresh_token")):
@@ -98,7 +100,7 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
                 f"xAI OAuth state is missing {field}. {_RELOGIN}",
                 f"xai_auth_missing_{field}",
                 relogin=True,
-                category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+                category=missing_credential_category_for_state(state),
             )
     return {
         "tokens": tokens, "last_refresh": state.get("last_refresh"),

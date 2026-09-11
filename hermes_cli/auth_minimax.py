@@ -15,9 +15,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 from hermes_cli.auth_constants import (
-    AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL, AuthError, MINIMAX_OAUTH_GRANT_TYPE,
+    AuthError, MINIMAX_OAUTH_GRANT_TYPE,
     MINIMAX_OAUTH_REFRESH_SKEW_SECONDS, MINIMAX_OAUTH_SCOPE,
-    _FORM_JSON_HEADERS, _minimax_err, httpx,
+    _FORM_JSON_HEADERS, _minimax_err, httpx, missing_credential_category_for_state,
 )
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
@@ -287,7 +287,7 @@ def _minimax_fresh_state() -> Dict[str, Any]:
             "Not logged into MiniMax OAuth. Run `hermes model` and select MiniMax (OAuth).",
             "not_logged_in",
             relogin=True,
-            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+            category=missing_credential_category_for_state(state),
         )
     try:
         return _refresh_minimax_oauth_state(state)
