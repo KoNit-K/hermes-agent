@@ -2631,7 +2631,9 @@ class MessageSender:
             return {"success": False, "error": f"Request timeout after {DEFAULT_SEND_TIMEOUT}s"}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
-        return MessageSender._ack_from_response(adapter, response if isinstance(response, dict) else {})
+        if not isinstance(response, dict):
+            return {"success": False, "error": "malformed send response"}
+        return MessageSender._ack_from_response(adapter, response)
 
     @staticmethod
     def validate_media(file_bytes: Optional[bytes], filename: str, max_size_mb: int = 20) -> Optional[str]:

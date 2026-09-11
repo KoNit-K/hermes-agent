@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from gateway.platforms.yuanbao import MessageSender, YuanbaoAdapter
 from gateway.platforms.yuanbao_proto import _s, _v
 
@@ -59,6 +61,12 @@ def test_fail_open_status0_no_data_is_success():
     resp = {"head": {"status": 0, "msg_id": "c2c_empty"}}
     result = _dispatch(resp, req_id="c2c_empty")
     assert result["success"] is True
+
+
+@pytest.mark.parametrize("response", [None, [], "unexpected", 42])
+def test_non_dict_send_response_is_malformed(response):
+    result = _dispatch(response)
+    assert result == {"success": False, "error": "malformed send response"}
 
 
 def test_malformed_nonempty_truncated_varint_is_not_success():
