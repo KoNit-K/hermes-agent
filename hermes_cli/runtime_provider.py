@@ -285,7 +285,7 @@ def _anthropic_cfg_base_url(model_cfg: Dict[str, Any]) -> str:
     return cfg_base_url if _anthropic_base_url_override_ok(cfg_base_url) else ""
 
 
-def _anthropic_token_or_raise(*, model: str | None = None, classify_missing: bool = True) -> str:
+def _anthropic_token_or_raise(*, model: str | None = None) -> str:
     from agent.anthropic_credentials import resolve_anthropic_token
     token = resolve_anthropic_token(model=model)
     if not token:
@@ -297,7 +297,7 @@ def _anthropic_token_or_raise(*, model: str | None = None, classify_missing: boo
         raise AuthError(
             _NO_ANTHROPIC_CREDENTIALS_MSG,
             provider="anthropic",
-            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL if classify_missing else None,
+            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
         )
     return token
 
@@ -706,14 +706,7 @@ def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, A
     pconfig = PROVIDER_REGISTRY.get(provider)
     if not (pconfig and pconfig.auth_type == "oauth_minimax"):
         return None
-    try:
-        creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
-    except AuthError as exc:
-        # Preserve the historical auto-route behavior: only an explicitly selected provider
-        # gets fail-closed missing-credential semantics.
-        if requested_provider == "auto" and exc.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL:
-            exc.category = None
-        raise
+    creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
     return _runtime(provider, "anthropic_messages", creds["base_url"], creds["api_key"], source=creds.get("source", "oauth"),
                     requested_provider=requested_provider)
 
@@ -748,10 +741,7 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any], t
                 category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
             )
     else:
-        token = _anthropic_token_or_raise(
-            model=target_model,
-            classify_missing=requested_provider != "auto",
-        )
+        token = _anthropic_token_or_raise(model=target_model)
     return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
 
 
@@ -827,15 +817,8 @@ def _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_
     # bypass _resolve_named_custom_runtime (which would yield custom/chat_completions/no key).
     eff_base = (explicit_base_url or "").strip()
     if requested_provider == "anthropic" and base_url_host_matches(eff_base, "azure.com"):
-        api_key = (explicit_api_key or "").strip() or _azure_anthropic_env_key(_get_model_config())
-        if not api_key:
-            raise AuthError(
-                "No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or ANTHROPIC_API_KEY.",
-                provider="anthropic",
-                category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
-            )
         return _runtime("anthropic", "anthropic_messages", eff_base.rstrip("/"),
-                        api_key, source="azure-explicit",
+                        (explicit_api_key or "").strip() or _azure_anthropic_env_key({}), source="azure-explicit",
                         requested_provider=requested_provider)
     # Azure Foundry resolves before the custom-runtime / pool / generic paths so its config is
     # always picked up from model.base_url + model.api_mode, with or without explicit_* args.
@@ -866,6 +849,20 @@ def _tag(runtime: Optional[Dict[str, Any]], requested_provider: str) -> Optional
     if runtime:
         runtime["requested_provider"] = requested_provider
     return runtime
+
+
+def _resolve_rung(requested_provider: str, resolve: Callable[[], Optional[Dict[str, Any]]]):
+    """Run one rung; semantic credential absence never escapes an auto route."""
+    try:
+        return resolve()
+    except AuthError as exc:
+        if (
+            requested_provider == "auto"
+            and getattr(exc, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+        ):
+            logger.info("Auto provider rung has no credentials; continuing provider ladder.")
+            return None
+        raise
 
 
 def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url) -> Dict[str, Any]:
@@ -928,36 +925,97 @@ def _raise_for_credentialless_bare_custom(requested_provider: str, runtime: Dict
 def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model):
     """Ladder rungs 2-8, yielded lazily so each is evaluated only when the previous one returned
     nothing; the last rung (OpenRouter / bare-custom fallback) always yields a runtime."""
-    yield _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
-    yield _tag(_resolve_named_custom_runtime(requested_provider=requested_provider, explicit_api_key=explicit_api_key,
-                                             explicit_base_url=explicit_base_url, target_model=target_model), requested_provider)
+    yield _resolve_rung(
+        requested_provider,
+        lambda: _resolve_requested_shortcuts(
+            requested_provider, explicit_api_key, explicit_base_url, target_model),
+    )
+    yield _resolve_rung(
+        requested_provider,
+        lambda: _tag(
+            _resolve_named_custom_runtime(
+                requested_provider=requested_provider,
+                explicit_api_key=explicit_api_key,
+                explicit_base_url=explicit_base_url,
+                target_model=target_model,
+            ),
+            requested_provider,
+        ),
+    )
     # If provider is "auto" (or unset) but config.yaml has an explicit base_url pointing at a custom/local
     # endpoint (e.g. Ollama at localhost:11434), route through the OpenAI-compatible resolver instead of
     # letting resolve_provider() pick up an ANTHROPIC_API_KEY or OPENAI_API_KEY from the environment and
     # send the request to a cloud API. Fixes #3846.
     if not explicit_base_url and not explicit_api_key:
-        yield _local_endpoint_bypass(requested_provider, explicit_api_key, explicit_base_url)
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _local_endpoint_bypass(
+                requested_provider, explicit_api_key, explicit_base_url),
+        )
     provider = resolve_provider(requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url)
     model_cfg = _get_model_config()
-    yield _opencode_free_runtime(provider, requested_provider, model_cfg, target_model)
-    yield _resolve_explicit_runtime(provider=provider, requested_provider=requested_provider, model_cfg=model_cfg,
-                                    explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url,
-                                    target_model=target_model)
-    yield _resolve_from_pool(provider, requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
+    yield _resolve_rung(
+        requested_provider,
+        lambda: _opencode_free_runtime(provider, requested_provider, model_cfg, target_model),
+    )
+    yield _resolve_rung(
+        requested_provider,
+        lambda: _resolve_explicit_runtime(
+            provider=provider,
+            requested_provider=requested_provider,
+            model_cfg=model_cfg,
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+            target_model=target_model,
+        ),
+    )
+    yield _resolve_rung(
+        requested_provider,
+        lambda: _resolve_from_pool(
+            provider, requested_provider, model_cfg,
+            explicit_api_key, explicit_base_url, target_model),
+    )
     if provider in _OAUTH_RUNTIME_PROVIDERS:
-        yield _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model)
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model),
+        )
     if provider == "minimax-oauth":
-        yield _minimax_oauth_runtime(provider, requested_provider)
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _minimax_oauth_runtime(provider, requested_provider),
+        )
     if _is_external_process_provider(provider):
-        yield _resolve_external_process_runtime(provider, requested_provider)
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _resolve_external_process_runtime(provider, requested_provider),
+        )
     if provider == "anthropic":
+<<<<<<< HEAD
         yield _anthropic_env_runtime(requested_provider, model_cfg, target_model)
+=======
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _anthropic_env_runtime(requested_provider, model_cfg),
+        )
+>>>>>>> 55ab99ba7a (fix(auth): preserve quarantine and auto fallback semantics)
     if provider == "bedrock":
-        yield _resolve_bedrock_runtime(requested_provider, model_cfg, target_model)
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _resolve_bedrock_runtime(requested_provider, model_cfg, target_model),
+        )
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
-        yield _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model)
-    yield _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
+        yield _resolve_rung(
+            requested_provider,
+            lambda: _api_key_provider_runtime(
+                provider, pconfig, requested_provider, model_cfg, target_model),
+        )
+    yield _resolve_rung(
+        requested_provider,
+        lambda: _openrouter_fallback(
+            requested_provider, explicit_api_key, explicit_base_url),
+    )
 
 
 def format_runtime_provider_error(error: Exception) -> str:

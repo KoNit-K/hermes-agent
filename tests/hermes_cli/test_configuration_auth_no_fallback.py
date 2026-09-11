@@ -194,6 +194,249 @@ def test_auto_codex_empty_store_keeps_internal_provider_ladder(monkeypatch):
     assert runtime["provider"] == "openrouter"
 
 
+def test_quarantined_oauth_states_keep_fallback_semantics(monkeypatch):
+    """Terminal quarantine proves credentials existed, so empty state is not initial absence."""
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import auth_minimax, auth_xai
+    from hermes_cli.auth import should_try_fallback_on_auth_error
+    from hermes_cli.auth_nous import _NousRuntimeResolve
+
+    marker = {"code": "invalid_grant", "relogin_required": True}
+    xai_store = {
+        "providers": {
+            "xai-oauth": {
+                "tokens": {"access_token": "revoked", "refresh_token": "burned"},
+            },
+        },
+    }
+    monkeypatch.setattr(auth_mod, "_load_auth_store", lambda: xai_store)
+    monkeypatch.setattr(auth_mod, "_save_auth_store", lambda _store: None)
+    auth_xai._quarantine_xai_oauth_tokens(
+        AuthError(
+            "revoked",
+            provider="xai-oauth",
+            code="xai_refresh_failed",
+            relogin_required=True,
+        )
+    )
+    monkeypatch.setattr(
+        auth_xai,
+        "_load_auth_store_maybe_locked",
+        lambda _lock=True: xai_store,
+    )
+    monkeypatch.setattr(auth_mod, "_load_global_auth_store", lambda: {})
+    with pytest.raises(AuthError) as xai_exc:
+        auth_xai._read_xai_oauth_tokens()
+    assert getattr(xai_exc.value, "category", None) is None
+    assert should_try_fallback_on_auth_error(xai_exc.value) is True
+
+    minimax_state = {"last_auth_error": marker}
+    monkeypatch.setattr(auth_mod, "get_provider_auth_state", lambda _provider: minimax_state)
+    with pytest.raises(AuthError) as minimax_exc:
+        auth_minimax._minimax_fresh_state()
+    assert getattr(minimax_exc.value, "category", None) is None
+    assert should_try_fallback_on_auth_error(minimax_exc.value) is True
+
+    nous_state = {"last_auth_error": marker}
+    nous_run = _NousRuntimeResolve(
+        {"providers": {"nous": nous_state}},
+        nous_state,
+        None,
+        force_refresh=False,
+        stale_access_token=None,
+        timeout_seconds=1,
+    )
+    monkeypatch.setattr(nous_run, "merge_shared", lambda: False)
+    with pytest.raises(AuthError) as nous_exc:
+        nous_run.ensure_usable_access_token(None)
+    assert getattr(nous_exc.value, "category", None) is None
+    assert should_try_fallback_on_auth_error(nous_exc.value) is True
+
+
+def test_producer_level_missing_credential_categories(tmp_path, monkeypatch):
+    """Key resolve-time producers emit the semantic category, not provider-specific code guesses."""
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import auth_minimax, auth_qwen, auth_xai, runtime_provider
+    from hermes_cli.auth_nous import _NousRuntimeResolve
+
+    monkeypatch.setattr(auth_xai, "_load_auth_store_maybe_locked", lambda _lock=True: {})
+    monkeypatch.setattr(auth_mod, "_load_global_auth_store", lambda: {})
+    with pytest.raises(AuthError) as xai_exc:
+        auth_xai._read_xai_oauth_tokens()
+    assert getattr(xai_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+    monkeypatch.setattr(auth_mod, "get_provider_auth_state", lambda _provider: None)
+    with pytest.raises(AuthError) as minimax_exc:
+        auth_minimax._minimax_fresh_state()
+    assert getattr(minimax_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+    nous_run = _NousRuntimeResolve(
+        {},
+        {},
+        None,
+        force_refresh=False,
+        stale_access_token=None,
+        timeout_seconds=1,
+    )
+    monkeypatch.setattr(nous_run, "merge_shared", lambda: False)
+    with pytest.raises(AuthError) as nous_exc:
+        nous_run.ensure_usable_access_token(None)
+    assert getattr(nous_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+    missing_qwen = tmp_path / "missing-qwen-oauth.json"
+    monkeypatch.setattr(auth_mod, "_qwen_cli_auth_path", lambda: missing_qwen)
+    with pytest.raises(AuthError) as qwen_exc:
+        auth_qwen.resolve_qwen_runtime_credentials()
+    assert getattr(qwen_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+    monkeypatch.setattr("agent.vertex_adapter.get_vertex_config", lambda: ("", ""))
+    with pytest.raises(AuthError) as vertex_exc:
+        runtime_provider._resolve_vertex_runtime("vertex")
+    assert getattr(vertex_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+    monkeypatch.setattr("hermes_cli.config.get_env_value", lambda _name: "")
+    monkeypatch.setattr(runtime_provider, "_getenv", lambda *_args: "")
+    with pytest.raises(AuthError) as azure_exc:
+        runtime_provider._resolve_azure_foundry_runtime(
+            requested_provider="azure-foundry",
+            model_cfg={
+                "provider": "azure-foundry",
+                "base_url": "https://example.services.ai.azure.com",
+            },
+        )
+    assert getattr(azure_exc.value, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+
+def test_category_checks_tolerate_custom_auth_error_without_attribute():
+    """Older/custom AuthError subclasses may not expose the new semantic field."""
+    from hermes_cli import runtime_provider
+    from hermes_cli.auth import should_try_fallback_on_auth_error
+
+    error = AuthError("legacy custom error")
+    del error.category
+
+    assert should_try_fallback_on_auth_error(error) is True
+    with pytest.raises(AuthError):
+        runtime_provider._resolve_rung(
+            "auto",
+            lambda: (_ for _ in ()).throw(error),
+        )
+
+
+def test_auto_rung_centrally_absorbs_missing_category(monkeypatch):
+    """Auto absorbs semantic absence from shortcuts, Anthropic env, and MiniMax alike."""
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import runtime_provider
+
+    missing = AuthError(
+        "missing",
+        category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+    )
+    assert runtime_provider._resolve_rung("auto", lambda: (_ for _ in ()).throw(missing)) is None
+    with pytest.raises(AuthError):
+        runtime_provider._resolve_rung("anthropic", lambda: (_ for _ in ()).throw(missing))
+
+    monkeypatch.setattr("agent.anthropic_credentials.resolve_anthropic_token", lambda: "")
+    assert runtime_provider._resolve_rung(
+        "auto",
+        lambda: runtime_provider._anthropic_env_runtime("auto", {}),
+    ) is None
+
+    monkeypatch.setattr(
+        auth_mod,
+        "resolve_minimax_oauth_runtime_credentials",
+        lambda: (_ for _ in ()).throw(
+            AuthError("missing", category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL)
+        ),
+    )
+    assert runtime_provider._resolve_rung(
+        "auto",
+        lambda: runtime_provider._minimax_oauth_runtime("minimax-oauth", "auto"),
+    ) is None
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "minimax-oauth"])
+def test_auto_runtime_ladder_continues_after_provider_missing(provider, monkeypatch):
+    """Exercise the real ladder boundary for non-spec OAuth and Anthropic producers."""
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import runtime_provider
+
+    monkeypatch.setattr(runtime_provider, "_resolve_requested_shortcuts", lambda *_args: None)
+    monkeypatch.setattr(runtime_provider, "_resolve_named_custom_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(runtime_provider, "_local_endpoint_bypass", lambda *_args: None)
+    monkeypatch.setattr(runtime_provider, "resolve_provider", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
+    monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
+    monkeypatch.setattr(
+        runtime_provider,
+        "_openrouter_fallback",
+        lambda *_args: {"provider": "openrouter", "api_key": "fallback-key"},
+    )
+    monkeypatch.setattr("agent.anthropic_credentials.resolve_anthropic_token", lambda: "")
+    monkeypatch.setattr(
+        auth_mod,
+        "resolve_minimax_oauth_runtime_credentials",
+        lambda: (_ for _ in ()).throw(
+            AuthError("missing", category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL)
+        ),
+    )
+
+    runtime = runtime_provider.resolve_runtime_provider(requested="auto")
+
+    assert runtime["provider"] == "openrouter"
+
+
+def test_auto_azure_shortcut_missing_category_does_not_escape(monkeypatch):
+    """A categorized shortcut failure is absorbed at the same centralized auto boundary."""
+    from hermes_cli import runtime_provider
+
+    def missing_shortcut(*_args):
+        raise AuthError(
+            "Azure shortcut has no credential",
+            category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
+        )
+
+    monkeypatch.setattr(runtime_provider, "_resolve_requested_shortcuts", missing_shortcut)
+    monkeypatch.setattr(runtime_provider, "_resolve_named_custom_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(runtime_provider, "resolve_provider", lambda *_args, **_kwargs: "openrouter")
+    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
+    monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
+    monkeypatch.setattr(
+        runtime_provider,
+        "_resolve_explicit_runtime",
+        lambda **_kwargs: {"provider": "openrouter", "api_key": "explicit-route"},
+    )
+
+    runtime = runtime_provider.resolve_runtime_provider(
+        requested="auto",
+        explicit_base_url="https://example.services.ai.azure.com",
+    )
+
+    assert runtime["provider"] == "openrouter"
+
+
+def test_azure_explicit_shortcut_preserves_preexisting_empty_key_behavior(monkeypatch):
+    """Keep the Azure Anthropic shortcut behavior unchanged; this PR only classifies producers."""
+    from hermes_cli import runtime_provider
+
+    monkeypatch.setattr(runtime_provider, "_getenv", lambda *_args: "")
+    runtime = runtime_provider._resolve_requested_shortcuts(
+        "anthropic",
+        None,
+        "https://example.services.ai.azure.com",
+        None,
+    )
+
+    assert runtime["provider"] == "anthropic"
+    assert runtime["api_key"] == ""
+    assert runtime_provider._resolve_requested_shortcuts(
+        "auto",
+        None,
+        "https://example.services.ai.azure.com",
+        None,
+    ) is None
+
+
 def test_tui_missing_api_key_reraises_without_walking_chain(monkeypatch):
     """TUI resolve-time missing_api_key must re-raise, not switch provider."""
     from tui_gateway import server
