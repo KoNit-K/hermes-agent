@@ -435,6 +435,25 @@ def is_rate_limited_auth_error(error: Exception) -> bool:
             and error.code == CODEX_RATE_LIMITED_CODE)
 
 
+# Resolve-time operator misconfig: fail closed. Do not silently spend a different paid provider.
+NON_FALLBACK_AUTH_CODES = frozenset({
+    "missing_api_key",
+    "no_provider_configured",
+    "invalid_provider",
+})
+
+
+def is_configuration_auth_error(error: Exception) -> bool:
+    return (
+        isinstance(error, AuthError)
+        and getattr(error, "code", None) in NON_FALLBACK_AUTH_CODES
+    )
+
+
+def should_try_fallback_on_auth_error(error: Exception) -> bool:
+    return not is_configuration_auth_error(error)
+
+
 # Entitlement failures: Nous gets a Portal-aware message; other providers a fixed generic one (or
 # the raw error when no generic text exists for the code).
 _GENERIC_ENTITLEMENT_MESSAGES = {
