@@ -4361,6 +4361,7 @@ class SlackAdapter(SlackWisdomMixin, BasePlatformAdapter):
             chat_type="dm" if is_dm else "group",
             user_id=user_id,
             user_name=user_name,
+            message_id=ts,
             thread_id=thread_ts,
             scope_id=str(team_id) if team_id else None,
             # Workflow/app posts have user=None; flag them so the SLACK_ALLOW_BOTS bypass can
