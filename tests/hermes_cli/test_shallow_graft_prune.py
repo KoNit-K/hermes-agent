@@ -5,9 +5,9 @@ new graft and never removes the previous one, so a long-lived shallow installer
 checkout accumulates one line per update check (57 observed in the wild). The
 stale grafts break ``merge-base`` and push ``hermes update`` into the
 orphan-divergence reset path. ``prune_stale_shallow_grafts()`` drops grafts no
-live ref points at; ``hermes update --check`` calls it after its successful
-depth-1 fetch, clearing the grafts accumulated by past checks (the passive
-banner check no longer git-fetches since #107648).
+ref or reflog reaches; ``hermes update --check`` calls it after its successful
+depth-1 fetch, clearing the grafts accumulated by past checks once their reflogs
+expire (the passive banner check no longer git-fetches since #107648).
 """
 
 from __future__ import annotations
@@ -24,11 +24,15 @@ SHA_B = "b" * 40
 
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=str(repo), capture_output=True, text=True
-    )
+    result = _run_git(repo, *args)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], cwd=str(repo), capture_output=True, text=True
+    )
 
 
 def _shallow_lines(repo: Path) -> list:
@@ -65,6 +69,7 @@ def test_prunes_orphaned_grafts_keeps_referenced_boundaries(tmp_path):
 
     head_sha = _git(clone, "rev-parse", "HEAD")
     tip_sha = _git(clone, "rev-parse", "origin/main")
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
 
     removed = prune_stale_shallow_grafts(clone)
 
@@ -77,6 +82,7 @@ def test_prunes_orphaned_grafts_keeps_referenced_boundaries(tmp_path):
 
 def test_prune_is_idempotent_and_noop_without_grafts(tmp_path):
     clone = _mk_shallow_scenario(tmp_path)
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
     assert prune_stale_shallow_grafts(clone) == 1
     assert prune_stale_shallow_grafts(clone) == 0  # nothing left to drop
 
@@ -125,3 +131,55 @@ def test_update_check_prunes_and_reports_count(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert prune_calls == [tmp_path]
     assert "pruned 2 stale shallow graft(s)" in out
+
+
+def test_prune_preserves_grafts_reachable_only_from_reflogs(tmp_path):
+    """A reflog-only depth-1 tip must remain a valid shallow boundary."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    # Fetch c2 without its parent c1, then supersede it with c3. The c2 graft is
+    # now required only by origin/main's reflog.
+    for message in ("c1", "c2"):
+        _git(origin, "commit", "--allow-empty", "-q", "-m", message)
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+    reflog_only_sha = _git(clone, "rev-parse", "origin/main")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c3")
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+
+    assert reflog_only_sha in _shallow_lines(clone)
+    assert reflog_only_sha in _git(
+        clone, "reflog", "show", "--all", "--format=%H"
+    ).splitlines()
+
+    removed = prune_stale_shallow_grafts(clone)
+    fetch = _run_git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+    gc = _run_git(clone, "gc", "-q")
+    walk = _run_git(clone, "rev-list", "--count", "--all", "--reflog")
+    fsck = _run_git(clone, "fsck", "--connectivity-only")
+    failures = "\n".join(
+        f"{name}: rc={result.returncode}\n{result.stdout}{result.stderr}"
+        for name, result in (("fetch", fetch), ("gc", gc), ("walk", walk), ("fsck", fsck))
+        if result.returncode != 0
+    )
+
+    assert not failures, failures
+    assert removed == 0
+    assert reflog_only_sha in _shallow_lines(clone)
+
+    # Once the reflog no longer reaches c2, its graft is genuinely stale.
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    assert prune_stale_shallow_grafts(clone) == 1
+    assert reflog_only_sha not in _shallow_lines(clone)
