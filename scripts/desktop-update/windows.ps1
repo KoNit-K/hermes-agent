@@ -148,8 +148,8 @@ public static extern int AssocQueryStringW(uint flags, uint str, string pszAssoc
 function Get-DefaultBrowserExe {
     # The OS default browser. Win11 25H2 / build 26200 Settings writes the
     # choice to UserChoiceLatest\ProgId\ProgId and no longer mirrors it into
-    # the legacy UserChoice\ProgId (#108051). Some builds instead expose the
-    # value on the UserChoiceLatest parent, so keep that compatibility read.
+    # the legacy UserChoice\ProgId (#108051). Keep a defensive compatibility
+    # probe for the value on the UserChoiceLatest parent.
     # Resolve a ProgId per scheme (https then http) from the nested latest key,
     # the parent latest key, AssocQueryStringW (ASSOCSTR_PROGID), then legacy
     # UserChoice. Only Chromium-family browsers (ChromeHTML / MSEdgeHTM)
