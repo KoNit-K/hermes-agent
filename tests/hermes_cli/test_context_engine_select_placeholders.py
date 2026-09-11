@@ -8,13 +8,8 @@ logged a bogus ``not found`` warning.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import yaml
-
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_schema_offers_only_placeholders_on_main():
@@ -158,14 +153,3 @@ def test_save_context_engine_keeps_real_plugin_name(tmp_path, monkeypatch):
     _save_context_engine("lcm")
     content = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     assert content["context"]["engine"] == "lcm"
-
-
-def test_desktop_enum_options_does_not_hardcode_context_engine():
-    text = (REPO_ROOT / "apps/desktop/src/app/settings/constants.ts").read_text(
-        encoding="utf-8"
-    )
-    assert "'context.engine': ['compressor', 'default', 'custom']" not in text
-    enum_block = text.split("export const ENUM_OPTIONS", 1)[1].split(
-        "export const", 1
-    )[0]
-    assert "'context.engine'" not in enum_block

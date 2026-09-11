@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { HermesConfigRecord } from '@/types/hermes'
 
-import { FIELD_DESCRIPTIONS, FIELD_LABELS, SECTIONS } from './constants'
+import { ENUM_OPTIONS, FIELD_DESCRIPTIONS, FIELD_LABELS, SECTIONS } from './constants'
 import { defineFieldCopy, fieldCopyForSchemaKey, schemaKeyToFieldCopyKey } from './field-copy'
 import {
   clearsEnabledToolsets,
@@ -38,6 +38,14 @@ describe('settings helpers', () => {
     // so config-field consumes schema.options instead of a stale static list.
     expect(enumOptionsFor('memory.provider', '', {})).toBeUndefined()
     expect(enumOptionsFor('memory.provider', 'honcho', {})).toBeUndefined()
+  })
+
+  it('does not shadow the backend schema options for context.engine', () => {
+    // context.engine options are discovery-driven and served by the backend
+    // config schema (merged per-request), just like memory.provider.
+    expect(ENUM_OPTIONS['context.engine']).toBeUndefined()
+    expect(enumOptionsFor('context.engine', '', {})).toBeUndefined()
+    expect(enumOptionsFor('context.engine', 'lcm', {})).toBeUndefined()
   })
 
   describe('isExternalMemoryProvider', () => {
