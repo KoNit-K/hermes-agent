@@ -189,6 +189,28 @@ def test_rollback_rejects_unsafe_tarball(backup_env, monkeypatch):
     assert "unsafe" in msg.lower() or "refus" in msg.lower() or "extract" in msg.lower()
 
 
+def test_snapshot_with_absolute_symlink_is_rollback_restorable(backup_env):
+    """A successful snapshot must not contain a link rollback will reject."""
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    skill_file = _write_skill(skills, "alpha", body="snapshot state") / "SKILL.md"
+    external = backup_env["home"] / "external.txt"
+    external.write_text("outside skills\n", encoding="utf-8")
+    absolute_link = skill_file.parent / "external-link"
+    absolute_link.symlink_to(external)
+
+    snap = cb.snapshot_skills(reason="absolute-symlink")
+    assert snap is not None
+    skill_file.write_text("current state\n", encoding="utf-8")
+
+    ok, msg, restored = cb.rollback(backup_id=snap.name)
+
+    assert ok, msg
+    assert restored == snap
+    assert "snapshot state" in skill_file.read_text(encoding="utf-8")
+    assert not absolute_link.exists()
+
+
 # ---------------------------------------------------------------------------
 # Integration with run_curator_review
 # ---------------------------------------------------------------------------

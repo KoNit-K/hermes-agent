@@ -134,6 +134,16 @@ def _mkdir(path: Path, what: str, *, exist_ok: bool) -> bool:
         return False
 
 
+def _snapshot_filter(member: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+    if any(part in _EXCLUDE_TOP_LEVEL for part in Path(member.name).parts):
+        return None
+    # Rollback's data filter rejects absolute link targets. Do not dereference
+    # them here: their contents live outside the skills tree.
+    if member.issym() and os.path.isabs(member.linkname):
+        return None
+    return member
+
+
 def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] = None) -> Optional[Path]:
     """Create a tar.gz snapshot of ``~/.hermes/skills/`` and prune old ones. Returns the snapshot dir, or None when
     skipped (disabled, skills dir missing, IO error) — logged at debug so the curator never aborts a pass over a
@@ -161,7 +171,7 @@ def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] =
                 if entry.name not in _EXCLUDE_TOP_LEVEL:
                     # arcname relative to skills/ so extraction drops back in cleanly; the filter excludes nested _EXCLUDE_TOP_LEVEL paths too.
                     tf.add(str(entry), arcname=entry.name, recursive=True,
-                           filter=lambda ti: None if any(p in _EXCLUDE_TOP_LEVEL for p in Path(ti.name).parts) else ti)
+                           filter=_snapshot_filter)
         # Cron capture is additive and never fails the snapshot; the manifest records whether it happened so rollback can say "no cron data".
         _write_manifest(dest, reason, archive, _count_skill_files(skills), _backup_cron_jobs_into(dest))
     except (OSError, tarfile.TarError) as e:
