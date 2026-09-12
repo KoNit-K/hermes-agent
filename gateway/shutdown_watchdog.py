@@ -309,15 +309,14 @@ def arm_shutdown_watchdog(
         with contextlib.suppress(Exception):
             from hermes_logging import drain_log_queue
             drain_log_queue(timeout=1.0)
-        _mark_exited_quietly(exit_code, reason)
         if done.is_set():  # a clean exit that won during diagnostics must not be pre-empted
             return
-        # Identity release is the final step before os._exit: diagnostics and log draining may
-        # stall, but a replacement must never race this process while it can still touch state.
+        # Release identity before ledger I/O: a stuck mark must not strand the pid/lock.
         with contextlib.suppress(Exception):
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
             release_gateway_runtime_lock()
+        _mark_exited_quietly(exit_code, reason)
         os._exit(exit_code)
     try:
         threading.Thread(target=_watchdog, daemon=True, name=name).start()

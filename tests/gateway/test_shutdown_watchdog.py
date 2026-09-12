@@ -75,7 +75,7 @@ def test_arm_shutdown_watchdog_fires_with_dump_and_exit(tmp_path):
     assert get_shutdown_watchdog_dump_path(tmp_path).name == "gateway-shutdown-watchdog.log"
 
 
-def test_process_exit_backstop_keeps_diagnostics_and_releases_identity_last(
+def test_process_exit_backstop_releases_identity_before_lifecycle_mark(
     tmp_path, monkeypatch
 ):
     from gateway import status as gateway_status
@@ -125,7 +125,9 @@ def test_process_exit_backstop_keeps_diagnostics_and_releases_identity_last(
     text = dump.read_text(encoding="utf-8")
     assert "faulthandler dump (all threads)" in text
     assert "asyncio task diagnostics unavailable" in text
-    assert order[-3:] == ["remove_pid", "release_lock", "exit"]
+    assert order.index("remove_pid") < order.index("mark_exited")
+    assert order.index("release_lock") < order.index("mark_exited")
+    assert order[-1] == "exit"
 
 
 

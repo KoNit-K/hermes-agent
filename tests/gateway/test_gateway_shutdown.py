@@ -134,8 +134,8 @@ async def test_shutdown_tail_transfers_watchdog_only_after_all_cleanup(monkeypat
     )
 
     assert result is True
-    assert [entry[0] for entry in armed] == ["long", "short"]
-    assert order == ["control", "cron_provider", "cron", "housekeeping", "mcp", "short"]
+    assert [entry[0] for entry in armed] == ["long", "short", "short"]
+    assert order == ["control", "short", "cron_provider", "cron", "housekeeping", "mcp", "short"]
 
     armed.clear()
     runner, _adapter = make_restart_runner()

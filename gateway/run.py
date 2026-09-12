@@ -2175,6 +2175,13 @@ def _best_effort(fn: Callable[[], Any], debug_msg: Optional[str] = None) -> Any:
         return None
 
 
+async def _maybe_arm_process_exit_backstop(runner) -> None:
+    """Arm the post-teardown leash when the runner implements it; abort fixtures do not."""
+    arm = getattr(runner, "_arm_process_exit_backstop_after_shutdown", None)
+    if callable(arm):
+        await arm()
+
+
 # Shutdown quiesce ceiling for the gateway-owned thread pool. Drain already waited for the agents; what
 # remains is short blocking work; anything slower is a stuck worker not worth waiting on (leash-clamped).
 _EXECUTOR_QUIESCE_TIMEOUT = 2.0
@@ -5217,7 +5224,7 @@ async def _start_gateway_shutdown_tail(
 
     _best_effort(_stop_keepalive)
     if _exit_with_failure_verdict(runner):
-        await runner._arm_process_exit_backstop_after_shutdown()
+        await _maybe_arm_process_exit_backstop(runner)
         return False
 
     # Never join(): an in-flight cron delivery is a coroutine on THIS loop; a sync join would drop it.
@@ -5228,6 +5235,8 @@ async def _start_gateway_shutdown_tail(
     # message was silently dropped (#58818). Awaiting keeps the loop alive so the in-flight delivery
     # finishes before we tear down.
     cron_stop.set()
+    # Cover blocking provider.stop() — the long watchdog is already done after runner.stop().
+    await _maybe_arm_process_exit_backstop(runner)
     _stop_cron_provider(cron_provider)
     if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):
         logger.warning("Cron ticker did not exit within %.0fs of shutdown — an in-flight "
@@ -5241,7 +5250,7 @@ async def _start_gateway_shutdown_tail(
     with suppress(Exception):
         await _shutdown_mcp_servers_nonblocking()
 
-    await runner._arm_process_exit_backstop_after_shutdown()
+    await _maybe_arm_process_exit_backstop(runner)
     return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
 
 
@@ -5385,7 +5394,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             await runner.wait_for_shutdown()
             with suppress(Exception):
                 await _shutdown_mcp_servers_nonblocking()
-            await runner._arm_process_exit_backstop_after_shutdown()
+            await _maybe_arm_process_exit_backstop(runner)
             return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
         finally:
             _shutdown_gateway_health_export(runner)
