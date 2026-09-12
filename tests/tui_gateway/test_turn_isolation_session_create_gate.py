@@ -398,6 +398,52 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
     assert session.get("running") is False
 
 
+def test_session_create_isolation_dispatch_failure_interrupt_after_inline_build(
+    isolation_env, monkeypatch,
+):
+    """After fallback build completes, interrupt must stay on the local agent."""
+    supervisor = _BoomSupervisor()
+    monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: supervisor)
+    monkeypatch.setattr(server, "_persist_session_row_for_submit", lambda *_a, **_k: None)
+    hold_run = threading.Event()
+    monkeypatch.setattr(
+        server, "_run_after_agent_ready", lambda *_a, **_k: hold_run.wait(timeout=2.0))
+    interrupted: list = []
+    monkeypatch.setattr(
+        "agent.interrupt_compat.request_hard_interrupt",
+        lambda agent: interrupted.append(agent),
+    )
+
+    sid = _create_session()
+    session = _flush_prewarm(sid)
+    resp = _submit(sid)
+    assert "result" in resp, resp
+    ready = session.get("agent_ready")
+    assert ready is not None
+    assert ready.wait(timeout=2.0)
+    thread = session.get("_agent_build_thread")
+    if thread is not None:
+        thread.join(timeout=2.0)
+    assert isinstance(session.get("agent"), _DummyAgent)
+    assert session.get("_compute_host_released") is True
+    assert server._session_uses_compute_host(session) is False
+    assert session.get("running") is True
+
+    interrupt = server.handle_request({
+        "id": "interrupt-after-build",
+        "method": "session.interrupt",
+        "params": {"session_id": sid},
+    })
+    hold_run.set()
+    run_thread = session.get("_run_thread")
+    if run_thread is not None:
+        run_thread.join(timeout=2.0)
+    assert interrupt.get("result", {}).get("status") == "interrupted", interrupt
+    assert interrupt["result"].get("turn_isolation") is not True
+    assert interrupted == [session["agent"]]
+    assert supervisor.interrupts == []
+
+
 def test_queued_drain_dispatch_failure_keeps_compute_host_ownership(isolation_env, monkeypatch):
     """A drain reports host dispatch failure; it must not silently switch ownership inline."""
     supervisor = _BoomSupervisor()
