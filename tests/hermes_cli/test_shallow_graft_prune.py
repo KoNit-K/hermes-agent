@@ -417,3 +417,97 @@ def test_prune_aborts_when_ref_becomes_live_before_publish(tmp_path, monkeypatch
     assert orphan in _shallow_lines(clone)
     assert _run_git(clone, "rev-list", "--all", "--reflog").returncode == 0
     assert not (clone / ".git" / "shallow.lock").exists()
+
+
+def test_prune_aborts_when_ref_becomes_live_after_final_scan(tmp_path, monkeypatch):
+    """A ref created after the last reachability scan must not stay published."""
+    clone = _mk_shallow_scenario(tmp_path)
+    head_sha = _git(clone, "rev-parse", "HEAD")
+    tip_sha = _git(clone, "rev-parse", "origin/main")
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    orphan = next(sha for sha in _shallow_lines(clone) if sha not in {head_sha, tip_sha})
+
+    def revive_after_scan(_repo: Path) -> None:
+        _git(clone, "update-ref", "refs/heads/race", orphan)
+
+    monkeypatch.setattr(gitlock_module, "_before_replace_shallow", revive_after_scan)
+    before = (clone / ".git" / "shallow").read_bytes()
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert orphan in _shallow_lines(clone)
+    assert (clone / ".git" / "shallow").read_bytes() == before
+    assert _run_git(clone, "rev-list", "--all", "--reflog").returncode == 0
+    assert _run_git(clone, "fsck", "--connectivity-only").returncode == 0
+    assert not (clone / ".git" / "shallow.lock").exists()
+
+
+def test_prune_keeps_sha256_fetch_head_ancestor_boundary(tmp_path):
+    """FETCH_HEAD tips must be resolved through Git so SHA-256 IDs are kept."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", "--object-format=sha256")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for message in ("c1", "c2", "c3"):
+        _git(origin, "commit", "--allow-empty", "-q", "-m", message)
+    tip = _git(origin, "rev-parse", "HEAD")
+    ancestor = _git(origin, "rev-parse", "HEAD^")
+    assert len(tip) == 64
+    assert len(ancestor) == 64
+    _git(clone, "fetch", "-q", "--depth", "2", "origin", tip)
+
+    assert ancestor in _shallow_lines(clone)
+    assert ancestor not in _git(clone, "rev-list", "--all", "--reflog").splitlines()
+    assert _git(clone, "rev-parse", "FETCH_HEAD") == tip
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert ancestor in _shallow_lines(clone)
+    assert _run_git(clone, "rev-list", "FETCH_HEAD").returncode == 0
+
+
+def test_prune_fails_open_when_fetch_head_is_unreadable(tmp_path, monkeypatch):
+    """An unreadable FETCH_HEAD must retain the original shallow file."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for message in ("c1", "c2", "c3"):
+        _git(origin, "commit", "--allow-empty", "-q", "-m", message)
+    tip = _git(origin, "rev-parse", "HEAD")
+    ancestor = _git(origin, "rev-parse", "HEAD^")
+    _git(clone, "fetch", "-q", "--depth", "2", "origin", tip)
+    assert ancestor in _shallow_lines(clone)
+
+    real_read = Path.read_text
+
+    def fail_fetch_head(self, *args, **kwargs):
+        if self.name == "FETCH_HEAD":
+            raise OSError("injected FETCH_HEAD read error")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_fetch_head)
+    before = (clone / ".git" / "shallow").read_bytes()
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert (clone / ".git" / "shallow").read_bytes() == before
+    assert ancestor in _shallow_lines(clone)
+    assert not (clone / ".git" / "shallow.lock").exists()

@@ -149,32 +149,57 @@ def _before_publish_candidate(repo_root: Path) -> None:
     """Test seam after candidate validation and before the publish guard."""
 
 
-def _fetch_head_tips(repo_root: Path, query_env: dict) -> List[str]:
-    """Every FETCH_HEAD entry. ``rev-parse FETCH_HEAD`` only returns the first."""
+def _before_replace_shallow(repo_root: Path) -> None:
+    """Test seam after the last pre-publish scan and before ``os.replace``."""
+
+
+def _fetch_head_tips(repo_root: Path, query_env: dict) -> Optional[List[str]]:
+    """Every FETCH_HEAD entry, resolved through Git.
+
+    ``rev-parse FETCH_HEAD`` only returns the first tip and a 40-character
+    parser misses SHA-256 IDs. ``None`` means the path, file, or objects
+    could not be established, so callers fail open. ``[]`` means there is
+    no ``FETCH_HEAD`` file.
+    """
     rel = _git_stdout_lines(
         repo_root, ["rev-parse", "--git-path", "FETCH_HEAD"], env=query_env
     )
     if not rel:
-        return []
+        return None
     fetch_head = Path(rel[0])
     if not fetch_head.is_absolute():
         fetch_head = Path(repo_root) / fetch_head
     if not fetch_head.is_file():
         return []
-    tips: List[str] = []
     try:
-        for line in fetch_head.read_text(encoding="utf-8").splitlines():
-            sha = line.split()[0] if line.split() else ""
-            if len(sha) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in sha):
-                tips.append(sha)
+        raw = fetch_head.read_text(encoding="utf-8")
     except OSError:
+        return None
+    tokens = [line.split()[0] for line in raw.splitlines() if line.split()]
+    if not tokens:
         return []
-    return tips
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--no-walk", "--stdin"],
+            input="\n".join(tokens) + "\n",
+            cwd=str(repo_root),
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+            env=query_env,
+        )
+    except Exception:
+        logger.debug("FETCH_HEAD resolve failed for %s", repo_root, exc_info=True)
+        return None
+    if result.returncode != 0:
+        return None
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _rev_list_roots(repo_root: Path, query_env: dict) -> List[str]:
+def _rev_list_roots(repo_root: Path, query_env: dict) -> Optional[List[str]]:
     """Traversal roots Git maintenance walks, plus every FETCH_HEAD tip."""
-    return ["--all", "--reflog", *_fetch_head_tips(repo_root, query_env)]
+    tips = _fetch_head_tips(repo_root, query_env)
+    if tips is None:
+        return None
+    return ["--all", "--reflog", *tips]
 
 
 def _reachable_grafts(
@@ -184,14 +209,55 @@ def _reachable_grafts(
     *,
     env: Optional[dict] = None,
 ) -> Optional[set]:
+    roots = _rev_list_roots(repo_root, query_env)
+    if roots is None:
+        return None
     reachable = _git_stdout_lines(
         repo_root,
-        ["rev-list", *_rev_list_roots(repo_root, query_env)],
+        ["rev-list", *roots],
         env=env or query_env,
     )
     if not reachable:
         return None
     return set(lines) & set(reachable)
+
+
+def _restore_shallow_union(
+    shallow_path: Path, original: str, lock_path: Path, mode: int
+) -> bool:
+    """Restore every original graft, keeping any lines added after publish."""
+    try:
+        current = shallow_path.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    original_lines = {line for line in original.splitlines() if line}
+    current_lines = {line for line in current.splitlines() if line}
+    text = (
+        original
+        if current_lines <= original_lines
+        else "\n".join(sorted(original_lines | current_lines)) + "\n"
+    )
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+    except FileExistsError:
+        logger.debug("shallow restore skipped; git holds %s", lock_path)
+        return False
+    try:
+        handle = os.fdopen(lock_fd, "w", encoding="utf-8")
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(lock_path, mode)
+        os.replace(lock_path, shallow_path)
+        return True
+    except Exception:
+        logger.debug("shallow restore failed for %s", shallow_path, exc_info=True)
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def prune_stale_shallow_grafts(repo_root: Path) -> int:
@@ -261,9 +327,12 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
             # original remains untouched if the proposed trim breaks any reachable walk.
             candidate_env = query_env.copy()
             candidate_env["GIT_SHALLOW_FILE"] = str(lock_path)
+            roots = _rev_list_roots(repo_root, query_env)
+            if roots is None:
+                return 0
             still_walks = _git_stdout_lines(
                 repo_root,
-                ["rev-list", "--count", *_rev_list_roots(repo_root, query_env)],
+                ["rev-list", "--count", *roots],
                 env=candidate_env,
             )
             if not still_walks:
@@ -278,10 +347,16 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
                 logger.debug("shallow prune aborted; reachability changed before publish")
                 return 0
 
-            # Git's lock file is the candidate itself; rename publishes the trim and
-            # releases the lock atomically, matching Git's own lockfile protocol.
+            # shallow.lock does not serialize update-ref. The remaining window is
+            # after this last scan; publish then restore if a dropped graft is live.
+            _before_replace_shallow(repo_root)
             os.replace(lock_path, shallow_path)
             lock_owned = False
+            post = _reachable_grafts(repo_root, lines, query_env)
+            if post is None or (post - keep):
+                logger.debug("shallow prune restored; reachability changed during publish")
+                _restore_shallow_union(shallow_path, original, lock_path, mode)
+                return 0
             logger.info("Pruned %d stale shallow graft(s) in %s", len(lines) - len(keep), repo_root)
             return len(lines) - len(keep)
         finally:
