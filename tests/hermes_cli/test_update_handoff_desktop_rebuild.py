@@ -52,3 +52,62 @@ def test_failed_desktop_rebuild_withholds_success_completion():
     assert complete is False
     for call in completion.call_args_list:
         assert not call[0][0].startswith("✓")
+
+
+def test_handoff_python_repair_delegates_completion_to_node_repair():
+    with (
+        patch.dict("os.environ", {"HERMES_UPDATE_REEXEC": "1"}),
+        patch("hermes_cli.managed_uv.ensure_uv", return_value=None),
+        patch.object(
+            update_cmd,
+            "_pip_install_prefix",
+            return_value=(["python", "-m", "pip"], None),
+        ),
+        patch.object(update_cmd, "_venv_core_imports_healthy", return_value=(True, "")),
+        patch.object(update_cmd, "_m") as m,
+        patch.object(
+            update_cmd, "_repair_node_deps_on_current_checkout", return_value=True
+        ) as repair_node,
+    ):
+        m.return_value.PROJECT_ROOT = update_cmd.Path("/fake/hermes")
+        m.return_value._UPDATE_REEXEC_ENV = "HERMES_UPDATE_REEXEC"
+        complete = update_cmd._repair_venv_on_current_checkout(
+            assume_yes=True,
+            gateway_mode=False,
+            pre_update_snapshot_id="snapshot-1",
+            desktop_dir=update_cmd.Path("/fake/hermes/apps/desktop"),
+            had_desktop_app_before_update=True,
+            active_lazy_features=[],
+            active_tool_dependencies=[],
+            _windows_gateway_resume=None,
+        )
+
+    assert complete is True
+    repair_node.assert_called_once_with(
+        update_cmd._print_verified_update_completion,
+        assume_yes=True,
+        gateway_mode=False,
+        pre_update_snapshot_id="snapshot-1",
+        completion_message="✓ Update complete!",
+        had_desktop_app_before_update=True,
+    )
+
+
+def test_node_failure_withholds_success_and_skips_web():
+    completion = MagicMock(return_value=True)
+    with (
+        patch.object(
+            update_cmd,
+            "_update_node_dependencies",
+            return_value=["ui-tui, web workspaces"],
+        ),
+        patch.object(update_cmd, "_m") as m,
+    ):
+        complete = update_cmd._repair_node_deps_on_current_checkout(completion)
+
+    assert complete is False
+    m.return_value._build_web_ui.assert_not_called()
+    completion.assert_called_once_with(
+        "⚠ Checkout is current, but Node.js dependencies could not be repaired."
+    )
+    assert not completion.call_args.args[0].startswith("✓")

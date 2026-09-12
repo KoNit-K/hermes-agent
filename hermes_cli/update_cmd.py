@@ -630,6 +630,15 @@ def _repair_venv_on_current_checkout(
         print("  Close all Hermes windows/gateways and re-run: hermes update")
         return False
     print("✓ Dependencies repaired!")
+    # Only the hermes.exe hand-off child owes the Node/web phase skipped by its parent.
+    if os.environ.get(_m()._UPDATE_REEXEC_ENV) == "1":
+        node_failures = _update_node_dependencies()
+        if node_failures:
+            print(f"  ⚠ Node.js refresh failed for: {', '.join(node_failures)}")
+            _print_update_completion(
+                "⚠ Update partially complete — Node.js dependencies were not repaired.")
+            return False
+        _m()._build_web_ui(_m().PROJECT_ROOT / "web")
     # Check for config migrations (#91360).
     _check_and_apply_config_migration(
         assume_yes=assume_yes, gateway_mode=gateway_mode, pre_update_snapshot_id=pre_update_snapshot_id)
