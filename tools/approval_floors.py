@@ -20,6 +20,29 @@ from tools.approval_detection import (
 logger = logging.getLogger("tools.approval")
 
 
+def _token_boundary_fnmatch(candidate: str, pattern: str) -> bool:
+    """Match a glob without letting ``*`` split a literal command word."""
+    left_boundary, right_boundary = "\x00", "\x01"
+    decorated = []
+    in_class = False
+    for index, char in enumerate(pattern):
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        if char == "*" and not in_class:
+            if index and (pattern[index - 1].isalnum() or pattern[index - 1] == "_"):
+                decorated.append(right_boundary)
+            decorated.append(char)
+            if index + 1 < len(pattern) and (pattern[index + 1].isalnum() or pattern[index + 1] == "_"):
+                decorated.append(left_boundary)
+        else:
+            decorated.append(char)
+    translated = fnmatch.translate("".join(decorated))
+    translated = translated.replace(left_boundary, r"(?<!\w)").replace(right_boundary, r"(?!\w)")
+    return re.match(translated, candidate) is not None
+
+
 def _match_user_deny_rule(command: str) -> str | None:
     """Return the matching ``approvals.deny`` glob, or None. User-defined fnmatch
     globs that block unconditionally — like the hardline floor, a match fires
@@ -37,7 +60,7 @@ def _match_user_deny_rule(command: str) -> str | None:
     for command_variant in _deny_command_variants(command):
         candidate = command_variant.lower().strip()
         for pattern in globs:
-            if fnmatch.fnmatchcase(candidate, pattern.lower()):
+            if _token_boundary_fnmatch(candidate, pattern.lower()):
                 return pattern
     return None
 

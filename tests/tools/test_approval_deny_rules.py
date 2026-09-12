@@ -59,6 +59,23 @@ class TestMatchUserDenyRule:
         deny_config(["git push --force*"])
         assert mod._match_user_deny_rule('git pu""sh --force origin main') is not None
 
+    def test_glob_matches_rm_only_at_token_boundaries(self, deny_config):
+        deny_config(["*rm *"])
+
+        for command in ("confirm prompt", "form data", "perform cleanup", "platform migration"):
+            assert mod._match_user_deny_rule(command) is None, command
+
+        for command in (
+            "rm -rf build/",
+            "/usr/bin/rm -rf build/",
+            "FOO=bar /usr/bin/rm -rf build/",
+            "env /usr/bin/rm -rf build/",
+            "command -p /usr/bin/rm -rf build/",
+            "bash -c '/usr/bin/rm -rf build/'",
+            r"r\m -rf build/",
+        ):
+            assert mod._match_user_deny_rule(command) == "*rm *", command
+
 
 def test_deny_follows_executable_identity(deny_config, clean_env, monkeypatch):
     """Paths, prefixes and shell carriers cannot outrank an explicit deny."""
