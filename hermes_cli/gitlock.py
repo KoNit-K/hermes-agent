@@ -153,29 +153,103 @@ def _before_replace_shallow(repo_root: Path) -> None:
     """Test seam after the last pre-publish scan and before ``os.replace``."""
 
 
-def _fetch_head_tips(repo_root: Path, query_env: dict) -> Optional[List[str]]:
-    """Every FETCH_HEAD entry, resolved through Git.
+# Worktree-local files that ``rev-list --all --reflog`` does not walk. Linked
+# worktrees share ``.git/shallow`` but keep their own copies under the common
+# Git directory (``.git/worktrees/<id>/``).
+_EXTRA_REACHABILITY_FILES = ("FETCH_HEAD", "ORIG_HEAD")
 
-    ``rev-parse FETCH_HEAD`` only returns the first tip and a 40-character
-    parser misses SHA-256 IDs. ``None`` means the path, file, or objects
-    could not be established, so callers fail open. ``[]`` means there is
-    no ``FETCH_HEAD`` file.
-    """
-    rel = _git_stdout_lines(
-        repo_root, ["rev-parse", "--git-path", "FETCH_HEAD"], env=query_env
-    )
+
+def _resolve_git_path(repo_root: Path, spec: str, query_env: dict) -> Optional[Path]:
+    """Absolute path for a ``rev-parse`` location. ``None`` if Git cannot name it."""
+    rel = _git_stdout_lines(repo_root, ["rev-parse", "--git-path", spec], env=query_env)
     if not rel:
         return None
-    fetch_head = Path(rel[0])
-    if not fetch_head.is_absolute():
-        fetch_head = Path(repo_root) / fetch_head
-    if not fetch_head.is_file():
-        return []
+    path = Path(rel[0])
+    if not path.is_absolute():
+        path = Path(repo_root) / path
+    return path
+
+
+def _common_git_dir(repo_root: Path, query_env: dict) -> Optional[Path]:
+    """Shared Git directory that owns ``shallow`` and every worktree git dir."""
+    rel = _git_stdout_lines(repo_root, ["rev-parse", "--git-common-dir"], env=query_env)
+    if not rel:
+        return None
+    path = Path(rel[0])
+    if not path.is_absolute():
+        path = Path(repo_root) / path
     try:
-        raw = fetch_head.read_text(encoding="utf-8")
+        path = path.resolve()
     except OSError:
         return None
-    tokens = [line.split()[0] for line in raw.splitlines() if line.split()]
+    return path if path.is_dir() else None
+
+
+def _worktree_git_dirs(common_dir: Path) -> Optional[List[Path]]:
+    """The common dir plus each linked worktree's git dir. ``None`` on list failure."""
+    dirs = [common_dir]
+    worktrees = common_dir / "worktrees"
+    if not worktrees.exists():
+        return dirs
+    if not worktrees.is_dir():
+        return None
+    try:
+        extras = sorted(path for path in worktrees.iterdir() if path.is_dir())
+    except OSError:
+        return None
+    dirs.extend(extras)
+    return dirs
+
+
+def _tip_tokens_from_file(path: Path) -> Optional[List[str]]:
+    """Object tokens from a Git tip file. ``None`` if the file exists but is unreadable."""
+    if not path.is_file():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return [line.split()[0] for line in raw.splitlines() if line.split()]
+
+
+def _extra_reachability_tips(repo_root: Path, query_env: dict) -> Optional[List[str]]:
+    """Every FETCH_HEAD and ORIG_HEAD tip across this repo's worktrees.
+
+    ``rev-parse FETCH_HEAD`` / ``ORIG_HEAD`` only see the current worktree, and
+    ``rev-list --all --reflog`` skips both. ``None`` means a path or object
+    could not be established, so callers fail open. ``[]`` means none exist.
+    """
+    current_fetch = _resolve_git_path(repo_root, "FETCH_HEAD", query_env)
+    if current_fetch is None:
+        return None
+    common_dir = _common_git_dir(repo_root, query_env)
+    if common_dir is None:
+        return None
+    git_dirs = _worktree_git_dirs(common_dir)
+    if git_dirs is None:
+        return None
+
+    paths = [current_fetch]
+    current_orig = _resolve_git_path(repo_root, "ORIG_HEAD", query_env)
+    if current_orig is not None:
+        paths.append(current_orig)
+    for git_dir in git_dirs:
+        paths.extend(git_dir / name for name in _EXTRA_REACHABILITY_FILES)
+
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            return None
+        if key in seen:
+            continue
+        seen.add(key)
+        tips = _tip_tokens_from_file(path)
+        if tips is None:
+            return None
+        tokens.extend(tips)
     if not tokens:
         return []
     try:
@@ -187,7 +261,7 @@ def _fetch_head_tips(repo_root: Path, query_env: dict) -> Optional[List[str]]:
             env=query_env,
         )
     except Exception:
-        logger.debug("FETCH_HEAD resolve failed for %s", repo_root, exc_info=True)
+        logger.debug("extra reachability resolve failed for %s", repo_root, exc_info=True)
         return None
     if result.returncode != 0:
         return None
@@ -195,8 +269,8 @@ def _fetch_head_tips(repo_root: Path, query_env: dict) -> Optional[List[str]]:
 
 
 def _rev_list_roots(repo_root: Path, query_env: dict) -> Optional[List[str]]:
-    """Traversal roots Git maintenance walks, plus every FETCH_HEAD tip."""
-    tips = _fetch_head_tips(repo_root, query_env)
+    """Traversal roots: refs, reflogs, every worktree FETCH_HEAD, and ORIG_HEAD."""
+    tips = _extra_reachability_tips(repo_root, query_env)
     if tips is None:
         return None
     return ["--all", "--reflog", *tips]
@@ -261,15 +335,15 @@ def _restore_shallow_union(
 
 
 def prune_stale_shallow_grafts(repo_root: Path) -> int:
-    """Drop ``.git/shallow`` graft lines no ref or reflog still reaches (#105951).
+    """Drop ``.git/shallow`` graft lines no live ref, reflog, or recovery tip reaches (#105951).
 
     Every ``git fetch --depth 1`` appends the fetched tip to ``.git/shallow`` as a new
     graft and never removes the previous one, so a long-lived shallow installer checkout
     accumulates one graft per update check (57 observed in the wild). The stale grafts
     break ``merge-base`` and push ``hermes update`` into the orphan-divergence reset path
-    on every run. Keep boundaries that protect commits reachable from refs, reflogs, or
-    any ``FETCH_HEAD`` entry: dropping a graft for a still-reachable commit exposes its
-    unfetched parent and breaks git maintenance. The dropped commits are genuinely
+    on every run. Keep boundaries that protect commits reachable from refs, reflogs,
+    any worktree ``FETCH_HEAD``, or ``ORIG_HEAD``. Dropping a graft for a still-reachable
+    commit exposes its unfetched parent and breaks git maintenance. The dropped commits are genuinely
     unreachable and their objects are left for ``git gc``. Returns the number of graft
     lines removed; never raises, and validates the candidate through Git's lockfile
     before replacing the original.

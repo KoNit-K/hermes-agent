@@ -511,3 +511,69 @@ def test_prune_fails_open_when_fetch_head_is_unreadable(tmp_path, monkeypatch):
     assert (clone / ".git" / "shallow").read_bytes() == before
     assert ancestor in _shallow_lines(clone)
     assert not (clone / ".git" / "shallow.lock").exists()
+
+
+def test_prune_keeps_linked_worktree_fetch_head_ancestor(tmp_path):
+    """A linked worktree's FETCH_HEAD is outside --all/--reflog and the main worktree."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    linked = tmp_path / "linked"
+    _git(clone, "worktree", "add", "-q", str(linked))
+    for message in ("c1", "c2", "c3"):
+        _git(origin, "commit", "--allow-empty", "-q", "-m", message)
+    tip = _git(origin, "rev-parse", "HEAD")
+    ancestor = _git(origin, "rev-parse", "HEAD^")
+    _git(linked, "fetch", "-q", "--depth", "2", "origin", tip)
+    _git(clone, "reflog", "expire", "--expire=now", "--all")
+
+    assert ancestor in _shallow_lines(clone)
+    assert ancestor not in _git(clone, "rev-list", "--all", "--reflog").splitlines()
+    assert _git(linked, "rev-parse", "FETCH_HEAD") == tip
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert ancestor in _shallow_lines(clone)
+    assert _run_git(linked, "rev-list", "FETCH_HEAD").returncode == 0
+
+
+def test_prune_keeps_orig_head_only_boundary(tmp_path):
+    """ORIG_HEAD is outside --all/--reflog/FETCH_HEAD and must keep its depth-1 graft."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@example.com")
+    _git(origin, "config", "user.name", "t")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c0")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(clone)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    old_tip = _git(clone, "rev-parse", "HEAD")
+    _git(origin, "commit", "--allow-empty", "-q", "-m", "c1")
+    _git(clone, "fetch", "-q", "--depth", "1", "origin", "main")
+    _git(clone, "reset", "-q", "--hard", "origin/main")
+    _git(clone, "reflog", "expire", "--expire=now", "--all")
+
+    assert _git(clone, "rev-parse", "ORIG_HEAD") == old_tip
+    assert old_tip in _shallow_lines(clone)
+    assert old_tip not in _git(clone, "rev-list", "--all", "--reflog").splitlines()
+    assert _run_git(clone, "rev-list", "ORIG_HEAD").returncode == 0
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert old_tip in _shallow_lines(clone)
+    assert _run_git(clone, "rev-list", "ORIG_HEAD").returncode == 0
