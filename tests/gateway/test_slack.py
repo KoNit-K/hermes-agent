@@ -2570,6 +2570,37 @@ class TestSendTyping:
 
 
 # ---------------------------------------------------------------------------
+# Tool-progress previews
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("preview", "inline_code"),
+    [
+        ("send*rhubarb*.py", "`send*rhubarb*.py`"),
+        ("ordinary preview", "`ordinary preview`"),
+        ("find `needle`", "`` find `needle` ``"),
+        ("find ```needle```", "```` find ```needle``` ````"),
+    ],
+)
+def test_tool_progress_preview_is_literal_inline_code(adapter, preview, inline_code):
+    from gateway.stream_events import ToolCallChunk
+
+    line = adapter.format_tool_event(
+        ToolCallChunk("search_files", preview=preview), preview_max_len=80
+    )
+
+    assert line is not None
+    assert adapter.format_message(line).endswith(f': "{inline_code}"')
+
+
+def test_tool_preview_formatting_does_not_change_assistant_markdown(adapter):
+    assert adapter.format_message("Use **bold** and *italic*.") == (
+        "Use *bold* and _italic_."
+    )
+
+
+# ---------------------------------------------------------------------------
 # TestFormatMessage — Markdown → mrkdwn conversion
 # ---------------------------------------------------------------------------
 

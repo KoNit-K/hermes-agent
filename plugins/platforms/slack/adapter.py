@@ -2839,6 +2839,14 @@ class SlackAdapter(BasePlatformAdapter):
             logger.debug("[Slack] block render failed; using plain text", exc_info=True)
             return None
 
+    def format_tool_preview(self, preview: Any) -> str:
+        """Render tool-preview text literally inside a robust mrkdwn code span."""
+        text = preview.text
+        longest_run = max((len(run) for run in re.findall(r"`+", text)), default=0)
+        delimiter = "`" * (longest_run + 1)
+        padding = " " if longest_run else ""
+        return f"{delimiter}{padding}{text}{padding}{delimiter}"
+
     def format_message(self, content: str) -> str:
         """Convert standard markdown to Slack mrkdwn.
         Tables are fenced first; code is protected from later passes; broadcast mentions are escaped
@@ -2888,8 +2896,8 @@ class SlackAdapter(BasePlatformAdapter):
         # Escaping unescapes first in ONE regex pass (sequential replaces would decode
         # "&amp;lt;" twice). ``None`` marks the escape step.
         passes = (
-            (r"(```(?:[^\n]*\n)?[\s\S]*?```)", _protect_fence, 0),
-            (r"(`[^`]+`)", lambda m: _ph(m.group(0)), 0),
+            (r"((?<!`)```(?!`)(?:[^\n]*\n)?[\s\S]*?(?<!`)```(?!`))", _protect_fence, 0),
+            (r"(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)", lambda m: _ph(m.group(0)), 0),
             (r"(?<!!)\[([^\]]+)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)", _convert_markdown_link, 0),
             (r"(<(?:[@#!]|(?:https?|mailto|tel):)[^>\n]+>)", lambda m: _ph(m.group(1)), 0),
             (r"^(>+\s)", lambda m: _ph(m.group(0)), re.MULTILINE),
