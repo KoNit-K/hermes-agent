@@ -25,6 +25,68 @@ def _prompt_count(db: SessionDB) -> int:
     )
 
 
+def _read_seeded_sessions(db: SessionDB, reader: str) -> dict[str, dict]:
+    if reader == "get_session":
+        rows = [db.get_session("fallback"), db.get_session("empty")]
+    else:
+        rows = getattr(db, reader)()
+    return {row["id"]: row for row in rows if row is not None}
+
+
+@pytest.mark.parametrize(
+    "reader",
+    ["get_session", "list_sessions_rich", "search_sessions"],
+)
+def test_session_readers_fail_open_for_corrupt_prompt_bytes(db, reader):
+    db.create_session("fallback", "cli", system_prompt="deduplicated fallback")
+    db.create_session("empty", "cli", system_prompt="deduplicated empty")
+    hashes = {
+        row["id"]: row["system_prompt_hash"]
+        for row in db._conn.execute(
+            "SELECT id, system_prompt_hash FROM sessions WHERE id IN ('fallback', 'empty')"
+        )
+    }
+    db._conn.execute(
+        "UPDATE system_prompts SET prompt = CAST(? AS TEXT) WHERE hash = ?",
+        (sqlite3.Binary(b"\xe2\x82"), hashes["fallback"]),
+    )
+    db._conn.execute(
+        "UPDATE system_prompts SET prompt = ? WHERE hash = ?",
+        (sqlite3.Binary(b"\xe2\x82"), hashes["empty"]),
+    )
+    db._conn.execute(
+        "UPDATE sessions SET system_prompt = ? WHERE id = 'fallback'",
+        ("legacy fallback",),
+    )
+    db._conn.execute(
+        "UPDATE sessions SET system_prompt = ? WHERE id = 'empty'",
+        (sqlite3.Binary(b"\xff"),),
+    )
+    db._conn.commit()
+
+    rows = _read_seeded_sessions(db, reader)
+
+    assert rows["fallback"]["system_prompt"] == "legacy fallback"
+    assert rows["empty"]["system_prompt"] is None
+
+
+@pytest.mark.parametrize(
+    "reader",
+    ["get_session", "list_sessions_rich", "search_sessions"],
+)
+def test_session_readers_prefer_valid_deduplicated_prompt(db, reader):
+    db.create_session("fallback", "cli", system_prompt="preferred prompt")
+    db.create_session("empty", "cli", system_prompt="other prompt")
+    db._conn.execute(
+        "UPDATE sessions SET system_prompt = 'legacy prompt' WHERE id = 'fallback'"
+    )
+    db._conn.commit()
+
+    rows = _read_seeded_sessions(db, reader)
+
+    assert rows["fallback"]["system_prompt"] == "preferred prompt"
+
+
 def test_prompt_snapshots_are_deduplicated_and_hydrated_for_readers(db):
     prompt = "You are Hermes.\n" + ("Follow the profile policy.\n" * 5)
     db.create_session(

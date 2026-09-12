@@ -82,6 +82,15 @@ _PREVIEW_COL_SQL = f"""COALESCE(
                         ''
                     ) AS _preview_raw"""
 
+# Materialize prompt candidates as bytes so malformed UTF-8 cannot make
+# sqlite3 decode a row before _session_row_dict can apply the legacy fallback.
+_PROMPT_CANDIDATES_SQL = (
+    "CASE WHEN typeof(sp.prompt) = 'text' THEN CAST(sp.prompt AS BLOB) END "
+    "AS _system_prompt_resolved, "
+    "CASE WHEN typeof(s.system_prompt) = 'text' THEN CAST(s.system_prompt AS BLOB) END "
+    "AS _system_prompt_legacy"
+)
+
 
 def _where_sql(clauses: List[str], lead: str = "") -> str:
     """``WHERE a AND b`` (with *lead* prefix) or "" when there are no clauses."""
@@ -738,7 +747,7 @@ class SessionSessionsMixin:
         """Get a session by ID (drains queued token deltas first so cost readers see exact totals)."""
         self.flush_token_counts()
         row = self._read_one(
-            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+            f"SELECT s.*, {_PROMPT_CANDIDATES_SQL} "
             "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash WHERE s.id = ?",
             (session_id,),
         )
@@ -1210,7 +1219,7 @@ class SessionSessionsMixin:
         # Shared projection head of the three list queries (whitespace is part of the SQL text).
         select_head = (
             f"SELECT {self._compact_session_cols() if compact_rows else 's.*'}"
-            + ("" if compact_rows else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved")
+            + ("" if compact_rows else f", {_PROMPT_CANDIDATES_SQL}")
             + f",\n                    {_PREVIEW_COL_SQL},\n                    "
         )
         prompt_join = (
@@ -1376,7 +1385,7 @@ class SessionSessionsMixin:
             where_clauses.append(ws_clause)
             params.extend(ws_params)
         return [self._session_row_dict(row) for row in self._read_all(
-            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved, "
+            f"SELECT s.*, {_PROMPT_CANDIDATES_SQL}, "
             f"{_sql_session_last_active('s')} AS last_active "
             "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
             f"{_where_sql(where_clauses, ' ')} "

@@ -406,6 +406,19 @@ class SessionDB(
         data = dict(row)
         if "_system_prompt_resolved" in data:
             resolved = data.pop("_system_prompt_resolved")
+            if "_system_prompt_legacy" in data:
+                candidates = (resolved, data.pop("_system_prompt_legacy"))
+                resolved = None
+                for candidate in candidates:
+                    if isinstance(candidate, str):
+                        resolved = candidate
+                        break
+                    if isinstance(candidate, bytes):
+                        try:
+                            resolved = candidate.decode("utf-8")
+                        except UnicodeDecodeError:
+                            continue
+                        break
             if "system_prompt" in data:
                 data["system_prompt"] = resolved
         return data
