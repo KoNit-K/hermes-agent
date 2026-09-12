@@ -420,7 +420,7 @@ def test_prune_aborts_when_ref_becomes_live_before_publish(tmp_path, monkeypatch
 
 
 def test_prune_aborts_when_ref_becomes_live_after_final_scan(tmp_path, monkeypatch):
-    """A ref created after the last reachability scan must not stay published."""
+    """A ref created after the last pre-publish scan must not stay published."""
     clone = _mk_shallow_scenario(tmp_path)
     head_sha = _git(clone, "rev-parse", "HEAD")
     tip_sha = _git(clone, "rev-parse", "origin/main")
@@ -431,6 +431,28 @@ def test_prune_aborts_when_ref_becomes_live_after_final_scan(tmp_path, monkeypat
         _git(clone, "update-ref", "refs/heads/race", orphan)
 
     monkeypatch.setattr(gitlock_module, "_before_replace_shallow", revive_after_scan)
+    before = (clone / ".git" / "shallow").read_bytes()
+
+    assert prune_stale_shallow_grafts(clone) == 0
+    assert orphan in _shallow_lines(clone)
+    assert (clone / ".git" / "shallow").read_bytes() == before
+    assert _run_git(clone, "rev-list", "--all", "--reflog").returncode == 0
+    assert _run_git(clone, "fsck", "--connectivity-only").returncode == 0
+    assert not (clone / ".git" / "shallow.lock").exists()
+
+
+def test_prune_restores_when_ref_becomes_live_after_publish_scan(tmp_path, monkeypatch):
+    """A ref created after the post-publish scan must not keep a dropped graft."""
+    clone = _mk_shallow_scenario(tmp_path)
+    head_sha = _git(clone, "rev-parse", "HEAD")
+    tip_sha = _git(clone, "rev-parse", "origin/main")
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    orphan = next(sha for sha in _shallow_lines(clone) if sha not in {head_sha, tip_sha})
+
+    def revive_after_publish_scan(_repo: Path) -> None:
+        _git(clone, "update-ref", "refs/heads/race", orphan)
+
+    monkeypatch.setattr(gitlock_module, "_after_publish_reachability", revive_after_publish_scan)
     before = (clone / ".git" / "shallow").read_bytes()
 
     assert prune_stale_shallow_grafts(clone) == 0

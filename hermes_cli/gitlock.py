@@ -153,6 +153,10 @@ def _before_replace_shallow(repo_root: Path) -> None:
     """Test seam after the last pre-publish scan and before ``os.replace``."""
 
 
+def _after_publish_reachability(repo_root: Path) -> None:
+    """Test seam after the first post-replace scan; the committed write follows."""
+
+
 # Worktree-local files that ``rev-list --all --reflog`` does not walk. Linked
 # worktrees share ``.git/shallow`` but keep their own copies under the common
 # Git directory (``.git/worktrees/<id>/``).
@@ -421,13 +425,18 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
                 logger.debug("shallow prune aborted; reachability changed before publish")
                 return 0
 
-            # shallow.lock does not serialize update-ref. The remaining window is
-            # after this last scan; publish then restore if a dropped graft is live.
+            # shallow.lock does not serialize update-ref, so replace is only
+            # tentative. A scan after replace cannot bless the shrink: a ref
+            # can appear after that scan. The committed write restores the
+            # original union whenever any post-replace scan sees a dropped
+            # graft, including one created after the first post scan.
             _before_replace_shallow(repo_root)
             os.replace(lock_path, shallow_path)
             lock_owned = False
             post = _reachable_grafts(repo_root, lines, query_env)
-            if post is None or (post - keep):
+            _after_publish_reachability(repo_root)
+            late = _reachable_grafts(repo_root, lines, query_env)
+            if post is None or late is None or (late - keep) or (post - keep):
                 logger.debug("shallow prune restored; reachability changed during publish")
                 _restore_shallow_union(shallow_path, original, lock_path, mode)
                 return 0
