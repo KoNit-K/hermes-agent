@@ -5036,6 +5036,18 @@ class TelegramAdapter(BasePlatformAdapter):
             raw = _scoped_gate_env(env_name)
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(decoded, list):
+                    return {
+                        str(part).strip()
+                        for part in decoded
+                        if not isinstance(part, (dict, list)) and str(part).strip()
+                    }
         return {part.strip() for part in str(raw).split(",") if part.strip()}
 
     def _telegram_require_mention(self) -> bool:

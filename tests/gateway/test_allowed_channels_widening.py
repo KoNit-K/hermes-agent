@@ -82,6 +82,42 @@ class TestTelegramAllowedChats:
         adapter = _make_telegram_adapter(allowed_chats=[-100, -200])
         assert adapter._telegram_allowed_chats() == {"-100", "-200"}
 
+    def test_json_array_string_form(self):
+        adapter = _make_telegram_adapter(
+            allowed_chats='["-100123", "-100456"]'
+        )
+        assert adapter._telegram_allowed_chats() == {"-100123", "-100456"}
+
+    def test_json_array_string_authorizes_group_message(self):
+        adapter = _make_telegram_adapter(
+            allowed_chats='["-100123", "-100456"]'
+        )
+        assert adapter._should_process_message(_tg_group_message(-100123)) is True
+
+    def test_csv_form(self):
+        adapter = _make_telegram_adapter(allowed_chats="-100123, -100456")
+        assert adapter._telegram_allowed_chats() == {"-100123", "-100456"}
+
+    @pytest.mark.parametrize(
+        ("allowed_chats", "expected"),
+        [
+            ('["-100123"', {'["-100123"'}),
+            ('{"chat":"-100123"}', {'{"chat":"-100123"}'}),
+            ('"-100123"', {'"-100123"'}),
+        ],
+    )
+    def test_invalid_or_non_array_json_falls_back_to_csv(
+        self, allowed_chats, expected
+    ):
+        adapter = _make_telegram_adapter(allowed_chats=allowed_chats)
+        assert adapter._telegram_allowed_chats() == expected
+
+    def test_json_array_uses_only_scalar_entries(self):
+        adapter = _make_telegram_adapter(
+            allowed_chats='["-100123", {"id": "-100456"}, ["-100789"]]'
+        )
+        assert adapter._telegram_allowed_chats() == {"-100123"}
+
 
     def test_mention_cannot_bypass_whitelist(self):
         """@mention in a non-allowed chat is still ignored."""
@@ -218,5 +254,4 @@ class TestMatrixAllowedRooms:
         raw = "" or ""
         allowed = {r.strip() for r in raw.split(",") if r.strip()}
         assert allowed == set()
-
 
