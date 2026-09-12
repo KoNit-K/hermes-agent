@@ -1259,9 +1259,11 @@ model_pricing:
 ```
 
 A valid exact override takes precedence over bundled snapshots and `/models`
-metadata. Its accounting provenance is stored as `user_override` with pricing
-version `1`. An absent, malformed, unsupported-version, or nonmatching block is
-ignored. Omitted cache rates are not treated as zero: if the provider reports
+metadata. Its accounting provenance is stored as `user_override` with a
+content-hashed `pricing_version` (`1.<sha256[:12]>` of the rates in force),
+so changing a rate under the same schema stamps later calls differently.
+An absent, malformed, unsupported-version, or nonmatching block is ignored.
+Omitted cache rates are not treated as zero: if the provider reports
 nonzero usage for an unpriced cache bucket, the request cost remains unknown.
 
 ## Context Pressure Warnings

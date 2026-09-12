@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, fields
@@ -404,6 +405,32 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
     return _OFFICIAL_DOCS_PRICING.get((route.provider, normalized)) if normalized != model else None
 
 
+def _pricing_rate_token(value: Optional[Decimal]) -> str:
+    """Stable decimal token so ``1.25`` and ``1.250`` hash identically."""
+    if value is None:
+        return "-"
+    token = format(value, "f")
+    if "." in token:
+        token = token.rstrip("0").rstrip(".")
+    return token or "0"
+
+
+def _user_override_pricing_version(schema_version: int, rates: dict[str, Optional[Decimal]]) -> str:
+    """Content hash of the rates in force, distinct from the schema version.
+
+    ``model_pricing.version`` is the config schema (currently 1). Historical
+    calls must still be attributable after a user changes ``input`` from
+    ``1.25`` to ``2.00`` under that same schema, so the stored stamp is
+    ``{schema}.{sha256[:12]}`` of the canonical rate tuple.
+    """
+    payload = "|".join(
+        f"{key}={_pricing_rate_token(rates.get(key))}"
+        for key in ("input", "output", "cache_read", "cache_write")
+    )
+    digest = hashlib.sha256(payload.encode("ascii")).hexdigest()[:12]
+    return f"{schema_version}.{digest}"
+
+
 def _lookup_user_pricing_override(route: BillingRoute) -> Optional[PricingEntry]:
     """Return an exact config.yaml provider/model override, or fail open.
 
@@ -437,7 +464,7 @@ def _lookup_user_pricing_override(route: BillingRoute) -> Optional[PricingEntry]
             cache_read_cost_per_million=rates["cache_read"],
             cache_write_cost_per_million=rates["cache_write"],
             source="user_override",
-            pricing_version=str(section["version"]),
+            pricing_version=_user_override_pricing_version(section["version"], rates),
         )
     except Exception:
         logger.debug("Ignoring invalid model_pricing configuration", exc_info=True)
