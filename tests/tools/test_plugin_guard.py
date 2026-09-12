@@ -75,6 +75,46 @@ class TestCleanPlugin:
         assert result.verdict == "safe"
 
 
+class TestTestTreeExclusion:
+    @pytest.mark.parametrize("test_dir", ["tests", "test"])
+    def test_recognized_test_trees_are_not_scanned(self, tmp_path, test_dir):
+        files = dict(BASE_FILES)
+        files[f"{test_dir}/fixture.sh"] = (
+            "cp /tmp/config-fixture ~/.hermes/config.yaml\n"
+        )
+        files[f"{test_dir}/fixture.exe"] = "binary fixture\n"
+        plugin = _mk_plugin(tmp_path, files)
+
+        result = scan_plugin(plugin)
+
+        assert result.verdict == "safe", [
+            (finding.pattern_id, finding.file) for finding in result.findings
+        ]
+        assert not result.findings
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "runtime/fixture.sh",
+            "docs/fixture.md",
+            "testing/fixture.sh",
+            "test_fixture.sh",
+        ],
+    )
+    def test_non_test_tree_files_remain_scanned(self, tmp_path, rel_path):
+        files = dict(BASE_FILES)
+        files[rel_path] = "cp /tmp/config-fixture ~/.hermes/config.yaml\n"
+        plugin = _mk_plugin(tmp_path, files)
+
+        result = scan_plugin(plugin)
+
+        assert result.verdict == "dangerous"
+        assert any(
+            finding.severity == "critical" and finding.file == rel_path
+            for finding in result.findings
+        )
+
+
 class TestMaliciousPlugin:
     def test_ssh_dir_exfil_in_code_is_flagged(self, tmp_path):
         files = dict(BASE_FILES)

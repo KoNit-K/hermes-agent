@@ -20,10 +20,10 @@ from tools.skills_guard import (
 
 PLUGIN_SCANNER_VERSION = "plugin-guard-v1"
 
-# Never scanned: VCS internals, caches, vendored envs.
+# Never scanned: VCS internals, caches, vendored envs, non-runtime test trees.
 EXCLUDED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", "test", "tests"}
 
 # Code files, where "reads an env secret" / "HTTP call with a key" is normal (requires_env).
 CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php"}
