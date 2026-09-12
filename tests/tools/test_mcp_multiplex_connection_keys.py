@@ -89,6 +89,50 @@ def test_same_named_server_with_other_credentials_is_a_separate_connection(two_p
     assert handlers._check_circuit_breaker("x") is None
 
 
+@pytest.mark.parametrize(("auth", "expected_connections"), [
+    pytest.param(" OAuth ", 2, id="oauth-isolated"),
+    pytest.param(None, 1, id="non-oauth-shared-control"),
+])
+def test_identical_config_connection_sharing_respects_oauth_profile_ownership(
+    two_profiles, auth, expected_connections,
+):
+    import tools.mcp_tool as core
+    from tools import mcp_tool_discovery as disc
+    from tools import mcp_tool_registration as reg
+
+    cfg = {"url": "https://mcp.example/x"}
+    if auth is not None:
+        cfg["auth"] = auth
+
+    scope_a = two_profiles("a")
+    srv_a = _server("x", cfg)
+    disc._adopt_server("x", srv_a)
+    srv_a._registered_tool_names = reg._register_server_tools("x", srv_a, cfg)
+
+    scope_b = two_profiles("b")
+    connected = []
+
+    def fake_pass(new_servers):
+        for name, config in new_servers.items():
+            server = _server(name, config)
+            connected.append(server)
+            disc._adopt_server(name, server)
+            server._registered_tool_names = reg._register_server_tools(name, server, config)
+
+    with patch.object(disc, "_run_discovery_pass", fake_pass), \
+            patch.object(disc._loop, "_ensure_mcp_loop", lambda: None):
+        disc.register_mcp_servers({"x": dict(cfg)})
+
+    assert len(core._servers) == expected_connections
+    assert core._servers[(scope_a, "x")] is srv_a
+    if auth is not None:
+        assert len(connected) == 1
+        assert core._servers[(scope_b, "x")] is connected[0]
+    else:
+        assert connected == []
+        assert scope_b in core._server_tool_scopes[(scope_a, "x")]
+
+
 def test_owner_reload_reregisters_profiles_that_adopted_its_connection(two_profiles):
     import tools.mcp_tool as core
     from tools import mcp_tool_discovery as disc, mcp_tool_lifecycle as lifecycle

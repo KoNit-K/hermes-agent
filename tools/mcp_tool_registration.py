@@ -399,22 +399,29 @@ def _server_enabled(config: dict) -> bool:
     return _parse_boolish(config.get("enabled", True), default=True)
 
 
-def _connection_identity(config: dict) -> tuple:
+def _connection_identity(config: dict, *, profile_scope: Optional[str] = None) -> tuple:
     """What makes one live connection reusable for another profile: the route fingerprint PLUS
     everything that authenticates it (``config_fingerprint`` deliberately excludes credentials so
     the schema cache survives a token rotation). Two profiles pointing at the same URL with different
-    headers/env/auth are two identities; borrowing across them would call tools as the other user."""
+    headers/env/auth are two identities; borrowing across them would call tools as the other user.
+    OAuth tokens live outside config, so their live connection identity also includes profile scope."""
     from tools.mcp_schema_cache import config_fingerprint
 
     def _frozen(value):
         return json.dumps(value or {}, sort_keys=True, default=str)
 
+    auth_mode = (config.get("auth") or "").lower().strip()
+    oauth_scope = profile_scope if auth_mode == "oauth" else None
     return (config_fingerprint(config), _frozen(config.get("env")), _frozen(config.get("headers")),
-            (config.get("auth") or "").lower().strip())
+            auth_mode, oauth_scope)
 
 
-def _same_server_route(server: Any, config: dict) -> bool:
-    return _connection_identity(getattr(server, "_config", {}) or {}) == _connection_identity(config)
+def _same_server_route(server: Any, config: dict, *, key=None) -> bool:
+    owner_scope = _core._server_registry_scope(key if key is not None else _server_key_for_task(server))
+    current_scope = _core._mcp_registry_scope()
+    return _connection_identity(
+        getattr(server, "_config", {}) or {}, profile_scope=owner_scope,
+    ) == _connection_identity(config, profile_scope=current_scope)
 
 
 def register_connected_into_current_scope(servers: dict) -> int:
@@ -448,7 +455,7 @@ def _register_connected_into_current_scope(servers: dict) -> int:
             server = _core._servers.get(key)
             config = servers.get(_key_name(key))
             if (config is None or not _server_enabled(config) or server is None
-                    or getattr(server, "session", None) is None or not _same_server_route(server, config)):
+                    or getattr(server, "session", None) is None or not _same_server_route(server, config, key=key)):
                 stale.append(key)
     for key in stale:
         _remove_server_scope(key, scope)
@@ -463,7 +470,7 @@ def _register_connected_into_current_scope(servers: dict) -> int:
             # Any other profile's live connection with the same route AND credentials is shareable.
             shared = [(key, live) for key, live in _core._servers.items()
                       if _key_name(key) == name and getattr(live, "session", None) is not None
-                      and _same_server_route(live, config)]
+                      and _same_server_route(live, config, key=key)]
         if not shared:
             continue
         key, server = shared[0]
