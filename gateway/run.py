@@ -5217,6 +5217,7 @@ async def _start_gateway_shutdown_tail(
 
     _best_effort(_stop_keepalive)
     if _exit_with_failure_verdict(runner):
+        await runner._arm_process_exit_backstop_after_shutdown()
         return False
 
     # Never join(): an in-flight cron delivery is a coroutine on THIS loop; a sync join would drop it.
@@ -5240,6 +5241,7 @@ async def _start_gateway_shutdown_tail(
     with suppress(Exception):
         await _shutdown_mcp_servers_nonblocking()
 
+    await runner._arm_process_exit_backstop_after_shutdown()
     return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
 
 
@@ -5383,6 +5385,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             await runner.wait_for_shutdown()
             with suppress(Exception):
                 await _shutdown_mcp_servers_nonblocking()
+            await runner._arm_process_exit_backstop_after_shutdown()
             return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
         finally:
             _shutdown_gateway_health_export(runner)
@@ -5517,6 +5520,11 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
 
     for _step in (_release_locks, _mark_exited, _drain_logs):
         _best_effort(_step)
+    # The post-teardown watchdog must cover asyncio.run() cleanup and every bounded flush above.
+    # Disarm only at the final instruction before the clean hard exit.
+    from gateway.shutdown_watchdog import disarm_process_exit_backstop
+    with suppress(Exception):
+        disarm_process_exit_backstop()
     os._exit(exit_code)
 
 
