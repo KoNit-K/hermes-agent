@@ -154,7 +154,7 @@ def _before_replace_shallow(repo_root: Path) -> None:
 
 
 def _after_publish_reachability(repo_root: Path) -> None:
-    """Test seam after the first post-replace scan; the committed write follows."""
+    """Test seam after publication, before the post-publish object-presence check."""
 
 
 # Worktree-local files that ``rev-list --all --reflog`` does not walk. Linked
@@ -256,10 +256,19 @@ def _extra_reachability_tips(repo_root: Path, query_env: dict) -> Optional[List[
         tokens.extend(tips)
     if not tokens:
         return []
+    existing: List[str] = []
+    for token in tokens:
+        exists = _object_exists(repo_root, token, query_env)
+        if exists is None:
+            return None
+        if exists:
+            existing.append(token)
+    if not existing:
+        return []
     try:
         result = subprocess.run(
             ["git", "rev-list", "--no-walk", "--stdin"],
-            input="\n".join(tokens) + "\n",
+            input="\n".join(existing) + "\n",
             cwd=str(repo_root),
             capture_output=True, text=True, encoding="utf-8", timeout=10,
             env=query_env,
@@ -300,6 +309,119 @@ def _reachable_grafts(
     return set(lines) & set(reachable)
 
 
+_KEEP_REF_PREFIX = "refs/hermes-agent/shallow-keep/"
+
+
+def _shallow_union_text(original: str, current: str) -> str:
+    """Original grafts plus any lines added after publish."""
+    original_lines = {line for line in original.splitlines() if line}
+    current_lines = {line for line in current.splitlines() if line}
+    if current_lines <= original_lines:
+        return original
+    return "\n".join(sorted(original_lines | current_lines)) + "\n"
+
+
+def _object_exists(repo_root: Path, sha: str, query_env: dict) -> Optional[bool]:
+    """Whether ``sha`` is in the object DB. ``None`` if Git cannot be asked."""
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", sha],
+            cwd=str(repo_root),
+            capture_output=True, timeout=10, env=query_env,
+        )
+        return result.returncode == 0
+    except Exception:
+        logger.debug("cat-file -e failed for %s", sha, exc_info=True)
+        return None
+
+
+def _present_original_grafts(
+    repo_root: Path, lines: List[str], query_env: dict
+) -> Optional[set]:
+    """Original shallow lines whose objects still exist. ``None`` on probe failure."""
+    present: set = set()
+    for sha in lines:
+        exists = _object_exists(repo_root, sha, query_env)
+        if exists is None:
+            return None
+        if exists:
+            present.add(sha)
+    return present
+
+
+def _unpin_keep_refs(repo_root: Path, refs: List[str], query_env: dict) -> None:
+    for ref in refs:
+        try:
+            subprocess.run(
+                ["git", "update-ref", "-d", ref],
+                cwd=str(repo_root),
+                capture_output=True, timeout=10, env=query_env,
+            )
+        except Exception:
+            logger.debug("unpin %s failed", ref, exc_info=True)
+
+
+def _pin_keep_refs(
+    repo_root: Path, shas: Iterable[str], query_env: dict
+) -> Optional[List[str]]:
+    """Temporary refs so ``git gc`` cannot drop still-needed grafts."""
+    stale = _git_stdout_lines(
+        repo_root,
+        ["for-each-ref", "--format=%(refname)", _KEEP_REF_PREFIX],
+        env=query_env,
+    )
+    _unpin_keep_refs(repo_root, stale, query_env)
+    created: List[str] = []
+    for sha in shas:
+        ref = f"{_KEEP_REF_PREFIX}{sha}"
+        try:
+            result = subprocess.run(
+                ["git", "update-ref", ref, sha],
+                cwd=str(repo_root),
+                capture_output=True, timeout=10, env=query_env,
+            )
+        except Exception:
+            logger.debug("pin %s failed", sha, exc_info=True)
+            _unpin_keep_refs(repo_root, created, query_env)
+            return None
+        if result.returncode != 0:
+            _unpin_keep_refs(repo_root, created, query_env)
+            return None
+        created.append(ref)
+    return created
+
+
+def _gc_unreachable(repo_root: Path, query_env: dict) -> bool:
+    """Delete unreachable objects. ``False`` if gc cannot run."""
+    try:
+        result = subprocess.run(
+            ["git", "gc", "--prune=now", "-q"],
+            cwd=str(repo_root),
+            capture_output=True, timeout=120, env=query_env,
+        )
+        return result.returncode == 0
+    except Exception:
+        logger.debug("gc --prune=now failed for %s", repo_root, exc_info=True)
+        return False
+
+
+def _force_write_shallow(shallow_path: Path, text: str, mode: int) -> bool:
+    """Replace ``shallow`` without ``shallow.lock`` after a contended rollback."""
+    tmp_path = shallow_path.with_name(shallow_path.name + ".hermes-restore")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, shallow_path)
+        return True
+    except Exception:
+        logger.debug("forced shallow write failed for %s", shallow_path, exc_info=True)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def _restore_shallow_union(
     shallow_path: Path, original: str, lock_path: Path, mode: int
 ) -> bool:
@@ -308,13 +430,7 @@ def _restore_shallow_union(
         current = shallow_path.read_text(encoding="utf-8")
     except OSError:
         current = ""
-    original_lines = {line for line in original.splitlines() if line}
-    current_lines = {line for line in current.splitlines() if line}
-    text = (
-        original
-        if current_lines <= original_lines
-        else "\n".join(sorted(original_lines | current_lines)) + "\n"
-    )
+    text = _shallow_union_text(original, current)
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
     except FileExistsError:
@@ -338,6 +454,19 @@ def _restore_shallow_union(
         return False
 
 
+def _restore_shallow_complete(
+    shallow_path: Path, original: str, lock_path: Path, mode: int
+) -> bool:
+    """Restore the original union even when another writer holds ``shallow.lock``."""
+    if _restore_shallow_union(shallow_path, original, lock_path, mode):
+        return True
+    try:
+        current = shallow_path.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    return _force_write_shallow(shallow_path, _shallow_union_text(original, current), mode)
+
+
 def prune_stale_shallow_grafts(repo_root: Path) -> int:
     """Drop ``.git/shallow`` graft lines no live ref, reflog, or recovery tip reaches (#105951).
 
@@ -347,8 +476,9 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
     break ``merge-base`` and push ``hermes update`` into the orphan-divergence reset path
     on every run. Keep boundaries that protect commits reachable from refs, reflogs,
     any worktree ``FETCH_HEAD``, or ``ORIG_HEAD``. Dropping a graft for a still-reachable
-    commit exposes its unfetched parent and breaks git maintenance. The dropped commits are genuinely
-    unreachable and their objects are left for ``git gc``. Returns the number of graft
+    commit exposes its unfetched parent and breaks git maintenance. Dropped commits are
+    deleted with ``git gc --prune=now`` before their graft lines are removed, so a later
+    ``update-ref`` cannot revive a missing parent. Returns the number of graft
     lines removed; never raises, and validates the candidate through Git's lockfile
     before replacing the original.
     """
@@ -425,23 +555,92 @@ def prune_stale_shallow_grafts(repo_root: Path) -> int:
                 logger.debug("shallow prune aborted; reachability changed before publish")
                 return 0
 
-            # shallow.lock does not serialize update-ref, so replace is only
-            # tentative. A scan after replace cannot bless the shrink: a ref
-            # can appear after that scan. The committed write restores the
-            # original union whenever any post-replace scan sees a dropped
-            # graft, including one created after the first post scan.
             _before_replace_shallow(repo_root)
-            os.replace(lock_path, shallow_path)
-            lock_owned = False
-            post = _reachable_grafts(repo_root, lines, query_env)
-            _after_publish_reachability(repo_root)
-            late = _reachable_grafts(repo_root, lines, query_env)
-            if post is None or late is None or (late - keep) or (post - keep):
-                logger.debug("shallow prune restored; reachability changed during publish")
-                _restore_shallow_union(shallow_path, original, lock_path, mode)
+            fresh = _reachable_grafts(repo_root, lines, query_env)
+            if fresh is None or (fresh - keep):
+                logger.debug("shallow prune aborted; reachability changed before publish")
                 return 0
-            logger.info("Pruned %d stale shallow graft(s) in %s", len(lines) - len(keep), repo_root)
-            return len(lines) - len(keep)
+
+            # git gc needs shallow.lock. Drop ours first; the original file is
+            # still live. Pin keep so FETCH_HEAD / ORIG_HEAD objects survive.
+            try:
+                lock_path.unlink()
+            except OSError:
+                return 0
+            lock_owned = False
+            tips = _extra_reachability_tips(repo_root, query_env)
+            if tips is None:
+                return 0
+            pinned = _pin_keep_refs(repo_root, set(keep) | set(tips), query_env)
+            if pinned is None:
+                return 0
+            try:
+                if not _gc_unreachable(repo_root, query_env):
+                    return 0
+            finally:
+                _unpin_keep_refs(repo_root, pinned, query_env)
+
+            present = _present_original_grafts(repo_root, lines, query_env)
+            if present is None or not present or present == set(lines):
+                return 0
+
+            # ``git gc --prune=now`` often rewrites shallow itself once the
+            # dropped objects are gone. That rewrite is the publication.
+            on_disk = {
+                line
+                for line in shallow_path.read_text(encoding="utf-8").splitlines()
+                if line
+            }
+            if on_disk != present:
+                present_text = "\n".join(sorted(present)) + "\n"
+                try:
+                    lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+                except FileExistsError:
+                    if not _force_write_shallow(shallow_path, present_text, mode):
+                        return 0
+                else:
+                    lock_owned = True
+                    open_fd = lock_fd
+                    handle = os.fdopen(lock_fd, "w", encoding="utf-8")
+                    open_fd = None
+                    with handle:
+                        handle.write(present_text)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.chmod(lock_path, mode)
+                    candidate_env["GIT_SHALLOW_FILE"] = str(lock_path)
+                    still_walks = _git_stdout_lines(
+                        repo_root,
+                        ["rev-list", "--count", *roots],
+                        env=candidate_env,
+                    )
+                    if not still_walks:
+                        logger.debug("shallow prune self-check failed; original retained")
+                        return 0
+                    os.replace(lock_path, shallow_path)
+                    lock_owned = False
+
+            # Dropped objects are gone, so a later update-ref cannot revive a
+            # removed boundary. A failed probe still force-restores the original
+            # union even when another writer holds shallow.lock.
+            _after_publish_reachability(repo_root)
+            present = _present_original_grafts(repo_root, lines, query_env)
+            live = _reachable_grafts(repo_root, lines, query_env)
+            published = {
+                line
+                for line in shallow_path.read_text(encoding="utf-8").splitlines()
+                if line
+            }
+            if present is None or live is None or (live - published) or (present - published):
+                logger.debug("shallow prune restored; reachability changed during publish")
+                for _ in range(3):
+                    if _restore_shallow_complete(shallow_path, original, lock_path, mode):
+                        break
+                else:
+                    logger.debug("shallow prune rollback incomplete for %s", shallow_path)
+                return 0
+            logger.info("Pruned %d stale shallow graft(s) in %s", len(lines) - len(present), repo_root)
+            return len(lines) - len(present)
         finally:
             if open_fd is not None:
                 try:

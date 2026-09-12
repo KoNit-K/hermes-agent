@@ -441,26 +441,63 @@ def test_prune_aborts_when_ref_becomes_live_after_final_scan(tmp_path, monkeypat
     assert not (clone / ".git" / "shallow.lock").exists()
 
 
-def test_prune_restores_when_ref_becomes_live_after_publish_scan(tmp_path, monkeypatch):
-    """A ref created after the post-publish scan must not keep a dropped graft."""
+def test_prune_stays_healthy_when_ref_update_follows_publish(tmp_path, monkeypatch):
+    """A ref created after the last publish scan cannot leave a removed boundary live."""
     clone = _mk_shallow_scenario(tmp_path)
     head_sha = _git(clone, "rev-parse", "HEAD")
     tip_sha = _git(clone, "rev-parse", "origin/main")
     _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
     orphan = next(sha for sha in _shallow_lines(clone) if sha not in {head_sha, tip_sha})
+    created = {"ok": False}
 
-    def revive_after_publish_scan(_repo: Path) -> None:
-        _git(clone, "update-ref", "refs/heads/race", orphan)
+    def revive_after_final_scan(_repo: Path) -> None:
+        created["ok"] = _run_git(clone, "update-ref", "refs/heads/race", orphan).returncode == 0
 
-    monkeypatch.setattr(gitlock_module, "_after_publish_reachability", revive_after_publish_scan)
+    monkeypatch.setattr(gitlock_module, "_after_publish_reachability", revive_after_final_scan)
+    removed = prune_stale_shallow_grafts(clone)
+
+    assert _run_git(clone, "rev-list", "--all", "--reflog").returncode == 0
+    assert _run_git(clone, "fsck", "--connectivity-only").returncode == 0
+    if created["ok"]:
+        assert orphan in _shallow_lines(clone)
+        assert removed == 0
+    else:
+        assert orphan not in _shallow_lines(clone)
+        assert removed == 1
+        assert _run_git(clone, "update-ref", "refs/heads/race", orphan).returncode != 0
+    assert not (clone / ".git" / "shallow.lock").exists()
+
+
+def test_prune_force_restores_when_rollback_lock_is_held(tmp_path, monkeypatch):
+    """A failed lock-based restore must still put the original grafts back."""
+    clone = _mk_shallow_scenario(tmp_path)
+    head_sha = _git(clone, "rev-parse", "HEAD")
+    tip_sha = _git(clone, "rev-parse", "origin/main")
+    _git(clone, "reflog", "expire", "--expire=now", "refs/remotes/origin/main")
+    orphan = next(sha for sha in _shallow_lines(clone) if sha not in {head_sha, tip_sha})
     before = (clone / ".git" / "shallow").read_bytes()
+    real_present = gitlock_module._present_original_grafts
+    published = {"done": False}
+
+    def revive_and_hold_lock(_repo: Path) -> None:
+        published["done"] = True
+        _run_git(clone, "update-ref", "refs/heads/race", orphan)
+        (clone / ".git" / "shallow.lock").write_text("", encoding="utf-8")
+
+    def hide_objects_after_publish(repo, lines, query_env):
+        if published["done"]:
+            return None
+        return real_present(repo, lines, query_env)
+
+    monkeypatch.setattr(gitlock_module, "_after_publish_reachability", revive_and_hold_lock)
+    monkeypatch.setattr(gitlock_module, "_present_original_grafts", hide_objects_after_publish)
 
     assert prune_stale_shallow_grafts(clone) == 0
     assert orphan in _shallow_lines(clone)
+    assert set(_shallow_lines(clone)) >= {head_sha, tip_sha, orphan}
     assert (clone / ".git" / "shallow").read_bytes() == before
     assert _run_git(clone, "rev-list", "--all", "--reflog").returncode == 0
     assert _run_git(clone, "fsck", "--connectivity-only").returncode == 0
-    assert not (clone / ".git" / "shallow.lock").exists()
 
 
 def test_prune_keeps_sha256_fetch_head_ancestor_boundary(tmp_path):
