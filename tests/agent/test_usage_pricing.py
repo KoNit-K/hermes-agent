@@ -150,6 +150,136 @@ def test_bundled_pricing_skips_endpoint_metadata(monkeypatch):
     assert entry.source == "official_docs_snapshot"
 
 
+def test_versioned_user_pricing_override_precedes_bundled_and_fails_open(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "hermes_test" / "config.yaml"
+    config_path.write_text(
+        """model_pricing:
+  version: 1
+  providers:
+    deepseek:
+      deepseek-chat:
+        input: "9"
+        output: "19"
+        cache_read: "0.9"
+        cache_write: "11"
+      deepseek-future:
+        input: "3"
+        output: "7"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("endpoint metadata should not be fetched")
+        ),
+    )
+
+    entry = get_pricing_entry("deepseek-chat", provider="deepseek")
+
+    assert entry is not None
+    assert entry.source == "user_override"
+    assert entry.pricing_version == "1"
+    assert entry.input_cost_per_million == Decimal("9")
+
+    endpoint_entry = get_pricing_entry(
+        "deepseek-future",
+        provider="deepseek",
+        base_url="https://api.deepseek.com/v1",
+    )
+    assert endpoint_entry is not None
+    assert endpoint_entry.source == "user_override"
+
+    missing_cache = estimate_usage_cost(
+        "deepseek-future",
+        CanonicalUsage(cache_read_tokens=1),
+        provider="deepseek",
+        base_url="https://api.deepseek.com/v1",
+    )
+    assert missing_cache.status == "unknown"
+    assert missing_cache.amount_usd is None
+    assert missing_cache.source == "user_override"
+    assert missing_cache.pricing_version == "1"
+
+    from hermes_cli import config as config_module
+
+    bundled = _OFFICIAL_DOCS_PRICING[("deepseek", "deepseek-chat")]
+    for invalid in (
+        {"model_pricing": {"version": 2, "providers": {"deepseek": {"deepseek-chat": {"input": "9", "output": "19"}}}}},
+        {"model_pricing": {"version": 1, "providers": {"deepseek": {"deepseek-chat": {"input": "bad", "output": "19"}}}}},
+        {"model_pricing": {"version": 1, "providers": {"openai": {"deepseek-chat": {"input": "9", "output": "19"}}}}},
+    ):
+        monkeypatch.setattr(config_module, "load_config_readonly", lambda invalid=invalid: invalid)
+        assert get_pricing_entry("deepseek-chat", provider="deepseek") == bundled
+
+
+def test_user_pricing_provenance_persists_through_response_accounting(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """model_pricing:
+  version: 1
+  providers:
+    deepseek:
+      deepseek-flash:
+        input: "9"
+        output: "19"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent import turn_usage
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    session_db = SessionDB(tmp_path / "state.db")
+    agent = AIAgent(
+        api_key="test",
+        base_url="https://api.deepseek.com/v1",
+        provider="deepseek",
+        api_mode="chat_completions",
+        model="deepseek-flash",
+        session_id="pricing-override",
+        session_db=session_db,
+        platform="cli",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        save_trajectories=False,
+        enabled_toolsets=["file"],
+    )
+    try:
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=20,
+                total_tokens=120,
+                prompt_tokens_details=None,
+                completion_tokens_details=None,
+            )
+        )
+        turn_usage.record_response_usage(
+            agent,
+            response,
+            messages=[{"role": "user", "content": "hi"}],
+            api_call_count=1,
+            api_duration=0.1,
+            compression_attempts=0,
+            max_compression_attempts=3,
+        )
+        stored = agent._session_db.get_session("pricing-override")
+    finally:
+        agent.close()
+        session_db.close()
+
+    assert stored["cost_source"] == "user_override"
+    assert stored["pricing_version"] == "1"
+
+
 def test_unknown_model_falls_back_to_endpoint_metadata(monkeypatch):
     """Models absent from the bundled table still use endpoint pricing."""
     monkeypatch.setattr(
