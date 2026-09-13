@@ -178,13 +178,9 @@ _HOST_BANDWIDTH_GB_S = 80.0         # spilled weights stream over host DRAM
 # compress floor, which marks unusable, not unpleasant.
 PLEASANT_FLOOR_TOK_S = 20.0
 
-# Price the kind of long-context agent turn Hermes is designed to serve, rather than a single
-# decoded token. The pleasant-turn ceiling is the latency of this workload at the established
-# 20 tok/s pleasant floor.
-AGENT_TURN_PROMPT_TOKENS = 32_768
+# A response-sized decode workload makes a latency estimate comparable to the established speed
+# floor. Prompt work is deliberately not assumed: its token count must come from the caller.
 AGENT_TURN_DECODE_TOKENS = 256
-PLEASANT_AGENT_TURN_LATENCY_S = (
-    (AGENT_TURN_PROMPT_TOKENS + AGENT_TURN_DECODE_TOKENS) / PLEASANT_FLOOR_TOK_S)
 
 
 def predicted_decode_tok_s(entry: CatalogEntry, variant: QuantVariant, budget: HardwareBudget, *,
@@ -198,25 +194,30 @@ def predicted_decode_tok_s(entry: CatalogEntry, variant: QuantVariant, budget: H
 
 
 def predicted_agent_turn_latency_s(entry: CatalogEntry, variant: QuantVariant,
-                                   budget: HardwareBudget, *, spilled: bool = False) -> float | None:
-    """Predict end-to-end latency for the representative agent-turn workload."""
-    if (entry.prefill_tok_s is None or not math.isfinite(entry.prefill_tok_s)
-            or entry.prefill_tok_s <= 0):
+                                   budget: HardwareBudget, *, input_tokens: int | None = None,
+                                   decode_tokens: int = AGENT_TURN_DECODE_TOKENS,
+                                   spilled: bool = False) -> float | None:
+    """Predict end-to-end latency when prompt workload and throughput are both known."""
+    if (input_tokens is None or input_tokens < 0 or entry.prefill_tok_s is None
+            or not math.isfinite(entry.prefill_tok_s) or entry.prefill_tok_s <= 0):
         return None
-    return (AGENT_TURN_PROMPT_TOKENS / entry.prefill_tok_s
-            + AGENT_TURN_DECODE_TOKENS
+    return (input_tokens / entry.prefill_tok_s
+            + decode_tokens
             / predicted_decode_tok_s(entry, variant, budget, spilled=spilled))
 
 
 def recommended_entry(budget: HardwareBudget,
-                      entries: "tuple[CatalogEntry, ...] | None" = None
+                      entries: "tuple[CatalogEntry, ...] | None" = None, *,
+                      input_tokens: int | None = None,
+                      decode_tokens: int = AGENT_TURN_DECODE_TOKENS,
                       ) -> "tuple[CatalogEntry, str] | None":
     """The catalog's default pick for THIS machine, with its reason key.
 
     Callers pass pre-filtered entries when some are ineligible for reasons the catalog can't know
-    (engine too old). When every resident candidate has measured prompt throughput, the pleasant
-    floor and fallback rank the representative prompt-plus-decode agent turn. Missing prompt
-    measurements deliberately fail open to the established decode-only rule. Reasons:
+    (engine too old). When callers provide an input-token workload and every resident candidate
+    has measured prompt throughput, the pleasant floor and fallback rank that prompt-plus-decode
+    agent turn. Missing workload or prompt measurements deliberately fail open to the established
+    decode-only rule. Reasons:
     best-quality-resident (quality won among resident entries clearing the pleasant floor);
     speed-gated-quality (same, but the floor eliminated a HIGHER quality candidate);
     fastest-resident (nothing resident clears the floor). Returns None when no eligible entry runs
@@ -231,11 +232,13 @@ def recommended_entry(budget: HardwareBudget,
         return predicted_decode_tok_s(t[0], t[1].variant, budget, spilled=spilled)
 
     resident = [(e, c) for e, c in fitting if c.zero_spill]
-    latencies = [predicted_agent_turn_latency_s(e, c.variant, budget) for e, c in resident]
+    latencies = [predicted_agent_turn_latency_s(
+        e, c.variant, budget, input_tokens=input_tokens, decode_tokens=decode_tokens)
+                 for e, c in resident]
     use_latency = bool(resident) and all(latency is not None for latency in latencies)
     if use_latency:
         pleasant = [t for t, latency in zip(resident, latencies)
-                    if latency <= PLEASANT_AGENT_TURN_LATENCY_S]
+                    if latency <= (input_tokens + decode_tokens) / PLEASANT_FLOOR_TOK_S]
     else:
         pleasant = [t for t in resident if decode_speed(t) >= PLEASANT_FLOOR_TOK_S]
     if pleasant:
@@ -245,7 +248,9 @@ def recommended_entry(budget: HardwareBudget,
     if resident:
         if use_latency:
             return (min(resident,
-                        key=lambda t: predicted_agent_turn_latency_s(t[0], t[1].variant, budget))[0],
+                        key=lambda t: predicted_agent_turn_latency_s(
+                            t[0], t[1].variant, budget, input_tokens=input_tokens,
+                            decode_tokens=decode_tokens))[0],
                     "fastest-resident")
         return (max(resident, key=decode_speed)[0], "fastest-resident")
     # A spilled model may be usable, but it is not a recommendation. Keep it

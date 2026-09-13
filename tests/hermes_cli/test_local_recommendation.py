@@ -186,8 +186,10 @@ def test_prefill_aware_latency_prices_an_agent_turn_not_just_decode():
     fast = _test_entry(entry_id="fast-prefill", quality=1, size_gb=10, prefill_tok_s=1_000)
     slow = _test_entry(entry_id="slow-prefill", quality=1, size_gb=1, prefill_tok_s=10)
 
-    fast_latency = predicted_agent_turn_latency_s(fast, fast.variants[0], budget)
-    slow_latency = predicted_agent_turn_latency_s(slow, slow.variants[0], budget)
+    fast_latency = predicted_agent_turn_latency_s(
+        fast, fast.variants[0], budget, input_tokens=32_768)
+    slow_latency = predicted_agent_turn_latency_s(
+        slow, slow.variants[0], budget, input_tokens=32_768)
 
     assert fast_latency is not None
     assert slow_latency is not None
@@ -200,17 +202,17 @@ def test_prefill_dominated_turn_gates_a_higher_quality_model():
     fast = _test_entry(entry_id="fast-prefill", quality=50, size_gb=10, prefill_tok_s=1_000)
     slow = _test_entry(entry_id="slow-prefill", quality=100, size_gb=1, prefill_tok_s=10)
 
-    picked = recommended_entry(budget, (fast, slow))
+    picked = recommended_entry(budget, (fast, slow), input_tokens=32_768)
 
     assert picked is not None
     assert (picked[0].id, picked[1]) == ("fast-prefill", "speed-gated-quality")
 
 
-def test_missing_prefill_cost_keeps_decode_only_floor_behavior():
-    """Unmeasured prompt performance must fail open to the established decode policy."""
+def test_missing_prompt_workload_keeps_decode_only_floor_behavior():
+    """Measured prefill cannot alter the established policy without input workload data."""
     budget = _discrete(128)
-    fast = _test_entry(entry_id="fast-decode", quality=50, size_gb=1)
-    slow = _test_entry(entry_id="slow-decode", quality=100, size_gb=40)
+    fast = _test_entry(entry_id="fast-decode", quality=50, size_gb=1, prefill_tok_s=1_000)
+    slow = _test_entry(entry_id="slow-decode", quality=100, size_gb=40, prefill_tok_s=10)
 
     picked = recommended_entry(budget, (fast, slow))
 
@@ -240,7 +242,7 @@ def test_prefill_latency_orders_fastest_resident_when_none_are_pleasant():
     slower_turn = _test_entry(
         entry_id="slower-turn", quality=100, size_gb=1, prefill_tok_s=5)
 
-    picked = recommended_entry(budget, (faster_turn, slower_turn))
+    picked = recommended_entry(budget, (faster_turn, slower_turn), input_tokens=32_768)
 
     assert picked is not None
     assert (picked[0].id, picked[1]) == ("faster-turn", "fastest-resident")
