@@ -124,6 +124,30 @@ class TestConfigSetRoundTripSafety:
             {"name": "second", "api_key": "keep"},
         ]
 
+    def test_list_item_update_preserves_item_and_trailing_comments(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "fallback_providers:\n"
+            "  - provider: nous  # keep first\n"
+            "  - provider: other  # keep second\n"
+            "# trailing\n",
+            encoding="utf-8",
+        )
+
+        cfg.set_config_value("fallback_providers.1.provider", "changed")
+
+        saved = config_path.read_text(encoding="utf-8")
+        assert "provider: nous  # keep first" in saved
+        assert "provider: changed" in saved
+        assert "# keep second" in saved
+        assert "# trailing" in saved
+        import yaml
+        assert yaml.safe_load(saved)["fallback_providers"] == [
+            {"provider": "nous"},
+            {"provider": "changed"},
+        ]
+
 
 class TestStringTypedGuardPreserved:
     def test_enum_off_stays_string(self, tmp_path, monkeypatch):
