@@ -30,7 +30,7 @@ from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F401
-from utils import atomic_replace, atomic_yaml_write, fast_safe_load
+from utils import atomic_replace, atomic_roundtrip_yaml_save, atomic_yaml_write, fast_safe_load
 
 logger = logging.getLogger(__name__)
 
@@ -3415,9 +3415,9 @@ def _exit_invalid(msg: str) -> None:
 
 
 def _write_user_config(config_path: Path, user_config: Dict[str, Any]) -> None:
-    """Write only the user's raw config back (never the merged defaults)."""
+    """Write only the user's raw config back, preserving YAML comments atomically."""
     ensure_hermes_home()
-    atomic_yaml_write(config_path, user_config, sort_keys=False)
+    atomic_roundtrip_yaml_save(config_path, user_config)
 
 
 def _print_unknown_key_notice(key: str, suggestion: Optional[str]) -> None:
@@ -3447,6 +3447,10 @@ def set_config_value(key: str, value: str, force: bool = False):
         _exit_invalid(
             f"✗ Invalid config key: {key!r} — contains an empty path segment "
             "(leading, trailing, or doubled '.').")
+    if any(re.search(r"\[\d+\]", segment) for segment in _split_key_path(key)):
+        _exit_invalid(
+            f"✗ Invalid config key: {key!r} — bracketed list indices are not supported; "
+            "use dotted numeric segments (for example, custom_providers.0.name).")
     _exit_if_key_managed(key, "set")
     if _is_env_config_key(key):
         # Unified lifecycle: also rotates any config.yaml mirror of the old value.
