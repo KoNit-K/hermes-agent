@@ -107,6 +107,40 @@ def _slice_ids(payload, slice_name):
 
 class TestSidebarScope:
 
+    @pytest.mark.parametrize(
+        ("scope", "desktop", "expected"),
+        [
+            (None, False, {"default-telegram", "worker-telegram"}),
+            ("current", True, {"default-telegram"}),
+            ("default", False, {"default-telegram"}),
+            ("worker", False, {"worker-telegram"}),
+            ("worker,default", False, {"default-telegram", "worker-telegram"}),
+            ("Worker,default", False, {"default-telegram", "worker-telegram"}),
+            ("worker,../default", False, {"default-telegram"}),
+            ("unknown", False, {"default-telegram"}),
+            ("all", True, {"default-telegram", "worker-telegram"}),
+        ],
+    )
+    def test_dashboard_profile_scope_limits_sidebar_database_reads(
+        self, client, profiles_on_disk, monkeypatch, scope, desktop, expected
+    ):
+        """The dashboard scope is a process boundary around profile state.db reads."""
+        _seed_session(profiles_on_disk["default"], "default-telegram", source="telegram")
+        _seed_session(profiles_on_disk["worker"], "worker-telegram", source="telegram")
+        monkeypatch.delenv("HERMES_DASHBOARD_PROFILE_SCOPE", raising=False)
+        monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+        if scope is not None:
+            monkeypatch.setenv("HERMES_DASHBOARD_PROFILE_SCOPE", scope)
+        if desktop:
+            monkeypatch.setenv("HERMES_DESKTOP", "1")
+
+        payload = client.get(
+            "/api/profiles/sessions/sidebar",
+            params={"messaging_exclude": "cli,cron"},
+        ).json()
+
+        assert _slice_ids(payload, "messaging") == expected
+
     def test_concrete_profile_sees_only_its_own_slices(self, client, profiles_on_disk):
         _seed_session(profiles_on_disk["default"], "default-chat", source="cli")
         _seed_session(profiles_on_disk["default"], "default-cron", source="cron")
@@ -141,6 +175,22 @@ class TestSidebarScope:
 
 
 class TestCrossProfileProjectTree:
+
+    def test_current_dashboard_scope_reads_only_the_process_profile_tree(
+        self, client, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        for name, home in profiles_on_disk.items():
+            folder = tmp_path / "repos" / name
+            folder.mkdir(parents=True)
+            _seed_session(home, f"{name}-chat", source="cli", cwd=folder)
+            _seed_project(home, name.title(), folder)
+
+        monkeypatch.setenv("HERMES_DASHBOARD_PROFILE_SCOPE", "current")
+
+        payload = client.get("/api/profiles/projects/tree").json()
+
+        labels = {project["label"] for project in payload["projects"] if not project["isNoProject"]}
+        assert labels == {"Default"}
 
     def test_one_folder_worked_in_by_two_profiles_is_one_project(self, client, profiles_on_disk, tmp_path):
         # A folder is a folder no matter who opened it. Two profiles working the

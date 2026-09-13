@@ -147,6 +147,24 @@ test('buildDesktopBackendEnv forces PYTHONUTF8 unless the user set it explicitly
   assert.equal(optedOut.PYTHONUTF8, '0')
 })
 
+test('local desktop backend limits dashboard profiles unless explicitly configured', () => {
+  const defaulted = buildDesktopBackendEnv({
+    hermesHome: '/Users/test/.hermes',
+    currentEnv: { PATH: '/usr/bin' },
+    platform: 'darwin',
+    pathModule: path.posix
+  })
+  const configured = buildDesktopBackendEnv({
+    hermesHome: '/Users/test/.hermes',
+    currentEnv: { PATH: '/usr/bin', HERMES_DASHBOARD_PROFILE_SCOPE: 'worker' },
+    platform: 'darwin',
+    pathModule: path.posix
+  })
+
+  assert.equal(defaulted.HERMES_DASHBOARD_PROFILE_SCOPE, 'current')
+  assert.equal(configured.HERMES_DASHBOARD_PROFILE_SCOPE, 'worker')
+})
+
 test('normalizeHermesHomeRoot maps profile homes back to the global Hermes root', () => {
   assert.equal(
     normalizeHermesHomeRoot('/Users/test/.hermes/profiles/oracle', { pathModule: path.posix }),

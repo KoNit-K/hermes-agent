@@ -16,6 +16,7 @@ from hermes_cli.web_read_coalescing import coalesced_read
 import inspect
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -194,6 +195,42 @@ def _profile_targets(log_label: str, *, lightweight: bool) -> List[Tuple[str, Pa
     if not targets:
         targets.append(("default", profiles_mod.get_profile_dir("default")))
     return targets
+
+
+def _dashboard_profile_targets(
+    targets: List[Tuple[str, Path]], log_label: str
+) -> List[Tuple[str, Path]]:
+    """Restrict dashboard fan-out to the configured known profile targets.
+
+    Invalid scopes deliberately fall back to the process home (or ``default`` when that
+    home was not discovered), rather than accidentally exposing every profile's state.
+    """
+    scope = os.environ.get("HERMES_DASHBOARD_PROFILE_SCOPE")
+    if scope is None or scope.strip().casefold() == "all":
+        return targets
+
+    process_home = Path(get_process_hermes_home()).resolve()
+    current = [(name, home) for name, home in targets if Path(home).resolve() == process_home]
+    fallback = current or [(name, home) for name, home in targets if name == "default"][:1]
+
+    if scope.strip().casefold() == "current":
+        return fallback
+
+    from hermes_cli import profiles as profiles_mod
+
+    try:
+        allowed = {profiles_mod._canon_valid(name) for name in scope.split(",")}
+    except ValueError:
+        _log.warning(
+            "%s: invalid HERMES_DASHBOARD_PROFILE_SCOPE=%r; using current profile",
+            log_label,
+            scope,
+        )
+        return fallback
+    selected = [
+        (name, home) for name, home in targets if name in allowed
+    ]
+    return selected or fallback
 
 
 def _tag_rows(rows: List[Dict[str, Any]], name: str, now: float) -> List[Dict[str, Any]]:
@@ -439,7 +476,10 @@ def get_profiles_sessions_sidebar(
 
     See #42651, #65710, #70629.
     """
-    targets = _profile_targets("GET /api/profiles/sessions/sidebar", lightweight=True)
+    targets = _dashboard_profile_targets(
+        _profile_targets("GET /api/profiles/sessions/sidebar", lightweight=True),
+        "GET /api/profiles/sessions/sidebar",
+    )
 
     recents_scope = (recents_profile or "all").strip() or "all"
     recents_exclude_list = [s for s in (recents_exclude or "").split(",") if s.strip()]
@@ -584,7 +624,11 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     scoped_session_ids: List[str] = []
     errors: List[Dict[str, str]] = []
 
-    for name, home in _profile_targets("GET /api/profiles/projects/tree", lightweight=False):
+    targets = _dashboard_profile_targets(
+        _profile_targets("GET /api/profiles/projects/tree", lightweight=False),
+        "GET /api/profiles/projects/tree",
+    )
+    for name, home in targets:
         def _read(db, name=name, home=home):
             with _hermes_home_scope(home):
                 tree, _active_id = gateway_server._build_project_tree(
