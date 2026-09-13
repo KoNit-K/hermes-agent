@@ -80,6 +80,19 @@ def test_board_empty(client):
     assert data["assignees"] == ["default"]
     assert data["latest_event_id"] == 0
 
+def test_dashboard_completion_forwards_evidence_to_shared_gate(client):
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="Dashboard evidence", completion_contract="evidence-required")
+    rejected = client.patch(f"/api/plugins/kanban/tasks/{task_id}", json={"status": "done"})
+    assert rejected.status_code == 400
+    accepted = client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"status": "done", "evidence": [{"kind": "review", "detail": "dashboard receipt"}]},
+    )
+    assert accepted.status_code == 200
+    with kbc.connect() as conn:
+        assert kb.latest_run(conn, task_id).metadata["completion_evidence"][0]["detail"] == "dashboard receipt"
+
 # ---------------------------------------------------------------------------
 # POST /tasks then GET /board sees it
 # ---------------------------------------------------------------------------
