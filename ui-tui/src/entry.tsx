@@ -9,7 +9,7 @@ import { setRpcErrorLogSink } from './app/userMessages.js'
 import { DASHBOARD_TUI_MODE, NATIVE_MODE, TERMUX_TUI_MODE } from './config/env.js'
 import { GatewayClient } from './gatewayClient.js'
 import { messages } from './i18n/runtime.js'
-import { setupGracefulExit } from './lib/gracefulExit.js'
+import { ignoredSignalsForTuiMode, setupGracefulExit } from './lib/gracefulExit.js'
 import { formatBytes, type HeapDumpResult, performHeapDump } from './lib/memory.js'
 import { type MemorySnapshot, startMemoryMonitor } from './lib/memoryMonitor.js'
 import { openExternalUrl } from './lib/openExternalUrl.js'
@@ -119,8 +119,10 @@ setupGracefulExit({
   // The dashboard chat tab has no in-page restart path after the PTY child
   // exits. Ignore SIGINT there so Ctrl+C cannot kill the embedded TUI if raw
   // mode briefly drops and the terminal driver turns the keystroke into a
-  // signal instead of input bytes. SIGTERM/SIGHUP still cleanly shut down.
-  ignoredSignals: DASHBOARD_TUI_MODE ? ['SIGINT'] : []
+  // signal instead of input bytes. The server's idle PTY reaper sends SIGHUP
+  // to this foreground process group; that must not tear down dashboard chat.
+  // Normal CLI/TTY sessions retain SIGHUP's conventional exit behavior.
+  ignoredSignals: ignoredSignalsForTuiMode(DASHBOARD_TUI_MODE)
 })
 
 const stopMemoryMonitor = startMemoryMonitor({
