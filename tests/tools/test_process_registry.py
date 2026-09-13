@@ -71,6 +71,125 @@ def _spawn_python_sleep(seconds: float) -> subprocess.Popen:
     )
 
 
+@pytest.mark.parametrize("action", ["poll", "log", "wait"])
+def test_direct_session_actions_reject_a_different_task_owner(monkeypatch, action):
+    """The direct action seam must not expose another task's output."""
+    import tools.process_registry as pr
+
+    reg = ProcessRegistry()
+    session = _make_session(sid="proc_foreign_owner", task_id="container-b", output="private output")
+    session.owner_task_id = "task-b"
+    reg._finished[session.id] = session
+    monkeypatch.setattr(pr, "process_registry", reg)
+
+    result = json.loads(pr._handle_process(
+        {"action": action, "session_id": session.id}, task_id="task-a"))
+
+    assert result == {"status": "forbidden", "error": "Session is owned by another task"}
+    assert "private output" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("owner_task_id, caller_task_id", [("", "task-a"), ("task-a", None)])
+def test_direct_session_actions_fail_open_only_without_raw_ownership(monkeypatch, owner_task_id, caller_task_id):
+    """Old sessions/callers lacking a raw owner preserve their previous access."""
+    import tools.process_registry as pr
+
+    reg = ProcessRegistry()
+    session = _make_session(sid="proc_legacy", task_id="shared-container")
+    session.owner_task_id = owner_task_id
+    reg._running[session.id] = session
+    monkeypatch.setattr(pr, "process_registry", reg)
+    allowed_poll = MagicMock(return_value={"status": "running"})
+    monkeypatch.setattr(reg, "poll", allowed_poll)
+
+    result = json.loads(pr._handle_process(
+        {"action": "poll", "session_id": session.id}, task_id=caller_task_id))
+
+    assert result == {"status": "running"}
+    allowed_poll.assert_called_once_with(session.id)
+
+
+@pytest.mark.parametrize("action", ["kill", "write", "submit", "close"])
+def test_direct_session_mutations_reject_a_different_task_owner(monkeypatch, action):
+    """No direct mutation reaches a process owned by another task."""
+    import tools.process_registry as pr
+
+    reg = ProcessRegistry()
+    session = _make_session(sid=f"proc_foreign_{action}", task_id="container-b")
+    session.owner_task_id = "task-b"
+    reg._running[session.id] = session
+    monkeypatch.setattr(pr, "process_registry", reg)
+    operation = {
+        "kill": "kill_process",
+        "write": "write_stdin",
+        "submit": "submit_stdin",
+        "close": "close_stdin",
+    }[action]
+    blocked_method = MagicMock(return_value={"status": "should_not_run"})
+    monkeypatch.setattr(reg, operation, blocked_method)
+
+    result = json.loads(pr._handle_process(
+        {"action": action, "session_id": session.id, "data": "secret"}, task_id="task-a"))
+
+    assert result == {"status": "forbidden", "error": "Session is owned by another task"}
+    blocked_method.assert_not_called()
+
+
+def test_direct_session_actions_allow_the_owner(monkeypatch):
+    """The guard preserves ordinary direct actions for the owning task."""
+    import tools.process_registry as pr
+
+    reg = ProcessRegistry()
+    session = _make_session(sid="proc_owned", task_id="container-a")
+    session.owner_task_id = "task-a"
+    reg._running[session.id] = session
+    monkeypatch.setattr(pr, "process_registry", reg)
+    allowed_poll = MagicMock(return_value={"status": "running", "output_preview": "owned output"})
+    monkeypatch.setattr(reg, "poll", allowed_poll)
+
+    result = json.loads(pr._handle_process(
+        {"action": "poll", "session_id": session.id}, task_id="task-a"))
+
+    assert result["status"] == "running"
+    assert result["output_preview"] == "owned output"
+    allowed_poll.assert_called_once_with(session.id)
+
+
+def test_direct_session_actions_allow_owner_to_read_exited_result(monkeypatch):
+    """Finished in-memory results remain available to their original owner."""
+    import tools.process_registry as pr
+
+    reg = ProcessRegistry()
+    session = _make_session(
+        sid="proc_retained", task_id="container-a", exited=True, exit_code=0,
+        output="completed private result")
+    session.owner_task_id = "task-a"
+    reg._finished[session.id] = session
+    monkeypatch.setattr(pr, "process_registry", reg)
+
+    result = json.loads(pr._handle_process(
+        {"action": "log", "session_id": session.id}, task_id="task-a"))
+
+    assert result["status"] == "exited"
+    assert result["output"] == "completed private result"
+
+
+def test_direct_session_guard_keeps_handoff_on_its_scoped_route(monkeypatch):
+    """Handoff remains governed by its own live-parent ownership validation."""
+    import tools.process_registry as pr
+
+    handoff = MagicMock(return_value={"status": "handed_off", "session_id": "proc_handoff"})
+    monkeypatch.setattr(pr, "_handoff_process", handoff)
+
+    result = json.loads(pr._handle_process(
+        {"action": "handoff", "session_id": "proc_handoff", "data": "parent should collect it"},
+        task_id="task-a"))
+
+    assert result == {"status": "handed_off", "session_id": "proc_handoff"}
+    handoff.assert_called_once_with(
+        "proc_handoff", {"action": "handoff", "session_id": "proc_handoff", "data": "parent should collect it"}, "task-a")
+
+
 def test_kill_started_since_preserves_preexisting_and_foreign_processes(registry):
     old = _make_session(sid="proc_old", task_id="session-a")
     finished = _make_session(

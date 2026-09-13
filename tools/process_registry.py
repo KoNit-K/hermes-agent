@@ -2217,6 +2217,20 @@ _SESSION_ACTIONS = {
 }
 
 
+def _direct_session_action_is_owned(session_id: str, task_id: Optional[str]) -> bool:
+    """Whether a direct session action may be performed by this task.
+
+    ``owner_task_id`` is the raw spawning task id.  Do not fall back to the
+    container-scoped ``task_id`` here: it can deliberately be shared by
+    different callers.  Legacy sessions and call sites without either raw id
+    retain their prior behavior because ownership cannot be established.
+    """
+    session = process_registry.get(session_id)
+    owner_task_id = str(getattr(session, "owner_task_id", "") or "")
+    caller_task_id = str(task_id or "")
+    return not (caller_task_id and session and owner_task_id and owner_task_id != caller_task_id)
+
+
 def _handoff_process(session_id: str, args: dict, task_id: Optional[str]) -> dict:
     """Subagent-only: transfer a running background process to the parent agent so its completion is delivered THERE
     (child-owned process notices are suppressed and child teardown kills what it owns). Validated against the live spawn
@@ -2271,6 +2285,11 @@ def _handle_process(args, **kw):
     if action in _SESSION_ACTIONS:
         if not session_id:
             return tool_error(f"session_id is required for {action}")
+        if not _direct_session_action_is_owned(session_id, kw.get("task_id")):
+            return json.dumps(
+                {"status": "forbidden", "error": "Session is owned by another task"},
+                ensure_ascii=False,
+            )
         handler, redact = _SESSION_ACTIONS[action]
         result = handler(session_id, args)
         return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
