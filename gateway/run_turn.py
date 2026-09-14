@@ -289,7 +289,14 @@ class GatewayTurnMixin:
 
     @staticmethod
     def _terminal_turn_is_human(agent_result, event) -> bool:
-        """Origin of the last queued turn, else the event that opened the chain."""
+        """Origin of the last queued turn, else the event that opened the chain.
+
+        A human ``busy_input_mode=steer`` consumed during an internal opener is
+        not a queued follow-up; count only steer rows appended this turn.
+        """
+        from gateway.response_filters import turn_consumed_human_steer
+        if turn_consumed_human_steer(agent_result):
+            return True
         if isinstance(agent_result, dict):
             terminal = agent_result.get("queued_terminal_is_human")
             if isinstance(terminal, bool):

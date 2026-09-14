@@ -114,6 +114,28 @@ def recover_human_silence_response(
     return text
 
 
+def turn_consumed_human_steer(agent_result: dict | None, *, history_offset: int | None = None) -> bool:
+    """True when this turn appended a live ``display_kind=steer`` user row.
+
+    Rows at or before ``history_offset`` are replayed history and must not flip
+    an internal notification into a human-origin silence decision.
+    """
+    if not isinstance(agent_result, dict):
+        return False
+    messages = agent_result.get("messages")
+    if not isinstance(messages, list):
+        return False
+    offset = history_offset if history_offset is not None else agent_result.get("history_offset", 0)
+    try:
+        offset = max(int(offset or 0), 0)
+    except (TypeError, ValueError):
+        offset = 0
+    return any(
+        isinstance(msg, dict) and msg.get("role") == "user" and msg.get("display_kind") == "steer"
+        for msg in messages[offset:]
+    )
+
+
 def is_partial_silence_marker(text: Any) -> bool:
     """True while streamed ``text`` could still resolve to a silence marker.
 

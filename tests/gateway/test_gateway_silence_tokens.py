@@ -14,6 +14,7 @@ from gateway.response_filters import (
     is_intentional_silence_agent_result,
     is_intentional_silence_response,
     recover_human_silence_response,
+    turn_consumed_human_steer,
 )
 
 
@@ -220,6 +221,115 @@ async def test_queued_followup_passes_pending_origin(internal, expect_human):
 
     assert captured["is_human_initiated"] is expect_human
     assert merged["queued_terminal_is_human"] is expect_human
+
+
+def test_turn_consumed_human_steer_ignores_replayed_history():
+    replayed = {
+        "history_offset": 2,
+        "messages": [
+            {"role": "user", "content": "old", "display_kind": "steer"},
+            {"role": "assistant", "content": "ack"},
+            {"role": "user", "content": "internal ping", "display_kind": "internal_notification"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+    }
+    consumed = {
+        "history_offset": 1,
+        "messages": [
+            {"role": "user", "content": "old", "display_kind": "steer"},
+            {"role": "user", "content": "live steer", "display_kind": "steer"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+    }
+    assert turn_consumed_human_steer(replayed) is False
+    assert turn_consumed_human_steer(consumed) is True
+    assert gateway_run.GatewayRunner._terminal_turn_is_human(replayed, _event(internal=True)) is False
+    assert gateway_run.GatewayRunner._terminal_turn_is_human(consumed, _event(internal=True)) is True
+
+
+@pytest.mark.asyncio
+async def test_internal_turn_recovers_silence_after_consumed_steer(monkeypatch, tmp_path):
+    """busy_input_mode=steer appends a current-turn steer row; that is a human follow-up."""
+    runner = _runner(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value={
+        "final_response": "NO_REPLY",
+        "messages": [
+            {"role": "user", "content": "cron ping", "display_kind": "internal_notification"},
+            {"role": "assistant", "content": "working"},
+            {"role": "tool", "content": "ok"},
+            {"role": "user", "content": "please answer", "display_kind": "steer"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+        "tools": [],
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "api_calls": 1,
+        "failed": False,
+    })
+
+    response = await runner._handle_message_with_agent(
+        _event(internal=True), _source(), "agent:main:telegram:group:-1001:12345", 1,
+    )
+
+    assert "no response was generated" in response
+
+
+@pytest.mark.asyncio
+async def test_replayed_steer_history_does_not_recover_internal_silence(monkeypatch, tmp_path):
+    runner = _runner(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value={
+        "final_response": "NO_REPLY",
+        "messages": [
+            {"role": "user", "content": "old steer", "display_kind": "steer"},
+            {"role": "assistant", "content": "ack"},
+            {"role": "user", "content": "cron ping", "display_kind": "internal_notification"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+        "tools": [],
+        "history_offset": 2,
+        "last_prompt_tokens": 0,
+        "api_calls": 1,
+        "failed": False,
+    })
+
+    response = await runner._handle_message_with_agent(
+        _event(internal=True), _source(), "agent:main:telegram:group:-1001:12345", 1,
+    )
+
+    assert response == ""
+
+
+def test_finish_stream_recovers_silence_for_consumed_steer_not_opener_flag():
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
+
+    ctx = TurnContext(is_human_initiated=False, result_holder=[None])
+    turn_runner = TurnRunner(MagicMock(), ctx)
+    result = {
+        "final_response": "NO_REPLY",
+        "failed": False,
+        "completed": True,
+        "messages": [
+            {"role": "user", "content": "old", "display_kind": "steer"},
+            {"role": "user", "content": "live", "display_kind": "steer"},
+        ],
+    }
+
+    class _Consumer:
+        def __init__(self):
+            self.payload = None
+
+        def finish(self, text=None):
+            self.payload = text
+
+    consumer = _Consumer()
+    turn_runner._finish_stream_consumer(
+        result,
+        [{"role": "user", "content": "old", "display_kind": "steer"}],
+        consumer,
+    )
+    assert result["final_response"] == HUMAN_SILENCE_FALLBACK
+    assert consumer.payload == HUMAN_SILENCE_FALLBACK
 
 
 @pytest.mark.asyncio
