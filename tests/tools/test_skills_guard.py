@@ -366,6 +366,22 @@ class TestUnicodeCharName:
 class TestFalsePositiveReductions:
     """Patterns that previously flagged benign, intrinsic skill content."""
 
+    def test_path_traversal_ignores_markdown_links_but_scans_scripts(self, tmp_path):
+        """Regression for #110974: documentation links are not executable paths."""
+        readme = tmp_path / "README.md"
+        readme.write_text("[Guide](../../../docs/guide.md)\n", encoding="utf-8")
+        assert not any(
+            finding.pattern_id == "path_traversal_deep"
+            for finding in scan_file(readme, "README.md")
+        )
+
+        script = tmp_path / "install.sh"
+        script.write_text("source ../../../shared/install.sh\n", encoding="utf-8")
+        assert any(
+            finding.pattern_id == "path_traversal_deep"
+            for finding in scan_file(script, "install.sh")
+        )
+
     def test_cat_write_heredoc_is_not_a_secrets_read(self, tmp_path):
         # Setup doc telling the user to write their OWN keys into their OWN
         # local .env via a heredoc — writes in, does not exfiltrate out.

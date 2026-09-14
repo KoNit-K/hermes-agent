@@ -364,6 +364,10 @@ SCANNABLE_EXTENSIONS = {
 SUSPICIOUS_BINARY_EXTENSIONS = {
     '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com', '.msi', '.dmg', '.app', '.deb', '.rpm'}
 _SCRIPT_EXTENSIONS = {'.sh', '.bash', '.py', '.rb', '.pl'}
+_CODE_LIKE_EXTENSIONS = _SCRIPT_EXTENSIONS | {'.js', '.ts', '.php'}
+_PATH_TRAVERSAL_PATTERN_IDS = {
+    "path_traversal_deep", "path_traversal", "system_passwd_access", "proc_access", "dev_shm",
+}
 
 # Zero-width / directional unicode used for text hiding, with the readable name reported in the finding.
 _INVISIBLE_CHAR_NAMES = {
@@ -407,6 +411,8 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
     findings = []
     docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
+        if pid in _PATH_TRAVERSAL_PATTERN_IDS and file_path.suffix.lower() not in _CODE_LIKE_EXTENSIONS:
+            continue
         for i, line in enumerate(lines, start=1):
             if i not in docstring_lines and pattern.search(line):
                 text = line.strip()
