@@ -213,15 +213,24 @@ def is_legacy_browser_use_cloud_config(browser_cfg: dict) -> bool:
     return bool(get_secret("BROWSER_USE_API_KEY", ""))
 
 
-def is_browser_use_cli_mode() -> bool:
+def is_browser_use_cli_mode(*, probe_legacy_cloud: bool = True) -> bool:
     """True when the Browser Use CLI replaces the built-in browser stack. Browser Use mode is the DEFAULT:
     unset ``browser.backend`` ("") enables it whenever the CLI is runnable (installed binary or uvx);
     ``browser.backend: off`` keeps the built-in browser_* tools. Camofox always falls back to the built-in
-    tools (Firefox, custom HTTP API, no CDP surface for the harness)."""
+    tools (Firefox, custom HTTP API, no CDP surface for the harness).
+
+    ``probe_legacy_cloud`` is false for process-wide schema checks that run
+    before multiplexing selects a profile; legacy cloud detection reads a
+    profile credential and is therefore unavailable in that context.
+    """
     if _camofox_active():
         return False
     backend = get_browser_backend()
-    return backend == _BACKEND_KEY if backend else (is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None)
+    if backend:
+        return backend == _BACKEND_KEY
+    if probe_legacy_cloud and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
+        return True
+    return _find_cli() is not None
 
 
 def default_downgrade_notice() -> Optional[str]:

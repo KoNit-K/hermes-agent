@@ -46,7 +46,10 @@ def _check_vault_available() -> bool:
     from tools.browser_use_cli import is_browser_use_cli_mode
     # check_browser_requirements() is False by design in Browser Use mode (browser_exec replaces the
     # built-in surface); the vault serves both stacks.
-    return bool(is_browser_use_cli_mode() or check_browser_requirements())
+    # Schema checks run before a multiplexed gateway has selected a profile.
+    # The legacy cloud fallback reads a profile credential, so it must not be
+    # consulted here; explicit Browser Use config and CLI detection still apply.
+    return bool(is_browser_use_cli_mode(probe_legacy_cloud=False) or check_browser_requirements())
 
 
 # ---------------------------------------------------------------------------

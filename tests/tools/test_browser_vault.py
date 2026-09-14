@@ -278,6 +278,26 @@ class TestBrowserVaultTools:
              patch("tools.browser_tool_install.check_browser_requirements", return_value=False):
             assert browser_vault_tool._check_vault_available() is True
 
+    def test_check_fn_does_not_probe_legacy_cloud_secret_during_schema_build(self, monkeypatch):
+        """A multiplexed gateway has no profile scope while schema checks run.
+
+        Browser Use CLI detection must still work from its runnable CLI without
+        consulting the legacy cloud credential in that context.
+        """
+        from agent.secret_scope import UnscopedSecretError
+        from tools import browser_use_cli, browser_vault_tool
+
+        monkeypatch.setattr(browser_use_cli, "_camofox_active", lambda: False)
+        monkeypatch.setattr(browser_use_cli, "get_browser_backend", lambda: "")
+        monkeypatch.setattr(browser_use_cli, "_find_cli", lambda: ["browser-use"])
+        monkeypatch.setattr(
+            browser_use_cli,
+            "is_legacy_browser_use_cloud_config",
+            lambda _cfg: (_ for _ in ()).throw(UnscopedSecretError("unscoped")),
+        )
+        with patch("tools.browser_tool_install.check_browser_requirements", return_value=False):
+            assert browser_vault_tool._check_vault_available() is True
+
     def test_list_returns_identifier_never_password(self, store):
         from tools import browser_vault_tool
 
