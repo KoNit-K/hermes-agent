@@ -37,6 +37,10 @@ TEST_TREE_DIRS = {"tests", "test", "testing", "spec", "specs", "fixtures"}
 # Code files, where "reads an env secret" / "HTTP call with a key" is normal (requires_env).
 CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php"}
 
+# Documentation describes threat models and mitigations; it cannot execute. Prompt-injection
+# findings are deliberately excluded because documentation can still be consumed by an agent.
+DOCUMENTATION_FILE_EXTENSIONS = {".md", ".rst", ".txt"}
+
 # Pattern ids exempt on code files (every legitimate provider plugin trips them); still
 # applied in full to docs/config files.
 CODE_EXEMPT_PATTERN_IDS = {
@@ -75,9 +79,25 @@ def _finding(pattern_id: str, severity: str, category: str, file: str, match: st
     return Finding(pattern_id, severity, category, file, 0, match, description)
 
 
-def _filter_findings(findings: List[Finding], rel_path: str) -> List[Finding]:
+def _is_source_comment(file_path: Path, line_number: int) -> bool:
+    """Return whether a finding is on a hash-style source comment.
+
+    An unreadable file or unknown line deliberately keeps the original severity.
+    """
+    if line_number < 1:
+        return False
+    try:
+        line = file_path.read_text(encoding="utf-8").splitlines()[line_number - 1]
+    except (IndexError, OSError, UnicodeDecodeError):
+        return False
+    return line.lstrip().startswith("#")
+
+
+def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path) -> List[Finding]:
     """Apply plugin-specific exemptions and severity remaps to raw findings."""
-    is_code = Path(rel_path).suffix.lower() in CODE_FILE_EXTENSIONS
+    suffix = Path(rel_path).suffix.lower()
+    is_code = suffix in CODE_FILE_EXTENSIONS
+    is_documentation = suffix in DOCUMENTATION_FILE_EXTENSIONS
     in_test_tree = Path(rel_path).parts[0] in TEST_TREE_DIRS
     out: List[Finding] = []
     for f in findings:
@@ -85,6 +105,10 @@ def _filter_findings(findings: List[Finding], rel_path: str) -> List[Finding]:
             continue
         f.severity = SEVERITY_REMAP.get(f.pattern_id) or f.severity
         if in_test_tree and f.severity == "critical":
+            f.severity = "high"
+        elif f.severity == "critical" and f.category != "injection" and (
+            is_documentation or (is_code and _is_source_comment(file_path, f.line))
+        ):
             f.severity = "high"
         out.append(f)
     return out
@@ -148,7 +172,7 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         all_findings.extend(_check_plugin_structure(plugin_dir))
         for f, rel in sorted(_walk(plugin_dir)):
             if f.is_file() and not f.is_symlink():
-                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel))
+                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel, f))
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})
