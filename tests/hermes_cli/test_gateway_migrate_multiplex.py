@@ -333,13 +333,13 @@ def test_update_hook_still_migrates_same_user_same_scope_profiles_under_the_defa
     assert _config_flag(fleet.root) is True and ("ops", "uninstall") in fleet.ops
 
 
-def test_auto_multiplex_migration_false_opts_out_of_the_update_hook_but_not_the_explicit_command(fleet, capsys):
-    """``gateway.auto_multiplex_migration: false`` is a durable opt-out: an otherwise-eligible fleet is
+def test_auto_migrate_false_opts_out_of_the_update_hook_but_not_the_explicit_command(fleet, capsys):
+    """``gateway.auto_migrate: false`` is a durable opt-out: an otherwise-eligible fleet is
     left alone by ``hermes update`` (no output, no ops, no flag flip), while the operator typing
     ``migrate --multiplex`` still migrates. Only the nested key counts."""
     assert gm.build_migration_plan().eligible_for_migration()  # would migrate but for the flag
     (fleet.root / "config.yaml").write_text(
-        "model:\n  default: x\nauto_multiplex_migration: false\ngateway:\n  auto_multiplex_migration: false\n",
+        "model:\n  default: x\nauto_migrate: false\ngateway:\n  auto_migrate: false\n",
         encoding="utf-8")
 
     gm.maybe_auto_migrate_after_update()
@@ -352,15 +352,17 @@ def test_auto_multiplex_migration_false_opts_out_of_the_update_hook_but_not_the_
     # A top-level alias is NOT honoured; absent and an explicit true keep the automatic behaviour.
     from hermes_cli.gateway_migrate_guards import auto_migration_opted_out
     (fleet.root / "config.yaml").write_text(
-        "model:\n  default: x\nauto_multiplex_migration: false\n", encoding="utf-8")
+        "model:\n  default: x\nauto_migrate: false\n", encoding="utf-8")
+    assert auto_migration_opted_out(fleet.root) is False
+    (fleet.root / "config.yaml").write_text("model:\n  default: x\n", encoding="utf-8")
     assert auto_migration_opted_out(fleet.root) is False
     (fleet.root / "config.yaml").write_text(
-        "model:\n  default: x\ngateway:\n  auto_multiplex_migration: true\n", encoding="utf-8")
+        "model:\n  default: x\ngateway:\n  auto_migrate: true\n", encoding="utf-8")
     assert auto_migration_opted_out(fleet.root) is False
 
     # The opt-out governs the AUTOMATIC path only: an explicit --multiplex is an explicit request.
     (fleet.root / "config.yaml").write_text(
-        "model:\n  default: x\ngateway:\n  auto_multiplex_migration: false\n", encoding="utf-8")
+        "model:\n  default: x\ngateway:\n  auto_migrate: false\n", encoding="utf-8")
     with pytest.raises(SystemExit) as exc:
         gm.cmd_migrate(SimpleNamespace(multiplex=True, standalone=False, dry_run=False, yes=True))
     assert exc.value.code == 0
