@@ -414,6 +414,45 @@ def _tool_output_items(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{"type": "function_call_output", "call_id": _clamp_responses_call_id(call_id), "output": output_value}]
 
 
+def _dedupe_duplicate_tool_pairs(
+    items: List[Dict[str, Any]], item_sources: List[Optional[Dict[str, Any]]],
+) -> tuple[List[Dict[str, Any]], List[Optional[Dict[str, Any]]]]:
+    """Keep the newest replayed call/output pair when historical call ids repeat.
+
+    Hermes assigns some tool ids per turn, so a durable chat history can contain
+    several completed pairs with the same id. Strict Responses providers reject
+    the resulting duplicate ``function_call_output`` items. Only deduplicate ids
+    with multiple outputs: an incomplete or otherwise ambiguous pair remains
+    untouched and preserves the existing recovery behavior.
+    """
+    output_counts: Dict[str, int] = {}
+    for item in items:
+        if item.get("type") != "function_call_output" or not _nonblank(item.get("call_id")):
+            continue
+        call_id = item["call_id"]
+        output_counts[call_id] = output_counts.get(call_id, 0) + 1
+    duplicate_ids = {call_id for call_id, count in output_counts.items() if count > 1}
+    if not duplicate_ids:
+        return items, item_sources
+
+    last_tool_item: Dict[tuple[str, str], int] = {}
+    for index, item in enumerate(items):
+        item_type, call_id = item.get("type"), item.get("call_id")
+        if item_type in {"function_call", "function_call_output"} and call_id in duplicate_ids:
+            last_tool_item[(item_type, call_id)] = index
+
+    kept = [
+        (item, source)
+        for index, (item, source) in enumerate(zip(items, item_sources))
+        if not (
+            item.get("type") in {"function_call", "function_call_output"}
+            and item.get("call_id") in duplicate_ids
+            and last_tool_item[(item["type"], item["call_id"])] != index
+        )
+    ]
+    return [item for item, _ in kept], [source for _, source in kept]
+
+
 def _chat_messages_to_responses_input(
     messages: List[Dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
     replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
@@ -498,6 +537,7 @@ def _chat_messages_to_responses_input(
             if fallback is not None:
                 emit([{"role": "assistant", "content": fallback}], msg)
         emit(_replay_tool_call_items(msg, start_index=len(items)), msg)
+    items, item_sources = _dedupe_duplicate_tool_pairs(items, item_sources)
     # The server renders nothing placed before a compaction item, so pre-checkpoint history is
     # dead weight and plaintext asks / merged summaries silently vanish. Keep the newest checkpoint
     # first, retain pre-checkpoint USER and SUMMARY messages within a token budget, leave the tail.

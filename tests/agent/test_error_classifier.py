@@ -1366,6 +1366,19 @@ class TestMultimodalToolContentUnsupported:
         assert result.retryable is True
 
 
+    def test_nvidia_serde_tool_content_pattern(self):
+        """NVIDIA NIM's serde error should trigger image-part stripping (#111231)."""
+        e = MockAPIError(
+            "HTTP 400: Failed to deserialize the JSON body into the target type: "
+            "data did not match any variant of untagged enum "
+            "ChatCompletionRequestToolMessageContent at line 1 column 1974809",
+            status_code=400,
+        )
+        result = classify_api_error(e, provider="nvidia", model="moonshotai/kimi-k3")
+        assert result.reason == FailoverReason.multimodal_tool_content_unsupported
+        assert result.retryable is True
+
+
 
 
 

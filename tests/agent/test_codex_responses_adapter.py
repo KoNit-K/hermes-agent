@@ -378,6 +378,43 @@ def test_chat_messages_to_responses_input_keeps_short_call_id():
     assert output["call_id"] == "call_abc123"
 
 
+def test_chat_messages_to_responses_input_keeps_only_newest_replayed_tool_pair_per_call_id():
+    """Reused turn-local tool ids must not emit duplicate Responses outputs (#111231)."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "call_id": "terminal:0",
+                "function": {"name": "terminal", "arguments": '{"command": "old"}'},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "terminal:0", "content": "old result"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "call_id": "terminal:0",
+                "function": {"name": "terminal", "arguments": '{"command": "new"}'},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "terminal:0", "content": "new result"},
+    ]
+
+    items = _chat_messages_to_responses_input(messages)
+
+    tool_items = [item for item in items if item.get("call_id") == "terminal:0"]
+    assert tool_items == [
+        {
+            "type": "function_call",
+            "call_id": "terminal:0",
+            "name": "terminal",
+            "arguments": '{"command": "new"}',
+        },
+        {"type": "function_call_output", "call_id": "terminal:0", "output": "new result"},
+    ]
+
+
 def test_sanitize_replayed_fn_name_valid_passthrough():
     """Valid names pass through unchanged (identity — cache-prefix safe)."""
     for name in ("web_search", "exec-command", "a1_B2-c3", "x" * 64):

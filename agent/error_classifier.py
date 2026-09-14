@@ -186,6 +186,8 @@ _IMAGE_CORRUPT_PATTERNS = (
 _MULTIMODAL_TOOL_CONTENT_PATTERNS = (
     "text is not set", "tool message content must be a string", "tool content must be a string",
     "tool message must be a string", "expected string, got list", "expected string, got array",
+    # NVIDIA NIM serde rejection for list-shaped tool-message content (#111231).
+    "chatcompletionrequesttoolmessagecontent",
     # Console Go / pydantic-v2 relays behind opencode-go (422, param ``messages.N.tool.content.str``, #104731).
     "tool_call.content must be string", "tool.content.str", "input should be a valid string",
 )
