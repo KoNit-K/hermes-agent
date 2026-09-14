@@ -139,9 +139,9 @@ function buildDesktopBackendEnv({
     // pre-bootstrap tracebacks) still decodes with the locale default without
     // this. User's explicit setting wins. Re-port of PR #56499 (echoriver89).
     PYTHONUTF8: currentEnv?.PYTHONUTF8 ?? '1',
-    // A locally spawned desktop backend must not fan out into every profile's
-    // state.db. Remote backends are not constructed through this local-child
-    // environment builder, and an explicit caller setting remains authoritative.
+    // Resolved dashboard.profile_scope for this child. config.yaml is the
+    // user-facing setting; this env is only the spawn bridge. Remote SSH
+    // children get the same default in remote-lifecycle.ts.
     HERMES_DASHBOARD_PROFILE_SCOPE: currentEnv?.HERMES_DASHBOARD_PROFILE_SCOPE ?? 'current',
     [key]: buildDesktopBackendPath({
       hermesHome,

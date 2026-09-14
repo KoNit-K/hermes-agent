@@ -197,23 +197,44 @@ def _profile_targets(log_label: str, *, lightweight: bool) -> List[Tuple[str, Pa
     return targets
 
 
+def _resolved_dashboard_profile_scope() -> Optional[str]:
+    """``dashboard.profile_scope`` is the supported setting; env is a spawn bridge.
+
+    Desktop injects the resolved value into child processes. An explicit user
+    config other than the implicit default (``all``) wins over that bridge.
+    """
+    from hermes_cli.config import load_config_readonly
+
+    configured = str(
+        ((load_config_readonly() or {}).get("dashboard") or {}).get("profile_scope") or ""
+    ).strip()
+    injected = (os.environ.get("HERMES_DASHBOARD_PROFILE_SCOPE") or "").strip()
+    if configured and configured.casefold() != "all":
+        return configured
+    return injected or configured or None
+
+
 def _dashboard_profile_targets(
-    targets: List[Tuple[str, Path]], log_label: str
+    targets: List[Tuple[str, Path]], log_label: str, *, request_profile: Optional[str] = None
 ) -> List[Tuple[str, Path]]:
     """Restrict dashboard fan-out to the configured known profile targets.
 
-    Invalid scopes deliberately fall back to the process home (or ``default`` when that
-    home was not discovered), rather than accidentally exposing every profile's state.
+    ``request_profile='all'`` is Desktop's explicit All Profiles view and must
+    not be reduced by the process-wide default. Invalid scopes fall back to the
+    process home (or ``default`` when that home was not discovered).
     """
-    scope = os.environ.get("HERMES_DASHBOARD_PROFILE_SCOPE")
-    if scope is None or scope.strip().casefold() == "all":
+    if (request_profile or "").strip().casefold() == "all":
+        return targets
+
+    scope = _resolved_dashboard_profile_scope()
+    if scope is None or scope.casefold() == "all":
         return targets
 
     process_home = Path(get_process_hermes_home()).resolve()
     current = [(name, home) for name, home in targets if Path(home).resolve() == process_home]
     fallback = current or [(name, home) for name, home in targets if name == "default"][:1]
 
-    if scope.strip().casefold() == "current":
+    if scope.casefold() == "current":
         return fallback
 
     from hermes_cli import profiles as profiles_mod
@@ -222,7 +243,7 @@ def _dashboard_profile_targets(
         allowed = {profiles_mod._canon_valid(name) for name in scope.split(",")}
     except ValueError:
         _log.warning(
-            "%s: invalid HERMES_DASHBOARD_PROFILE_SCOPE=%r; using current profile",
+            "%s: invalid dashboard.profile_scope=%r; using current profile",
             log_label,
             scope,
         )
@@ -425,7 +446,10 @@ def get_profiles_sessions(
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
 
     targets = ([_cron_profile_home(profile)] if profile and profile != "all"
-               else _profile_targets("GET /api/profiles/sessions", lightweight=True))
+               else _dashboard_profile_targets(
+                   _profile_targets("GET /api/profiles/sessions", lightweight=True),
+                   "GET /api/profiles/sessions",
+               ))
 
     # Source scoping (see /api/sessions): recents pass exclude_sources=cron, the cron-jobs
     # section source=cron — two independent lists so cron sessions can't starve recents.
@@ -463,7 +487,7 @@ def get_profiles_sessions(
 @sessions_router.get("/api/profiles/sessions/sidebar")
 @_sidebar_singleflight_cache
 def get_profiles_sessions_sidebar(
-    recents_profile: str = "all", recents_limit: int = 20, recents_exclude: str = None,
+    recents_profile: Optional[str] = None, recents_limit: int = 20, recents_exclude: str = None,
     cron_limit: int = 50, messaging_limit: int = 100, messaging_exclude: str = None):
     """Batched sidebar session slices (recents / cron / messaging) — one profile-DB open per
     refresh instead of three ``/api/profiles/sessions`` calls. Same row projection and 300s
@@ -476,12 +500,12 @@ def get_profiles_sessions_sidebar(
 
     See #42651, #65710, #70629.
     """
+    recents_scope = (recents_profile or "").strip() or "all"
     targets = _dashboard_profile_targets(
         _profile_targets("GET /api/profiles/sessions/sidebar", lightweight=True),
         "GET /api/profiles/sessions/sidebar",
+        request_profile=recents_scope if recents_profile is not None else None,
     )
-
-    recents_scope = (recents_profile or "all").strip() or "all"
     recents_exclude_list = [s for s in (recents_exclude or "").split(",") if s.strip()]
     messaging_exclude_list = [s for s in (messaging_exclude or "").split(",") if s.strip()]
     # (source, exclude) per slice; ``source=cron`` is the implicit cron taxonomy.
@@ -609,7 +633,8 @@ def _merge_profile_tree(
 
 @sessions_router.get("/api/profiles/projects/tree")
 @_sidebar_singleflight_cache
-def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000):
+def get_profiles_projects_tree(
+    preview_limit: int = 3, session_limit: int = 2000, profile: Optional[str] = None):
     """Project tree for every profile at once, for the all-profiles sidebar.
 
     ``projects.tree`` over JSON-RPC answers for the backend's own profile only; this runs the
@@ -627,6 +652,7 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     targets = _dashboard_profile_targets(
         _profile_targets("GET /api/profiles/projects/tree", lightweight=False),
         "GET /api/profiles/projects/tree",
+        request_profile=profile,
     )
     for name, home in targets:
         def _read(db, name=name, home=home):
@@ -680,7 +706,10 @@ def post_profiles_sessions_pull_requests(body: SessionPrScanBody):
                 # Oldest-first, so a later `gh pr create` (the replacement PR) wins.
                 found[pr["session_id"]] = {"number": parsed[0], "url": parsed[1]}
 
-    for name, home in _profile_targets("POST /api/profiles/sessions/pull-requests", lightweight=False):
+    for name, home in _dashboard_profile_targets(
+        _profile_targets("POST /api/profiles/sessions/pull-requests", lightweight=False),
+        "POST /api/profiles/sessions/pull-requests",
+    ):
         _read_profile_db(name, home, None, _read)
 
     # ``scanned``: every id looked at, so the caller can remember "nothing there".

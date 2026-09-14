@@ -440,7 +440,7 @@ describe('createProject', () => {
     expect($projectTree.get()).toEqual(expect.arrayContaining([expect.objectContaining({ id: created.id })]))
     expect($activeProjectId.get()).toBe(created.id)
     expect(hermes.hermesApi).toHaveBeenCalledWith(
-      expect.objectContaining({ path: '/api/profiles/projects/tree?preview_limit=3' })
+      expect.objectContaining({ path: '/api/profiles/projects/tree?preview_limit=3&profile=all' })
     )
   })
 

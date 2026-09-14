@@ -1476,6 +1476,18 @@ test('buildSpawnCommand raises the SSH child file limit before execing Hermes', 
   assert.ok(cmd.indexOf('ulimit -n 65536') < cmd.indexOf('serve --isolated'))
 })
 
+test('buildSpawnCommand defaults SSH dashboard profile scope to current', () => {
+  const cmd = buildSpawnCommand('/x/hermes', '', { logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE) })
+  assert.match(cmd, /exec env HERMES_DESKTOP=1 HERMES_DASHBOARD_PROFILE_SCOPE=current /)
+  assert.match(cmd, /serve --isolated/)
+
+  const configured = buildSpawnCommand('/x/hermes', '', {
+    logPath: spawnLogPath(OWNERSHIP_ID, SPAWN_NONCE),
+    dashboardProfileScope: 'worker'
+  })
+  assert.match(configured, /HERMES_DASHBOARD_PROFILE_SCOPE=worker/)
+})
+
 test('buildSpawnCommand payload variables keep $HOME expandable (no double quoting)', () => {
   const cmd = buildSpawnCommand('/x/hermes', 'work', {
     hermesHome: '~/.hermes',

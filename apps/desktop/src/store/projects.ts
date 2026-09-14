@@ -485,7 +485,7 @@ async function refreshProjectTreeAcrossProfiles(): Promise<void> {
 
   try {
     const res = await hermesApi<ProjectTreePayload>({
-      path: `/api/profiles/projects/tree?preview_limit=${projectTreePreviewLimit()}`,
+      path: `/api/profiles/projects/tree?preview_limit=${projectTreePreviewLimit()}&profile=all`,
       timeoutMs: PROJECT_TREE_REQUEST_TIMEOUT_MS
     })
 

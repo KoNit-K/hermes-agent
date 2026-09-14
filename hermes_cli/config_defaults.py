@@ -989,6 +989,10 @@ DEFAULT_CONFIG = {
         # the OAuth path. Empty or malformed (no http(s):// + host, or quote/angle/whitespace chars)
         # = reconstruct from headers.
         "public_url": "",
+        # Which profile state.db files the dashboard may open: "all", "current", or a
+        # comma-separated name allowlist. Desktop-spawned children receive a resolved
+        # internal current-profile default unless this is set to something other than all.
+        "profile_scope": "all",
     },
 
     "privacy": {

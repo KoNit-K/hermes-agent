@@ -131,6 +131,14 @@ function shq(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`
 }
 
+function remoteDashboardProfileScope(scope) {
+  const value = String(scope || 'current')
+  if (!/^[A-Za-z0-9,_-]+$/.test(value)) {
+    throw new Error('Invalid dashboard profile scope.')
+  }
+  return value
+}
+
 function validateRemotePath(p) {
   const s = String(p || '')
 
@@ -1065,7 +1073,7 @@ function buildSpawnCommand(hermesPath, profile, opts: any = {}) {
 
   const dashCmd =
     `ulimit -n ${REMOTE_NOFILE_SOFT_LIMIT} 2>/dev/null || true; ` +
-    `exec env HERMES_DESKTOP=1${opts.guestOnboarding === true ? ' HERMES_GUEST_ONBOARDING=1' : ''} ${hermes} ${profileArgs}${subCmd}`
+    `exec env HERMES_DESKTOP=1 HERMES_DASHBOARD_PROFILE_SCOPE=${remoteDashboardProfileScope(opts.dashboardProfileScope)}${opts.guestOnboarding === true ? ' HERMES_GUEST_ONBOARDING=1' : ''} ${hermes} ${profileArgs}${subCmd}`
 
   const detachedShell = `eval "exec $1>&-"; ${dashCmd} </dev/null >> ${logPath} 2>&1 & echo $!`
   const detachedSpawn = `child=$("$(command -v setsid || echo nohup)" sh -c ${shq(detachedShell)} hermes-update-child "$1" & echo $!)`

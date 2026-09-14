@@ -120,6 +120,14 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "dashboard.theme": _select(
         "Web dashboard visual theme", "default", "midnight", "ember", "mono", "cyberpunk", "rose"
     ),
+    "dashboard.profile_scope": {
+        "type": "string",
+        "description": (
+            "Which profile databases the dashboard may open: all, current, or a "
+            "comma-separated profile-name allowlist. Desktop All Profiles still "
+            "requests every profile explicitly."
+        ),
+    },
     "display.resume_display": _select("How resumed sessions display history", "minimal", "full", "off"),
     "display.busy_input_mode": _select("Input behavior while agent is running", "interrupt", "queue", "steer"),
     "approvals.mode": _select("Dangerous command approval mode", "manual", "smart", "off"),

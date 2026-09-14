@@ -173,6 +173,79 @@ class TestSidebarScope:
         assert _slice_ids(payload, "messaging") == {"default-telegram", "worker-telegram"}
         assert {row["profile"] for row in payload["messaging"]["sessions"]} == {"default", "worker"}
 
+    def test_explicit_all_profiles_survives_current_process_scope(
+        self, client, profiles_on_disk, monkeypatch
+    ):
+        """Desktop All Profiles sends recents_profile=all even when the child is current."""
+        _seed_session(profiles_on_disk["default"], "default-telegram", source="telegram")
+        _seed_session(profiles_on_disk["worker"], "worker-telegram", source="telegram")
+        monkeypatch.setenv("HERMES_DASHBOARD_PROFILE_SCOPE", "current")
+
+        payload = client.get(
+            "/api/profiles/sessions/sidebar",
+            params={"recents_profile": "all", "messaging_exclude": "cli,cron"},
+        ).json()
+
+        assert _slice_ids(payload, "messaging") == {"default-telegram", "worker-telegram"}
+
+    def test_config_profile_scope_limits_sidebar_without_env(
+        self, client, profiles_on_disk, monkeypatch
+    ):
+        from hermes_cli.config import get_config_path
+
+        _seed_session(profiles_on_disk["default"], "default-telegram", source="telegram")
+        _seed_session(profiles_on_disk["worker"], "worker-telegram", source="telegram")
+        monkeypatch.delenv("HERMES_DASHBOARD_PROFILE_SCOPE", raising=False)
+        get_config_path().write_text("dashboard:\n  profile_scope: current\n", encoding="utf-8")
+
+        payload = client.get(
+            "/api/profiles/sessions/sidebar",
+            params={"messaging_exclude": "cli,cron"},
+        ).json()
+
+        assert _slice_ids(payload, "messaging") == {"default-telegram"}
+
+
+def _opened_profile_names(monkeypatch, profiles_on_disk):
+    from hermes_cli.web_routers import profiles as profiles_routes
+
+    opened = []
+    real = profiles_routes._read_profile_db
+
+    def _record(name, home, errors, fn):
+        opened.append(name)
+        return real(name, home, errors, fn)
+
+    monkeypatch.setattr(profiles_routes, "_read_profile_db", _record)
+    return opened
+
+
+class TestDashboardScopeFanout:
+
+    def test_sessions_profile_all_opens_only_scoped_databases(
+        self, client, profiles_on_disk, monkeypatch
+    ):
+        for name, home in profiles_on_disk.items():
+            _seed_session(home, f"{name}-chat", source="cli")
+        monkeypatch.setenv("HERMES_DASHBOARD_PROFILE_SCOPE", "current")
+        opened = _opened_profile_names(monkeypatch, profiles_on_disk)
+
+        client.get("/api/profiles/sessions", params={"profile": "all"})
+
+        assert opened == ["default"]
+
+    def test_pull_requests_opens_only_scoped_databases(
+        self, client, profiles_on_disk, monkeypatch
+    ):
+        for name, home in profiles_on_disk.items():
+            _seed_session(home, f"{name}-chat", source="cli")
+        monkeypatch.setenv("HERMES_DASHBOARD_PROFILE_SCOPE", "current")
+        opened = _opened_profile_names(monkeypatch, profiles_on_disk)
+
+        client.post("/api/profiles/sessions/pull-requests", json={"ids": ["default-chat", "worker-chat"]})
+
+        assert opened == ["default"]
+
 
 class TestCrossProfileProjectTree:
 
@@ -191,6 +264,22 @@ class TestCrossProfileProjectTree:
 
         labels = {project["label"] for project in payload["projects"] if not project["isNoProject"]}
         assert labels == {"Default"}
+
+    def test_explicit_all_profiles_tree_survives_current_process_scope(
+        self, client, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        for name, home in profiles_on_disk.items():
+            folder = tmp_path / "repos" / name
+            folder.mkdir(parents=True)
+            _seed_session(home, f"{name}-chat", source="cli", cwd=folder)
+            _seed_project(home, name.title(), folder)
+
+        monkeypatch.setenv("HERMES_DASHBOARD_PROFILE_SCOPE", "current")
+
+        payload = client.get("/api/profiles/projects/tree", params={"profile": "all"}).json()
+
+        labels = {project["label"] for project in payload["projects"] if not project["isNoProject"]}
+        assert labels == {"Default", "Worker"}
 
     def test_one_folder_worked_in_by_two_profiles_is_one_project(self, client, profiles_on_disk, tmp_path):
         # A folder is a folder no matter who opened it. Two profiles working the
