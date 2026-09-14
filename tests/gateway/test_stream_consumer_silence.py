@@ -126,6 +126,44 @@ class TestStreamedSilenceSuppression:
         assert any("no response was generated" in text for text in _sent_and_edited(adapter))
 
     @pytest.mark.asyncio
+    async def test_human_turn_authoritative_finish_does_not_reconcile_marker(self):
+        """finish(NO_REPLY) must not edit a delivered fallback back to the marker."""
+        from gateway.config import GatewayConfig, Platform
+        from gateway.response_filters import HUMAN_SILENCE_FALLBACK, recover_human_silence_response
+        from gateway.run import GatewayRunner
+        from gateway.session import SessionSource
+        from gateway.turn_context import TurnContext
+
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_1",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1),
+            is_human_initiated=True,
+        )
+        consumer.on_delta("NO_REPLY")
+        result = {"final_response": "NO_REPLY", "failed": False, "completed": True}
+        result["final_response"] = recover_human_silence_response(
+            result, result["final_response"], is_human_initiated=True,
+        )
+        assert result["final_response"] == HUMAN_SILENCE_FALLBACK
+        consumer.finish(result["final_response"])
+        await consumer.run()
+
+        runner = GatewayRunner(GatewayConfig())
+        turn_ctx = TurnContext(
+            stream_consumer_holder=[consumer],
+            source=SessionSource(platform=Platform.TELEGRAM, chat_id="chat_1", chat_type="dm"),
+            session_key="agent:main:telegram:dm:1",
+        )
+        await runner._run_agent_mark_streamed_delivery(result, turn_ctx)
+
+        assert result.get("already_sent") is True
+        assert all("NO_REPLY" not in text for text in _sent_and_edited(adapter))
+        assert any("no response was generated" in text for text in _sent_and_edited(adapter))
+        for call in adapter.edit_message.call_args_list:
+            assert "NO_REPLY" not in (call.kwargs.get("content") or "")
+
+    @pytest.mark.asyncio
     async def test_no_reply_only_stream_is_fully_suppressed(self):
         """A stream whose entire content is NO_REPLY sends nothing visible."""
         adapter = _make_adapter()

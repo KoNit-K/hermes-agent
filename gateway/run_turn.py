@@ -287,6 +287,15 @@ class GatewayTurnMixin:
             # Fail open: unexpected response-filter errors must never black-hole a user turn.
             return False
 
+    @staticmethod
+    def _terminal_turn_is_human(agent_result, event) -> bool:
+        """Origin of the last queued turn, else the event that opened the chain."""
+        if isinstance(agent_result, dict):
+            terminal = agent_result.get("queued_terminal_is_human")
+            if isinstance(terminal, bool):
+                return terminal
+        return not bool(getattr(event, "internal", False))
+
     async def _hmwa_resolve_session(self, event, source):
         """Resolve ``source`` to its session entry (topic recovery, internal-route guards, Telegram
         topic-binding heal). Returns ``(source, session_entry, session_key)`` or ``None`` to drop
@@ -1387,8 +1396,9 @@ class GatewayTurnMixin:
         # and would be delivered verbatim (peer agents would ingest it as a completed turn).
         if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
             response = ""
+        is_human_initiated = self._terminal_turn_is_human(agent_result, event)
         _intentional_silence = self._should_suppress_turn_silence(
-            agent_result, response, is_human_initiated=not bool(getattr(event, "internal", False)),
+            agent_result, response, is_human_initiated=is_human_initiated,
         )
         if not _intentional_silence and self._is_intentional_silence(agent_result, response):
             response = ""
@@ -3667,6 +3677,7 @@ class GatewayTurnMixin:
                 run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
                 event_message_id=next_message_id, inbound_message_id=next_inbound_id,
                 channel_prompt=next_channel_prompt, message_type=next_message_type,
+                is_human_initiated=not bool(getattr(pending_event, "internal", False)),
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -3687,6 +3698,11 @@ class GatewayTurnMixin:
         # so only fill the key while it is still absent: the innermost turn wins.
         if isinstance(merged, dict) and "queued_terminal_inbound_id" not in merged:
             merged = {**merged, "queued_terminal_inbound_id": next_inbound_id}
+        if isinstance(merged, dict) and "queued_terminal_is_human" not in merged:
+            merged = {
+                **merged,
+                "queued_terminal_is_human": not bool(getattr(pending_event, "internal", False)),
+            }
         return merged
 
     async def _run_agent_cleanup_turn_tasks(

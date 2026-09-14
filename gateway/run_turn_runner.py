@@ -1611,6 +1611,10 @@ class TurnRunner:
             result["final_response"] = repair_explicit_computer_use_media_paths(
                 result["final_response"], result.get("messages", []), history_offset=len(agent_history),
             )
+            from gateway.response_filters import recover_human_silence_response
+            result["final_response"] = recover_human_silence_response(
+                result, result["final_response"], is_human_initiated=ctx.is_human_initiated,
+            )
         ctx.result_holder[0] = result
         if stream_consumer is None:
             return

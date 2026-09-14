@@ -99,6 +99,21 @@ def should_suppress_turn_silence(
     return not is_human_initiated and is_intentional_silence_agent_result(agent_result, response)
 
 
+def recover_human_silence_response(
+    agent_result: dict | None, response: Any, *, is_human_initiated: bool,
+) -> str:
+    """Normalize a completed silence marker before stream finalize and delivery.
+
+    Human turns get :data:`HUMAN_SILENCE_FALLBACK` so the consumer buffer, the
+    streamed-finalize payload, and the outer shaper agree. Internal markers stay
+    unchanged for the suppress path.
+    """
+    text = response if isinstance(response, str) else ""
+    if is_human_initiated and is_intentional_silence_agent_result(agent_result, text):
+        return HUMAN_SILENCE_FALLBACK
+    return text
+
+
 def is_partial_silence_marker(text: Any) -> bool:
     """True while streamed ``text`` could still resolve to a silence marker.
 

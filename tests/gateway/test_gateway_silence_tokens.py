@@ -10,8 +10,10 @@ from gateway.config import GatewayConfig, Platform
 from gateway.platforms.event import MessageEvent
 from gateway.session import SessionEntry, SessionSource
 from gateway.response_filters import (
+    HUMAN_SILENCE_FALLBACK,
     is_intentional_silence_agent_result,
     is_intentional_silence_response,
+    recover_human_silence_response,
 )
 
 
@@ -93,6 +95,14 @@ def test_failed_agent_result_never_counts_as_intentional_silence():
     assert not is_intentional_silence_agent_result({"failed": True}, "NO_REPLY")
 
 
+def test_recover_human_silence_response_only_rewrites_successful_human_markers():
+    ok = {"failed": False}
+    assert recover_human_silence_response(ok, "NO_REPLY", is_human_initiated=True) == HUMAN_SILENCE_FALLBACK
+    assert recover_human_silence_response(ok, "NO_REPLY", is_human_initiated=False) == "NO_REPLY"
+    assert recover_human_silence_response({"failed": True}, "NO_REPLY", is_human_initiated=True) == "NO_REPLY"
+    assert recover_human_silence_response(ok, "hello", is_human_initiated=True) == "hello"
+
+
 @pytest.mark.asyncio
 async def test_human_silence_token_delivers_empty_response_warning(monkeypatch, tmp_path):
     runner = _runner(monkeypatch, tmp_path)
@@ -117,6 +127,99 @@ async def test_human_silence_token_delivers_empty_response_warning(monkeypatch, 
     appended = [call.args[1] for call in runner.session_store.append_to_transcript.call_args_list]
     assert {"role": "assistant", "content": "[SILENT]"}.items() <= appended[-1].items()
     assert [msg["role"] for msg in appended if msg.get("role") in {"user", "assistant"}] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_queued_human_after_internal_recovers_silence_marker(monkeypatch, tmp_path):
+    """Outer shaping must use the terminal queued turn, not the internal opener."""
+    runner = _runner(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value={
+        "final_response": "NO_REPLY",
+        "queued_terminal_is_human": True,
+        "messages": [
+            {"role": "user", "content": "side chatter"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+        "tools": [],
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "api_calls": 1,
+        "failed": False,
+    })
+
+    response = await runner._handle_message_with_agent(
+        _event(internal=True), _source(), "agent:main:telegram:group:-1001:12345", 1,
+    )
+
+    assert "no response was generated" in response
+
+
+@pytest.mark.asyncio
+async def test_queued_internal_after_human_still_suppresses_silence(monkeypatch, tmp_path):
+    """A human opener plus internal NO_REPLY follow-up must stay silent."""
+    runner = _runner(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value={
+        "final_response": "NO_REPLY",
+        "queued_terminal_is_human": False,
+        "messages": [],
+        "tools": [],
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "api_calls": 1,
+        "failed": False,
+    })
+
+    response = await runner._handle_message_with_agent(
+        _event(), _source(), "agent:main:telegram:group:-1001:12345", 1,
+    )
+
+    assert response == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("internal,expect_human", [(False, True), (True, False)])
+async def test_queued_followup_passes_pending_origin(internal, expect_human):
+    """Recursive _run_agent and the merged result both see the pending event origin."""
+    from gateway.turn_context import TurnContext
+
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner._MAX_INTERRUPT_DEPTH = 5
+    runner._adapter_for_source = MagicMock(return_value=None)
+    runner._is_goal_continuation_event = lambda _event: False
+    runner._session_key_for_source = lambda _source: "queued-key"
+    runner._prepare_profile_scoped_inbound_message_text = AsyncMock(return_value="queued")
+    runner._reply_anchor_for_event = lambda _event: None
+    runner._refresh_agent_cache_message_count = AsyncMock()
+    captured = {}
+
+    async def _capture_run_agent(**kwargs):
+        captured.update(kwargs)
+        return {"final_response": "NO_REPLY"}
+
+    runner._run_agent = _capture_run_agent
+    turn_ctx = TurnContext(
+        source=_source(),
+        session_id="sess-queued-origin",
+        session_key="opener-key",
+        run_generation=1,
+        history=[],
+        context_prompt="",
+        result_holder=[{}],
+        _interrupt_depth=0,
+        _status_thread_metadata={},
+    )
+    merged = await runner._run_agent_queued_followup(
+        turn_ctx,
+        None,
+        "queued",
+        _event(internal=internal),
+        {"final_response": "first"},
+        {"interrupted": True, "messages": []},
+        None,
+    )
+
+    assert captured["is_human_initiated"] is expect_human
+    assert merged["queued_terminal_is_human"] is expect_human
 
 
 @pytest.mark.asyncio
