@@ -3517,7 +3517,10 @@ class GatewayTurnMixin:
         _delivery_result = response if isinstance(response, dict) else (result or {})
         if isinstance(_delivery_result, dict):
             from gateway.response_filters import stamp_consumed_human_steer
-            stamp_consumed_human_steer(_delivery_result, prior_messages=turn_ctx.history)
+            _agent = turn_ctx.agent_holder[0] if turn_ctx.agent_holder else None
+            stamp_consumed_human_steer(
+                _delivery_result, prior_messages=turn_ctx.history, agent=_agent,
+            )
         first_response = _delivery_result.get("final_response", "") if isinstance(_delivery_result, dict) else ""
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
             _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")) if isinstance(_delivery_result, dict) else False,

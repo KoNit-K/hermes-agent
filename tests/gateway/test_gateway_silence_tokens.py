@@ -1,6 +1,7 @@
 """Gateway intentional-silence token behavior."""
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -265,6 +266,22 @@ def test_consumed_steer_survives_compressed_transcript_index():
     assert turn_consumed_human_steer(compressed, prior_messages=prior) is True
     assert stamp_consumed_human_steer(compressed, prior_messages=prior) is True
     assert compressed["consumed_human_steer"] is True
+
+
+def test_repeated_identical_steer_uses_consumed_event_not_text_counts():
+    """Compression can leave one copy of the same wrapped steer; text subtraction is empty."""
+    steer = {"role": "user", "content": "same request", "display_kind": "steer"}
+    prior = [steer]
+    result = {
+        "history_offset": 1,
+        "final_response": "NO_REPLY",
+        "failed": False,
+        "messages": [steer, {"role": "assistant", "content": "NO_REPLY"}],
+    }
+    assert turn_consumed_human_steer(result, prior_messages=prior) is False
+    agent = SimpleNamespace(_consumed_human_steer_this_turn=True)
+    assert stamp_consumed_human_steer(result, prior_messages=prior, agent=agent) is True
+    assert result["consumed_human_steer"] is True
 
 
 def test_answered_steer_does_not_override_terminal_queued_origin():

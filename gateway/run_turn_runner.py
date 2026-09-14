@@ -1249,6 +1249,7 @@ class TurnRunner:
         # per platform so global scratch-text doesn't leak into threads).
         agent.thinking_progress = ctx._thinking_enabled
         ctx.agent_holder[0] = agent  # interrupt support
+        agent._consumed_human_steer_this_turn = False
         # The titler fires from the turn prologue, so attach the rename lane before the run.
         self._attach_session_title_callback(agent, ctx)
         # Publish turn ownership for /stop, /new, disconnect and shutdown interrupts; older session
@@ -1612,11 +1613,14 @@ class TurnRunner:
                 result["final_response"], result.get("messages", []), history_offset=len(agent_history),
             )
             from gateway.response_filters import recover_human_silence_response, stamp_consumed_human_steer
+            agent = ctx.agent_holder[0] if ctx.agent_holder else None
             result["final_response"] = recover_human_silence_response(
                 result, result["final_response"],
                 is_human_initiated=(
                     ctx.is_human_initiated
-                    or stamp_consumed_human_steer(result, prior_messages=agent_history)
+                    or stamp_consumed_human_steer(
+                        result, prior_messages=agent_history, agent=agent,
+                    )
                 ),
             )
         ctx.result_holder[0] = result
@@ -1841,6 +1845,8 @@ class TurnRunner:
             "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
             **usage,
         }
+        if result.get("consumed_human_steer") or getattr(agent, "_consumed_human_steer_this_turn", False):
+            common["consumed_human_steer"] = True
         if not final_response:
             final_response = _normalize_empty_agent_response(result, final_response or "", history_len=len(agent_history))
             final_response = _sanitize_gateway_final_response(ctx.source.platform, final_response)

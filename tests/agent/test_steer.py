@@ -496,6 +496,7 @@ class TestSteerInjection:
             {"role": "tool", "content": "ls output B", "tool_call_id": "b"},
         ]
         agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs=2)
+        assert agent._consumed_human_steer_this_turn is True
         # Existing tool rows are untouched (append-only persistence contract);
         # the steer becomes a NEW user message at the tail.
         assert messages[2]["content"] == "ls output A"

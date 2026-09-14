@@ -162,11 +162,15 @@ def stamp_consumed_human_steer(
     *,
     prior_messages: list | None = None,
     history_offset: int | None = None,
+    agent: Any = None,
 ) -> bool:
     """Record consumed-steer independently of later transcript-index rewrites."""
-    found = turn_consumed_human_steer(
-        agent_result, prior_messages=prior_messages, history_offset=history_offset,
-    )
+    if getattr(agent, "_consumed_human_steer_this_turn", False):
+        found = True
+    else:
+        found = turn_consumed_human_steer(
+            agent_result, prior_messages=prior_messages, history_offset=history_offset,
+        )
     if found and isinstance(agent_result, dict):
         agent_result["consumed_human_steer"] = True
     return found
