@@ -131,7 +131,7 @@ def auto_migration_blockers(plan: MigrationPlan) -> list[str]:
 
 
 def auto_migration_opted_out(default_home: Path) -> bool:
-    """``gateway.auto_migrate: false`` in the DEFAULT profile's config.yaml. Absent means
+    """``gateway.auto_multiplex_migration: false`` in the DEFAULT profile's config.yaml. Absent means
     opted in (the ``DEFAULT_CONFIG`` value); only the nested key counts, there is no top-level alias."""
     cfg_path = default_home / "config.yaml"
     if not cfg_path.exists():
@@ -141,5 +141,5 @@ def auto_migration_opted_out(default_home: Path) -> bool:
     gateway_section = cfg.get("gateway")
     if not isinstance(gateway_section, dict):
         return False
-    value = gateway_section.get("auto_migrate")
+    value = gateway_section.get("auto_multiplex_migration")
     return value is not None and not bool(value)

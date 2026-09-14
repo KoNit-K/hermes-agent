@@ -786,7 +786,7 @@ def cmd_migrate(args) -> None:
 def maybe_auto_migrate_after_update() -> None:
     """``hermes update`` hook: with >= 2 profiles, per-profile gateways present and multiplex off,
     migrate automatically when unblocked (deterministic, never prompts) or print the blocker block.
-    ``gateway.auto_migrate: false`` on the default profile opts out; a secondary behind a
+    ``gateway.auto_multiplex_migration: false`` on the default profile opts out; a secondary behind a
     service-domain / UNIX-user / HERMES_HOME boundary blocks this path only (the explicit command decides)."""
     from hermes_cli.gateway_migrate_guards import auto_migration_blockers, auto_migration_opted_out
     if _host_supports_migration() is not None or auto_migration_opted_out(_default_home()):
