@@ -13,6 +13,7 @@ Covers the three seams added for remote Desktop backends:
 """
 
 import threading
+from urllib.request import urlopen
 
 import pytest
 
@@ -184,9 +185,26 @@ def teardown_function(_fn):
 
 def test_deliver_callback_accepts_matching_state():
     flow = _make_session()
-    out = deliver_callback_flow("sess-relay-1", "hosp", code="abc", state="s3cr3tstate")
+    out = deliver_callback_flow(
+        "sess-relay-1", "hosp", code="abc", state="s3cr3tstate", iss="https://idp.example"
+    )
     assert out == {"ok": True, "session_id": "sess-relay-1"}
-    assert flow._callback == ("abc", "s3cr3tstate")
+    assert flow._callback == ("abc", "s3cr3tstate", "https://idp.example")
+
+
+def test_loopback_callback_preserves_issuer():
+    flow = _make_session()
+    listener = mcp_oauth_sessions._start_loopback_listener(flow)
+    try:
+        port = listener.server_address[1]
+        with urlopen(
+            f"http://127.0.0.1:{port}/callback?code=abc&state=s3cr3tstate&iss=https%3A%2F%2Fidp.example"
+        ) as response:
+            assert response.status == 200
+        assert flow._callback == ("abc", "s3cr3tstate", "https://idp.example")
+    finally:
+        listener.shutdown()
+        listener.server_close()
 
 
 def test_deliver_callback_rejects_state_mismatch():

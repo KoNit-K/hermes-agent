@@ -25,13 +25,13 @@ function deferred<T>() {
 }
 
 function harness() {
-  const callback = deferred<{ code: string | null; state: string | null; error: string | null }>()
+  const callback = deferred<{ code: string | null; state: string | null; error: string | null; iss: string | null }>()
 
   const bridge = {
     listen: vi.fn().mockResolvedValue({ id: 'listener-1', redirectUri }),
     wait: vi.fn(() => callback.promise),
     cancel: vi.fn(async () => {
-      callback.resolve({ code: null, state: null, error: 'cancelled' })
+      callback.resolve({ code: null, state: null, error: 'cancelled', iss: null })
 
       return true
     })
@@ -40,7 +40,7 @@ function harness() {
   const api = vi.fn().mockRejectedValue(new Error('Desktop OAuth must not use the remote REST callback'))
 
   const openExternal = vi.fn(async () => {
-    callback.resolve({ code: 'code-1', state: 'expected', error: null })
+    callback.resolve({ code: 'code-1', state: 'expected', error: null, iss: 'https://idp.example' })
   })
 
   Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { mcpOauth: bridge, api, openExternal } })
@@ -80,7 +80,7 @@ describe('Desktop MCP client callback lifecycle', () => {
       const { bridge, api, openExternal, rpc } = harness()
       setApiRequestConnection(connectionId)
       setApiRequestProfile('origin-profile')
-      const callbackResult = { code: 'code-1', state: 'expected', error: null }
+      const callbackResult = { code: 'code-1', state: 'expected', error: null, iss: 'https://idp.example' }
       bridge.wait.mockResolvedValue(callbackResult)
       openExternal.mockImplementation(async () => {
         setApiRequestConnection('other-gateway')

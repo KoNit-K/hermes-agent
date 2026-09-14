@@ -41,10 +41,11 @@ test('listen binds a loopback listener and wait resolves with the redirect param
   const waitPromise = invoke('hermes:mcp-oauth:wait', id, 5000) as Promise<{
     code: null | string
     error: null | string
+    iss: null | string
     state: null | string
   }>
 
-  const res = await fetch(`${redirectUri}?code=abc123&state=st-1`)
+  const res = await fetch(`${redirectUri}?code=abc123&state=st-1&iss=https%3A%2F%2Fidp.example`)
 
   assert.equal(res.status, 200)
   assert.match(await res.text(), /return to Hermes/)
@@ -53,6 +54,7 @@ test('listen binds a loopback listener and wait resolves with the redirect param
 
   assert.equal(result.code, 'abc123')
   assert.equal(result.state, 'st-1')
+  assert.equal(result.iss, 'https://idp.example')
   assert.equal(result.error, null)
 
   // Listener is one-shot: the port must be closed after the callback.
