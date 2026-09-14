@@ -3188,6 +3188,14 @@ def _launch_external_cron_worker(job: dict) -> bool:
         ))
     finally:
         reset_secret_scope(secret_token)
+    # The external worker has no gateway client to answer approval cards. Do
+    # not let presence inherited from the gateway make it appear interactive.
+    for presence_var in (
+        "HERMES_INTERACTIVE",
+        "HERMES_GATEWAY_SESSION",
+        "HERMES_EXEC_ASK",
+    ):
+        worker_env.pop(presence_var, None)
     worker_env = systemd_user_bus_env(worker_env)
     try:
         process = subprocess.Popen(
