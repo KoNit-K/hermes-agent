@@ -20,6 +20,7 @@ import pytest
 
 from agent.vault_backends import unlock as unlock_mod
 from agent.vault_backends.bitwarden import BitwardenLoginBackend
+from agent.vault_backends.onepassword import OnePasswordLoginBackend
 
 # A stand-in `bw` that mimics the three commands the backend uses and the real CLI's password contract
 # (bw 2026.x rejects a piped password: "Master password is required"; it reads --passwordenv <VAR>).
@@ -43,7 +44,7 @@ if os.environ.get("BW_SESSION") != "SESSION-TOKEN-123":
     sys.stderr.write("Vault is locked.\n"); sys.exit(1)
 if argv[:2] == ["list", "items"]:
     print(json.dumps([{"id": "abc", "type": 1, "name": "Example", "creationDate": "2026-01-01T00:00:00Z",
-                       "login": {"username": "jane@example.com", "uris": [{"uri": "https://example.com/login"}]}},
+                       "login": {"username": "jane@example.com", "uris": [{"uri": "https://example.com/login"}, {"uri": "https://accounts.example.com/auth"}]}},
                       {"id": "note", "type": 2, "name": "Secure note"}])); sys.exit(0)
 if argv[:2] == ["get", "password"]:
     print("plain sentence nobody would flag 7"); sys.exit(0)
@@ -94,7 +95,7 @@ def test_locked_manager_is_reported_not_prompted_when_headless(fake_bw, monkeypa
     assert not unlock_mod.is_unlocked("bitwarden")
 
 
-def test_unlock_uses_vendor_passwordenv_contract_then_fill_routes_by_prefix(fake_bw):
+def test_unlock_uses_vendor_passwordenv_contract_then_fill_routes_by_alternate_origin(fake_bw):
     exe, log = fake_bw
     from tools.browser_vault_tool import browser_vault_fill, browser_vault_list
 
@@ -108,7 +109,7 @@ def test_unlock_uses_vendor_passwordenv_contract_then_fill_routes_by_prefix(fake
     unlock_mod.set_unlock_prompt_callback(prompt)
     try:
         with patcher, patch("agent.vault_backends.enabled_backends", return_value=[backend]), \
-             patch("tools.browser_vault_tool._current_page_origin", return_value="https://example.com"), \
+             patch("tools.browser_vault_tool._current_page_origin", return_value="https://accounts.example.com"), \
              patch("tools.browser_vault_tool._eval_js", return_value={"success": True, "result": json.dumps([
                  {"tag": "input", "type": "password", "name": "password", "id": "pw", "autocomplete": "current-password",
                   "visible": True}])}), \
@@ -117,7 +118,7 @@ def test_unlock_uses_vendor_passwordenv_contract_then_fill_routes_by_prefix(fake
             out = json.loads(browser_vault_fill("bw:abc", task_id="t"))
             out.pop("next")
             assert out == {"success": True, "filled_fields": 1, "backend": "bitwarden", "kind": "login",
-                           "origin": "https://example.com"}
+                           "origin": "https://accounts.example.com"}
             assert prompts == [("bitwarden", "Bitwarden")]
             # Now unlocked: listing exposes metadata only, never the password.
             listed = json.loads(browser_vault_list())
@@ -126,6 +127,7 @@ def test_unlock_uses_vendor_passwordenv_contract_then_fill_routes_by_prefix(fake
             assert "plain sentence nobody would flag 7" not in json.dumps(listed)
             # The password reached the fill script, and only there.
             assert "plain sentence nobody would flag 7" in secret_eval.call_args.args[1]
+            assert '"https://accounts.example.com"' in secret_eval.call_args.args[1]
     finally:
         unlock_mod.set_unlock_prompt_callback(None)
 
@@ -146,6 +148,39 @@ def test_unlock_uses_vendor_passwordenv_contract_then_fill_routes_by_prefix(fake
     unlock_mod.lock("bitwarden")
     assert not backend.is_unlocked()
     assert os.environ.get("BW_SESSION") is None, "session token must never touch the process env"
+
+
+def test_external_login_backends_preserve_all_normalized_saved_origins(monkeypatch):
+    """A login may legitimately have distinct sign-in and application origins.
+
+    Every valid manager URL must remain an exact allowed origin; malformed URLs
+    are ignored rather than broadening the trust boundary.
+    """
+    onepassword = OnePasswordLoginBackend()
+    monkeypatch.setattr(onepassword, "is_unlocked", lambda: True)
+    monkeypatch.setattr(onepassword, "_run", lambda *_: json.dumps([{
+        "id": "op-login", "title": "Example", "urls": [
+            {"href": "https://example.com/login"},
+            {"href": "https://accounts.example.com:443/auth"},
+            {"href": "not an origin"},
+        ],
+    }]))
+    assert onepassword.list_items()[0].origins == (
+        "https://example.com", "https://accounts.example.com",
+    )
+
+    bitwarden = BitwardenLoginBackend()
+    monkeypatch.setattr(bitwarden, "is_unlocked", lambda: True)
+    monkeypatch.setattr(bitwarden, "_run", lambda *_: json.dumps([{
+        "id": "bw-login", "type": 1, "name": "Example", "login": {"uris": [
+            {"uri": "https://example.com/login"},
+            {"uri": "https://accounts.example.com:443/auth"},
+            {"uri": "not an origin"},
+        ]},
+    }]))
+    assert bitwarden.list_items()[0].origins == (
+        "https://example.com", "https://accounts.example.com",
+    )
 
 
 def test_lock_during_unlock_wins_and_only_the_owning_session_release_drops_a_token(fake_bw, monkeypatch):

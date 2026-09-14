@@ -202,6 +202,24 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[str]:
     return (origin or focused.get("url")) if focused.get("ok") else None
 
 
+def _login_origins(meta: Any) -> tuple[str, ...]:
+    """Return only normalized exact origins that are safe to use for login filling."""
+    from agent.vault_store import normalize_origin
+
+    candidates = getattr(meta, "origins", ()) or ()
+    if meta.origin:
+        candidates = (meta.origin, *candidates)
+    origins = []
+    for candidate in candidates:
+        try:
+            origin = normalize_origin(str(candidate))
+        except Exception:
+            continue
+        if origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -229,6 +247,8 @@ def browser_vault_list() -> str:
         for meta in metas:
             entry = {"handle": meta.id, "backend": backend.name, "label": meta.label, "kind": meta.kind,
                      "origin": meta.origin, "available": meta.kind == "login" or bool(meta.origin)}
+            if meta.origins:
+                entry["origins"] = list(meta.origins)
             if meta.has_otp or backend.needs_unlock:
                 entry["two_factor"] = "automatic" if meta.has_otp else "automatic if the manager stores a TOTP seed, else the user is asked"
             if meta.identifier:
@@ -438,20 +458,30 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
 
     # ── Origin binding pre-check (cheap early exit; the authoritative check
     # runs synchronously inside the fill script itself) ──────────────────────
-    page_origin = _focus_bound_origin(effective_task_id, str(meta.origin), meta.kind) or _current_page_origin(effective_task_id)
+    allowed_origins = _login_origins(meta) if meta.kind == "login" else (str(meta.origin),)
+    # Prefer the active page so an alternate saved login URL is never replaced
+    # by the item's first URL.  If browser-exec attached to another tab, focus
+    # only a tab whose origin is itself an exact saved origin.
+    page_origin = _current_page_origin(effective_task_id)
+    if page_origin not in allowed_origins:
+        for bound_origin in allowed_origins:
+            focused_origin = _focus_bound_origin(effective_task_id, bound_origin, meta.kind)
+            if focused_origin:
+                page_origin = focused_origin
+                break
     if not page_origin:
         return json.dumps(
             {"success": False, "error": "Could not determine the current page origin. Navigate to the login page first."}
         )
-    if page_origin != meta.origin:
+    if page_origin not in allowed_origins:
         return json.dumps(
             {
                 "success": False,
                 "error_type": "origin_mismatch",
                 "error": (
                     f"Refused: current page origin ({page_origin}) does not match "
-                    f"the vault item's bound origin ({meta.origin}). Vault fills "
-                    "only run on the exact origin the credential was saved for."
+                    f"one of the vault item's bound origins ({', '.join(allowed_origins)}). Vault fills "
+                    "only run on an exact origin the credential was saved for."
                 ),
             }
         )
@@ -505,7 +535,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
 
     try:
         fill_result = _eval_js_secret(
-            effective_task_id, build_fill_js(fills, expected_origin=str(meta.origin), nonce=nonce)
+            effective_task_id, build_fill_js(fills, expected_origin=page_origin, nonce=nonce)
         )
     except Exception as exc:
         # Strip any secret material from exception text before surfacing.
@@ -529,7 +559,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
                 "error_type": "origin_changed",
                 "error": (
                     "Refused: the page navigated away from the bound origin "
-                    f"({meta.origin}) before the fill could run "
+                    f"({page_origin}) before the fill could run "
                     f"(now on {parsed.get('found') or 'unknown'}). "
                     "Nothing was written."
                 ),
@@ -538,7 +568,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     filled = parsed.get("filled", 0) if isinstance(parsed, dict) else 0
 
     out = {"success": bool(filled), "filled_fields": int(filled), "backend": backend.name,
-           "kind": meta.kind, "origin": meta.origin}
+           "kind": meta.kind, "origin": page_origin}
     if meta.kind == "login":
         out["next"] = ("Submit. If the site then asks for a verification code, call browser_vault_enter_code with this handle"
                        + (" (a code will be generated automatically)." if meta.has_otp else "."))

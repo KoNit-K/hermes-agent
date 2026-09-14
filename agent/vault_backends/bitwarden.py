@@ -94,20 +94,23 @@ class BitwardenLoginBackend(LoginBackend):
             if item.get("type") != 1 or not isinstance(item.get("login"), dict):
                 continue
             login = item["login"]
-            origin = None
+            origins: List[str] = []
             for uri in login.get("uris") or []:
                 try:
                     origin = normalize_origin(str(uri.get("uri") or ""))
-                    break
                 except Exception:
                     continue
-            if not origin:
+                if origin not in origins:
+                    origins.append(origin)
+            if not origins:
                 continue
+            origin = origins[0]
             username = str(login.get("username") or "").strip() or None
             out.append(VaultItemMeta(
                 id=f"{self.prefix}{item.get('id')}", kind="login", label=str(item.get("name") or origin),
                 origin=origin, created_at=str(item.get("creationDate") or ""),
-                identifier_type="username" if username else None, identifier=username))
+                identifier_type="username" if username else None, identifier=username,
+                origins=tuple(origins)))
         return out
 
     def get_meta(self, handle: str) -> Optional[VaultItemMeta]:

@@ -167,6 +167,7 @@ class VaultItemMeta:
     identifier_type: Optional[str] = None
     identifier: Optional[str] = None
     has_otp: bool = False  # a TOTP seed is stored: 2FA codes can be minted without asking the user
+    origins: tuple[str, ...] = ()  # normalized exact origins additionally bound to this login
 
     def to_dict(self) -> Dict[str, Any]:
         out = {
@@ -181,6 +182,8 @@ class VaultItemMeta:
             out["identifier_type"] = self.identifier_type
         if self.has_otp:
             out["has_otp"] = True
+        if self.origins:
+            out["origins"] = list(self.origins)
         return out
 
 

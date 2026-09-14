@@ -105,14 +105,16 @@ class OnePasswordLoginBackend(LoginBackend):
         out: List[VaultItemMeta] = []
         for item in raw if isinstance(raw, list) else []:
             urls = [str(u["href"]) for u in item.get("urls") or [] if isinstance(u, dict) and u.get("href")]
-            origin = _first_origin(urls)
-            if not origin:
+            origins = _normalized_origins(urls)
+            if not origins:
                 continue
+            origin = origins[0]
             username = str(item.get("additional_information") or "").strip() or None
             out.append(VaultItemMeta(
                 id=f"{self.prefix}{item.get('id')}", kind="login", label=str(item.get("title") or origin),
                 origin=origin, created_at=str(item.get("created_at") or ""),
-                identifier_type="username" if username else None, identifier=username))
+                identifier_type="username" if username else None, identifier=username,
+                origins=tuple(origins)))
         return out
 
     def get_meta(self, handle: str) -> Optional[VaultItemMeta]:
@@ -131,10 +133,14 @@ class OnePasswordLoginBackend(LoginBackend):
         return code if code.isdigit() else None
 
 
-def _first_origin(urls: List[str]) -> Optional[str]:
+def _normalized_origins(urls: List[str]) -> List[str]:
+    """Keep every valid normalized origin, preserving the manager's order."""
+    origins: List[str] = []
     for u in urls:
         try:
-            return normalize_origin(u)
+            origin = normalize_origin(u)
         except Exception:
             continue
-    return None
+        if origin not in origins:
+            origins.append(origin)
+    return origins
