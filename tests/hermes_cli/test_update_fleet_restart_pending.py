@@ -354,6 +354,14 @@ def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
         (scope, cmd, SimpleNamespace(returncode=0, stdout=""))
         for scope, cmd in update_cmd_fleet._SYSTEMD_SCOPES
     ])
+    # A real macOS LaunchAgent fleet is outside this no-gateway unit test.
+    # Keep the launchd branch as a successful no-op so host services cannot
+    # turn the expected no-op restart into an incomplete fleet restart.
+    monkeypatch.setattr(
+        update_cmd_fleet,
+        "_restart_macos_launchd_gateways",
+        lambda *args, **kwargs: None,
+    )
     assert update_cmd._run_pending_fleet_restart() is True
     assert "Pending fleet restart completed" in capsys.readouterr().out
 
