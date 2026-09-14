@@ -86,6 +86,13 @@ _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
 _db = None
 _db_error: str | None = None
+# A remote/profile session borrows a registry reference for its agent, but that
+# reference used to be the *only* one held by this gateway.  Its teardown then
+# physically closed the profile store between turns.  Keep one reference for
+# every profile this gateway actually serves; agents still release their own
+# leases normally and process shutdown releases these anchors.
+_profile_db_anchors: dict[Path, Any] = {}
+_profile_db_anchors_lock = threading.Lock()
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
 # Shared profile UI metadata is updated concurrently by Desktop, mobile and pool RPCs; its
@@ -345,6 +352,7 @@ def _shutdown_sessions() -> None:
         sids = list(_sessions)
     for sid in sids:
         _close_session_by_id(sid, end_reason="tui_shutdown")
+    _release_profile_session_db_anchors()
 
 
 # Session reaping / flushing knobs (session_reaper.py). TTL is the last-resort net for disconnect paths that
@@ -419,9 +427,25 @@ def _open_profile_session_db(profile_home):
     from hermes_state_registry import acquire
     db_path = Path(profile_home) / "state.db"
     try:
+        # Hold a gateway-lifetime registry reference before lending a separate
+        # one to this session.  This avoids close/open WAL retirement churn
+        # when multiple tui_gateway processes serve the same profile.
+        with _profile_db_anchors_lock:
+            if db_path not in _profile_db_anchors:
+                _profile_db_anchors[db_path] = acquire(db_path)
         return acquire(db_path)
     except Exception as exc:
         raise RuntimeError(f"profile session store unavailable: {db_path}: {exc}") from exc
+
+
+def _release_profile_session_db_anchors() -> None:
+    """Release profile-store keepalive references after all sessions are closed."""
+    with _profile_db_anchors_lock:
+        anchors = list(_profile_db_anchors.values())
+        _profile_db_anchors.clear()
+    for db in anchors:
+        with contextlib.suppress(Exception):
+            db.close()
 
 
 @contextlib.contextmanager
@@ -440,8 +464,7 @@ def _profile_db(params: dict | None = None, *, writer: bool = False):
     else:
         try:
             if writer:
-                from hermes_state_registry import acquire
-                db = acquire(Path(profile_home) / "state.db")
+                db = _open_profile_session_db(profile_home)
             else:
                 from hermes_cli.web_server_sessions import _open_session_db_at_path
                 db = _open_session_db_at_path(Path(profile_home) / "state.db", read_only=True)
