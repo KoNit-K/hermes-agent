@@ -291,16 +291,17 @@ class GatewayTurnMixin:
     def _terminal_turn_is_human(agent_result, event) -> bool:
         """Origin of the last queued turn, else the event that opened the chain.
 
-        A human ``busy_input_mode=steer`` consumed during an internal opener is
-        not a queued follow-up; count only steer rows appended this turn.
+        A stamped or still-unmerged consumed steer is human. After a queued merge,
+        ``queued_terminal_is_human`` wins so an opener's already-answered steer
+        cannot override a later internal terminal turn.
         """
         from gateway.response_filters import turn_consumed_human_steer
-        if turn_consumed_human_steer(agent_result):
-            return True
         if isinstance(agent_result, dict):
             terminal = agent_result.get("queued_terminal_is_human")
             if isinstance(terminal, bool):
                 return terminal
+        if turn_consumed_human_steer(agent_result):
+            return True
         return not bool(getattr(event, "internal", False))
 
     async def _hmwa_resolve_session(self, event, source):
@@ -3514,13 +3515,19 @@ class GatewayTurnMixin:
                 logger.debug("Stream consumer wait before queued message failed: %s", e)
         # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
         _delivery_result = response if isinstance(response, dict) else (result or {})
-        first_response = _delivery_result.get("final_response", "")
+        if isinstance(_delivery_result, dict):
+            from gateway.response_filters import stamp_consumed_human_steer
+            stamp_consumed_human_steer(_delivery_result, prior_messages=turn_ctx.history)
+        first_response = _delivery_result.get("final_response", "") if isinstance(_delivery_result, dict) else ""
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
-            _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
+            _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")) if isinstance(_delivery_result, dict) else False,
         )
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
+        _first_human = turn_ctx.is_human_initiated or (
+            isinstance(_delivery_result, dict) and _delivery_result.get("consumed_human_steer") is True
+        )
         if self._should_suppress_turn_silence(
-            _delivery_result, first_response, is_human_initiated=turn_ctx.is_human_initiated,
+            _delivery_result, first_response, is_human_initiated=_first_human,
         ):
             logger.info(
                 "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
@@ -3696,6 +3703,11 @@ class GatewayTurnMixin:
             raise
         await _run_followup_processing_hook(
             _hook_adapter, pending_event, "on_processing_complete", ProcessingOutcome.SUCCESS)
+        from gateway.response_filters import turn_consumed_human_steer
+        followup_human = (
+            not bool(getattr(pending_event, "internal", False))
+            or turn_consumed_human_steer(followup_result)
+        )
         merged = _preserve_queued_followup_history_offset(result, followup_result)
         # The TERMINAL turn of the chain owns the ledger identity for the outer final send, which
         # the adapter brackets against the event that OPENED the chain. Without this the terminal
@@ -3706,10 +3718,7 @@ class GatewayTurnMixin:
         if isinstance(merged, dict) and "queued_terminal_inbound_id" not in merged:
             merged = {**merged, "queued_terminal_inbound_id": next_inbound_id}
         if isinstance(merged, dict) and "queued_terminal_is_human" not in merged:
-            merged = {
-                **merged,
-                "queued_terminal_is_human": not bool(getattr(pending_event, "internal", False)),
-            }
+            merged = {**merged, "queued_terminal_is_human": followup_human}
         return merged
 
     async def _run_agent_cleanup_turn_tasks(

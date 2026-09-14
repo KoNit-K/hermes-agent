@@ -1611,12 +1611,12 @@ class TurnRunner:
             result["final_response"] = repair_explicit_computer_use_media_paths(
                 result["final_response"], result.get("messages", []), history_offset=len(agent_history),
             )
-            from gateway.response_filters import recover_human_silence_response, turn_consumed_human_steer
+            from gateway.response_filters import recover_human_silence_response, stamp_consumed_human_steer
             result["final_response"] = recover_human_silence_response(
                 result, result["final_response"],
                 is_human_initiated=(
                     ctx.is_human_initiated
-                    or turn_consumed_human_steer(result, history_offset=len(agent_history))
+                    or stamp_consumed_human_steer(result, prior_messages=agent_history)
                 ),
             )
         ctx.result_holder[0] = result

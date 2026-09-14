@@ -15,6 +15,7 @@ from gateway.response_filters import (
     is_intentional_silence_response,
     recover_human_silence_response,
     turn_consumed_human_steer,
+    stamp_consumed_human_steer,
 )
 
 
@@ -247,6 +248,44 @@ def test_turn_consumed_human_steer_ignores_replayed_history():
     assert gateway_run.GatewayRunner._terminal_turn_is_human(consumed, _event(internal=True)) is True
 
 
+def test_consumed_steer_survives_compressed_transcript_index():
+    """Compression can move a retained steer before the pre-compression history length."""
+    prior = [{"role": "user", "content": f"h{i}"} for i in range(5)]
+    compressed = {
+        "history_offset": 5,
+        "final_response": "NO_REPLY",
+        "failed": False,
+        "messages": [
+            {"role": "user", "content": "summary"},
+            {"role": "user", "content": "live steer", "display_kind": "steer"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+    }
+    assert turn_consumed_human_steer(compressed) is False
+    assert turn_consumed_human_steer(compressed, prior_messages=prior) is True
+    assert stamp_consumed_human_steer(compressed, prior_messages=prior) is True
+    assert compressed["consumed_human_steer"] is True
+
+
+def test_answered_steer_does_not_override_terminal_queued_origin():
+    merged = {
+        "history_offset": 0,
+        "queued_terminal_is_human": False,
+        "messages": [
+            {"role": "user", "content": "opener steer", "display_kind": "steer"},
+            {"role": "assistant", "content": "answered"},
+            {"role": "user", "content": "internal followup", "display_kind": "internal_notification"},
+            {"role": "assistant", "content": "NO_REPLY"},
+        ],
+        "final_response": "NO_REPLY",
+        "failed": False,
+    }
+    assert gateway_run.GatewayRunner._terminal_turn_is_human(merged, _event()) is False
+    assert gateway_run.GatewayRunner._should_suppress_turn_silence(
+        merged, "NO_REPLY", is_human_initiated=False,
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_internal_turn_recovers_silence_after_consumed_steer(monkeypatch, tmp_path):
     """busy_input_mode=steer appends a current-turn steer row; that is a human follow-up."""
@@ -330,6 +369,75 @@ def test_finish_stream_recovers_silence_for_consumed_steer_not_opener_flag():
     )
     assert result["final_response"] == HUMAN_SILENCE_FALLBACK
     assert consumer.payload == HUMAN_SILENCE_FALLBACK
+
+
+def test_finish_stream_recovers_silence_after_compressed_consumed_steer():
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
+
+    prior = [{"role": "user", "content": f"h{i}"} for i in range(8)]
+    ctx = TurnContext(is_human_initiated=False, result_holder=[None], history=prior)
+    turn_runner = TurnRunner(MagicMock(), ctx)
+    result = {
+        "final_response": "NO_REPLY",
+        "failed": False,
+        "completed": True,
+        "history_offset": 8,
+        "messages": [
+            {"role": "user", "content": "compressed"},
+            {"role": "user", "content": "live", "display_kind": "steer"},
+        ],
+    }
+
+    class _Consumer:
+        def __init__(self):
+            self.payload = None
+
+        def finish(self, text=None):
+            self.payload = text
+
+    consumer = _Consumer()
+    turn_runner._finish_stream_consumer(result, prior, consumer)
+    assert result["consumed_human_steer"] is True
+    assert result["final_response"] == HUMAN_SILENCE_FALLBACK
+    assert consumer.payload == HUMAN_SILENCE_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_queued_first_delivery_recovers_compressed_consumed_steer():
+    """Queued first-response delivery must use the stamp, not TurnContext.internal."""
+    from gateway.turn_context import TurnContext
+
+    prior = [{"role": "user", "content": f"h{i}"} for i in range(6)]
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner._run_agent_stream_confirmed_final_delivery = lambda *a, **k: False
+    runner._should_suppress_turn_silence = gateway_run.GatewayRunner._should_suppress_turn_silence
+    runner._is_intentional_silence = gateway_run.GatewayRunner._is_intentional_silence
+    delivered = []
+
+    async def _deliver(text, **_kwargs):
+        delivered.append(text)
+
+    runner._deliver_queued_first_response = _deliver
+    turn_ctx = TurnContext(
+        is_human_initiated=False,
+        history=prior,
+        session_key="k",
+        stream_consumer_holder=[None],
+        source=_source(),
+        _status_thread_metadata={},
+    )
+    result = {
+        "final_response": "NO_REPLY",
+        "failed": False,
+        "history_offset": 6,
+        "messages": [
+            {"role": "user", "content": "compressed"},
+            {"role": "user", "content": "live", "display_kind": "steer"},
+        ],
+    }
+    await runner._run_agent_deliver_first_response(turn_ctx, None, result, result, None)
+    assert delivered and "no response was generated" in delivered[0]
 
 
 @pytest.mark.asyncio

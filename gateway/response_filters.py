@@ -114,17 +114,38 @@ def recover_human_silence_response(
     return text
 
 
-def turn_consumed_human_steer(agent_result: dict | None, *, history_offset: int | None = None) -> bool:
-    """True when this turn appended a live ``display_kind=steer`` user row.
+def _steer_row_contents(messages: Any) -> list[str]:
+    rows: list[str] = []
+    if not isinstance(messages, list):
+        return rows
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "user" and msg.get("display_kind") == "steer":
+            rows.append(msg.get("content") if isinstance(msg.get("content"), str) else "")
+    return rows
 
-    Rows at or before ``history_offset`` are replayed history and must not flip
-    an internal notification into a human-origin silence decision.
+
+def turn_consumed_human_steer(
+    agent_result: dict | None,
+    *,
+    prior_messages: list | None = None,
+    history_offset: int | None = None,
+) -> bool:
+    """True when this turn consumed a live ``display_kind=steer`` user row.
+
+    Prefer an explicit ``consumed_human_steer`` stamp or a comparison against
+    the pre-turn transcript. Do not rely on ``history_offset`` alone: compression
+    can move a retained steer before that index.
     """
     if not isinstance(agent_result, dict):
         return False
+    if agent_result.get("consumed_human_steer") is True:
+        return True
     messages = agent_result.get("messages")
     if not isinstance(messages, list):
         return False
+    if prior_messages is not None:
+        from collections import Counter
+        return bool(Counter(_steer_row_contents(messages)) - Counter(_steer_row_contents(prior_messages)))
     offset = history_offset if history_offset is not None else agent_result.get("history_offset", 0)
     try:
         offset = max(int(offset or 0), 0)
@@ -134,6 +155,21 @@ def turn_consumed_human_steer(agent_result: dict | None, *, history_offset: int 
         isinstance(msg, dict) and msg.get("role") == "user" and msg.get("display_kind") == "steer"
         for msg in messages[offset:]
     )
+
+
+def stamp_consumed_human_steer(
+    agent_result: dict | None,
+    *,
+    prior_messages: list | None = None,
+    history_offset: int | None = None,
+) -> bool:
+    """Record consumed-steer independently of later transcript-index rewrites."""
+    found = turn_consumed_human_steer(
+        agent_result, prior_messages=prior_messages, history_offset=history_offset,
+    )
+    if found and isinstance(agent_result, dict):
+        agent_result["consumed_human_steer"] = True
+    return found
 
 
 def is_partial_silence_marker(text: Any) -> bool:
