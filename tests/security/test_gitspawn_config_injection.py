@@ -104,15 +104,19 @@ def _make_malicious_repo(tmp: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "-C", str(repo), *ident, "commit", "-qm", "init"], check=True, env=clean)
 
     marker = tmp / "MARKER"
+    # Git-for-Windows runs config commands via ``sh -c``. Backslash paths are
+    # eaten as POSIX escapes (``\U``, ``\A``, …); POSIX-style markers keep the
+    # unhardened fixture able to write MARKER files.
+    marker_cmd = marker.as_posix()
     hooks = repo / "evil-hooks"
     hooks.mkdir()
     hook = hooks / "post-checkout"
-    hook.write_text(f"#!/bin/sh\ntouch {marker}.hook\n")
+    hook.write_text(f"#!/bin/sh\ntouch {marker_cmd}.hook\n")
     hook.chmod(0o755)
-    fsmonitor = _quote_git_config_value(f"touch {marker}.fsmonitor")
+    fsmonitor = _quote_git_config_value(f"touch {marker_cmd}.fsmonitor")
     hooks_path = _quote_git_config_value(str(hooks))
-    external_diff = _quote_git_config_value(f"touch {marker}.extdiff")
-    textconv = _quote_git_config_value(f"sh -c 'touch {marker}.textconv; cat'")
+    external_diff = _quote_git_config_value(f"touch {marker_cmd}.extdiff")
+    textconv = _quote_git_config_value(f"sh -c 'touch {marker_cmd}.textconv; cat'")
     with (repo / ".git" / "config").open("a") as f:
         f.write(f"[core]\n\tfsmonitor = {fsmonitor}\n\thooksPath = {hooks_path}\n")
         f.write(f'[diff "evil"]\n\tcommand = {external_diff}\n')
@@ -139,15 +143,19 @@ def malicious_repo(tmp_path):
 
 
 def test_malicious_repo_config_quotes_temporary_paths(tmp_path):
-    nested_tmp = tmp_path / 'windows\\path"quoted'
-    nested_tmp.mkdir()
+    # NTFS cannot store a raw ``\`` in a filename; pathlib also treats ``\`` as
+    # a separator on Windows. Join a quoted directory that actually exists so
+    # the path is legal and still exercises git-config quoting of ``\`` / ``"``.
+    nested_tmp = Path(os.path.join(str(tmp_path), "windows", 'path"quoted'))
+    nested_tmp.mkdir(parents=True)
     repo, marker = _make_malicious_repo(nested_tmp)
+    marker_cmd = marker.as_posix()
 
     expected = {
-        "core.fsmonitor": f"touch {marker}.fsmonitor",
+        "core.fsmonitor": f"touch {marker_cmd}.fsmonitor",
         "core.hooksPath": str(repo / "evil-hooks"),
-        "diff.evil.command": f"touch {marker}.extdiff",
-        "diff.evil.textconv": f"sh -c 'touch {marker}.textconv; cat'",
+        "diff.evil.command": f"touch {marker_cmd}.extdiff",
+        "diff.evil.textconv": f"sh -c 'touch {marker_cmd}.textconv; cat'",
     }
     for key, value in expected.items():
         result = subprocess.run(
