@@ -125,8 +125,8 @@ def test_salvaged_path_uv_is_retained_only_after_version_succeeds(source: str):
     """A PATH uv.exe becomes managed only after its copied binary runs."""
     body = _install_uv_body(source)
     copied = body.index("Copy-Item $existingUv $managedUv -Force")
-    version_probe = body.index("$salvagedVersion = & $managedUv --version", copied)
-    exit_check = body.index("if ($LASTEXITCODE -ne 0)", version_probe)
+    version_probe = body.index("$salvagedVersion = Test-ManagedUvBinary $managedUv", copied)
+    exit_check = body.index("if (-not $salvagedVersion)", version_probe)
     assert copied < version_probe < exit_check, (
         "the copied PATH uv.exe must be retained only when the managed copy "
         "returns success from `uv --version`"
@@ -138,8 +138,8 @@ def test_broken_chocolatey_relative_shim_is_removed_after_copy(source: str):
     body = _install_uv_body(source)
     rejected_copy = re.search(
         r"Copy-Item \$existingUv \$managedUv -Force\s+"
-        r"\$salvagedVersion = & \$managedUv --version\s+"
-        r"if \(\$LASTEXITCODE -ne 0\) \{\s+"
+        r"\$salvagedVersion = Test-ManagedUvBinary \$managedUv\s+"
+        r"if \(-not \$salvagedVersion\) \{\s+"
         r"Write-Info .+?\s+"
         r"Remove-Item \$managedUv -Force -ErrorAction SilentlyContinue\s+\}",
         body,
@@ -151,6 +151,18 @@ def test_broken_chocolatey_relative_shim_is_removed_after_copy(source: str):
     )
     assert "Remove-Item $managedUv -Force -ErrorAction SilentlyContinue" in body, (
         "the rejected managed copy must be removed"
+    )
+
+
+def test_existing_managed_uv_is_validated_before_early_return(source: str):
+    """Rerun must not trust a leftover broken shim at the managed path."""
+    body = _install_uv_body(source)
+    early = body.index("if (Test-Path $managedUv)")
+    probe = body.index("$existingVersion = Test-ManagedUvBinary $managedUv", early)
+    remove = body.index("Remove-Item $managedUv -Force -ErrorAction SilentlyContinue", probe)
+    assert early < probe < remove, (
+        "an existing managed uv.exe must be validated and removed on failure "
+        "before Install-Uv continues the install ladder"
     )
 
 
@@ -302,3 +314,79 @@ exit 1
     accepted_managed = tmp_path / "valid-home" / "bin" / "uv.exe"
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
     assert accepted_managed.exists(), "a valid PATH uv must remain managed"
+
+
+@pytestmark_windows
+def test_rerun_rejects_broken_shim_already_at_managed_path(tmp_path: Path) -> None:
+    """A leftover broken managed uv.exe must be removed so the ladder can continue."""
+    powershell = shutil.which("powershell")
+    if not powershell:
+        pytest.skip("Windows PowerShell is required")
+
+    runner = tmp_path / "installer-runner.exe"
+    broken = tmp_path / "chocolatey" / "bin" / "uv.exe"
+    valid = tmp_path / "valid-uv.exe"
+    _compile_uv_candidate(powershell, runner, 0)
+    _compile_uv_candidate(powershell, broken, 1, relative_target=True)
+    (broken.parent.parent / "lib").mkdir()
+    (broken.parent.parent / "lib" / "uv.exe").write_bytes(b"target present in shim home")
+    _compile_uv_candidate(powershell, valid, 0)
+
+    hermes_home = tmp_path / "rerun-home"
+    managed = hermes_home / "bin" / "uv.exe"
+    managed.parent.mkdir(parents=True)
+    shutil.copy2(broken, managed)
+
+    harness = tmp_path / "run-install-uv-rerun.ps1"
+    harness.write_text(
+        r'''param(
+    [string]$InstallPs1,
+    [string]$HermesHome,
+    [string]$Candidate,
+    [string]$Runner
+)
+
+. $InstallPs1 -HermesHome $HermesHome -InstallDir (Join-Path $HermesHome 'install')
+
+function Get-PowerShellHostExe { return $Runner }
+function Get-Command {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0)] [string]$Name,
+        [Parameter(ValueFromRemainingArguments=$true)] [object[]]$Rest
+    )
+    if ($Name -eq 'uv') { return [pscustomobject]@{ Source = $Candidate } }
+    return $null
+}
+
+if (Install-Uv) { exit 0 }
+exit 1
+''',
+        encoding="ascii",
+    )
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness),
+            "-InstallPs1",
+            str(_INSTALL_PS1),
+            "-HermesHome",
+            str(hermes_home),
+            "-Candidate",
+            str(valid),
+            "-Runner",
+            str(runner),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert managed.exists(), "rerun should replace the broken managed shim"
+    assert managed.read_bytes() == valid.read_bytes()
