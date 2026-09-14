@@ -3,7 +3,8 @@
 Each cached ``AIAgent`` pins its full live transcript (tens of MB on a tool-heavy
 session); the LRU cap counts entries, not bytes, and the idle TTL defers eviction
 for busy sessions, so neither sees actual memory use.  This module supplies that
-signal — own anonymous RSS against a budget derived from the cgroup limit — and
+signal — cgroup memory usage (including child processes) against a budget derived
+from the cgroup limit — and
 ``GatewayRunner`` sheds LRU transcripts via soft eviction (rebuilt from the
 persisted session next turn).  Pure/read-only; config under ``agent.agent_cache``.
 """
@@ -81,6 +82,32 @@ def _cgroup_limit_bytes() -> Optional[int]:
     return None
 
 
+def _cgroup_memory_current_bytes() -> Optional[int]:
+    """Memory charged to this cgroup, including gateway child processes.
+
+    ``memory.current`` is cgroup v2 only.  If its path is unavailable (non-Linux,
+    cgroup v1, or a restricted mount), callers retain the established per-process
+    RSS signal rather than treating an unknown value as pressure.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        from gateway.cgroup_cleanup import _own_cgroup_path
+
+        own = _own_cgroup_path()
+    except Exception:
+        return None
+    if not own:
+        return None
+    try:
+        current = int(
+            Path(f"/sys/fs/cgroup{own}/memory.current").read_text(encoding="utf-8").strip()
+        )
+    except (OSError, ValueError):
+        return None
+    return current if current > 0 else None
+
+
 def _total_memory_bytes() -> Optional[int]:
     try:
         return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
@@ -152,6 +179,19 @@ def read_anon_rss_mb() -> Optional[int]:
         return int(psutil.Process(os.getpid()).memory_info().rss / _BYTES_PER_MB)
     except Exception:
         return None
+
+
+def read_memory_pressure_mb() -> Optional[int]:
+    """Memory signal for cache pressure, or None when it cannot be measured.
+
+    Prefer cgroup v2's ``memory.current`` so memory used by code kernels and
+    terminal children in the gateway's unit is visible.  Preserve the previous
+    anonymous-RSS behavior whenever cgroup accounting is unavailable.
+    """
+    current = _cgroup_memory_current_bytes()
+    if current is not None:
+        return current // _BYTES_PER_MB
+    return read_anon_rss_mb()
 
 
 def transcript_persistence_caught_up(agent: Any) -> bool:
