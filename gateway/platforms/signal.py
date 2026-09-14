@@ -300,8 +300,11 @@ class SignalAdapter(BasePlatformAdapter):
             response: Optional[httpx.Response] = None
             try:
                 logger.debug("Signal SSE: connecting to %s", url)
-                async with self.client.stream("GET", url, headers={"Accept": "text/event-stream"},
-                                              timeout=None) as stream_response:
+                async with self.client.stream(
+                    "GET", url,
+                    headers={"Accept": "text/event-stream", "Connection": "close"},
+                    timeout=None,
+                ) as stream_response:
                     response = stream_response
                     self._sse_response = response
                     backoff = SSE_RETRY_DELAY_INITIAL  # Reset on successful connection

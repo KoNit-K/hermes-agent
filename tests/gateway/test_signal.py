@@ -288,6 +288,8 @@ class TestSignalSSECleanup:
 
         old_response.aclose.assert_awaited_once()
         assert adapter._sse_response is newer_response
+        stream_kwargs = adapter.client.stream.call_args.kwargs
+        assert stream_kwargs["headers"]["Connection"] == "close"
 
 
 # ---------------------------------------------------------------------------
