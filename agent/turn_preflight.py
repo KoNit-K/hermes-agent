@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.context_engine import automatic_compaction_status_message
 from agent.conversation_compression import (
-    PRE_API_COMPRESSION_STATUS_TEMPLATE, compression_blocked_transiently,
+    COMPACTION_STATUS, PRE_API_COMPRESSION_STATUS_TEMPLATE, compression_blocked_transiently,
     compression_skipped_due_to_lock, context_compression_timed_out,
     conversation_history_after_compression,
 )
@@ -298,6 +298,20 @@ def compress_after_tool_results(
         # future blocked turn can warn again.
         _clear_overflow_warn(agent)
         agent._safe_print("  ⟳ compacting context…")
+        # The compressor performs feasibility and lease checks before it emits
+        # its own status. Publish the visible compaction phase first: those
+        # checks can block after a tool result, leaving remote clients with a
+        # bare working indicator for minutes.
+        _post_tool_status = automatic_compaction_status_message(
+            _compressor,
+            phase="post_tool",
+            default_message=COMPACTION_STATUS,
+            approx_tokens=_real_tokens,
+            message_count=len(messages),
+            model=agent.model,
+        )
+        if _post_tool_status:
+            agent._emit_status(_post_tool_status)
         _post_tool_input = messages
         # Pass overhead-aware _real_tokens, not last_prompt_tokens (0 in the
         # no-usage fallback), so the overflow guard sees the true size.

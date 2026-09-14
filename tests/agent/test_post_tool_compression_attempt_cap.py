@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent.turn_preflight import compress_after_tool_results
 from run_agent import AIAgent
 
 
@@ -152,6 +153,42 @@ def _run_tool_loop(agent, n_tool_iterations: int):
 
 
 class TestPostToolCompressionAttemptCap:
+    def test_post_tool_compression_announces_before_blocking(self, agent):
+        """The remote client gets a compacting frame before compression can block."""
+        statuses = []
+        agent._emit_status = statuses.append
+        del agent.context_compressor.get_automatic_compaction_status_message
+        messages = [
+            {"role": "user", "content": "save this"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "call-1", "content": "saved"},
+        ]
+
+        def assert_status_announced(_messages):
+            assert statuses == [
+                "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
+            ]
+
+        agent._compress_context = MagicMock(side_effect=lambda received, *_args, **_kwargs: (
+            assert_status_announced(received) or (received, "compressed prompt")
+        ))
+        verdict = compress_after_tool_results(
+            agent,
+            messages=messages,
+            system_message="You are helpful.",
+            user_message=messages[0],
+            active_system_prompt="You are helpful.",
+            conversation_history=messages,
+            compression_attempts=0,
+            max_compression_attempts=3,
+            effective_task_id="test",
+            final_response="",
+            turn_exit_reason=None,
+        )
+
+        assert verdict.compression_attempts == 1
+        agent._compress_context.assert_called_once()
+
     def test_post_tool_gate_waits_for_usage_after_native_checkpoint(self, agent):
         agent.context_compressor.awaiting_real_usage_after_compression = True
 
