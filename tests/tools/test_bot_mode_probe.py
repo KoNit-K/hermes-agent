@@ -68,6 +68,25 @@ def test_emits_for_named_profile_with_own_handle(tmp_path):
     assert "`@coder`" not in roster_block
 
 
+def test_delivery_turn_reply_is_returned_to_the_sending_teammate(tmp_path):
+    """A Bot Chat delivery's stdout is the sender's completion payload.
+
+    The protocol must therefore tell the recipient to answer directly in the
+    delivery turn, rather than dispatching a second message_agent call that
+    races the delivery transport and leaves the original sender without the
+    intended reply.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    _make_bot_profile(home, "researcher", managed=True)
+
+    section = bot_mode_probe.get_bot_mode_protocol_section(home)
+
+    assert 'When YOU receive a "Message from 🤖 <name> (@<handle>):"' in section
+    assert "answer them directly in this turn" in section
+    assert "reply concisely via message_agent to their handle" not in section
+
+
 def test_roster_lines_carry_roles(tmp_path):
     """Bots must know WHO to message: the roster carries title/description."""
     import textwrap as _tw

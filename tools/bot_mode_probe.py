@@ -217,10 +217,11 @@ def _build_section(home: Path) -> str:
         "ONE clearly relevant teammate; don't fan out to several unless the user "
         "explicitly asked.\n"
         f'When YOU receive a "Message from 🤖 <name> (@<handle>):" message, a '
-        "teammate agent is talking to you (not the user): address them, reply "
-        "concisely via message_agent to their handle, and if it is a pure FYI "
-        "with nothing to add, staying silent is fine — never ping-pong "
-        "acknowledgements.\n"
+        "teammate agent is talking to you (not the user): answer them directly "
+        "in this turn. Your final response is delivered back to that teammate "
+        "as the delivery reply; do not call message_agent for that reply. If it "
+        "is a pure FYI with nothing to add, staying silent is fine — never "
+        "ping-pong acknowledgements.\n"
         f"You are `@{_handle(me)}`. Your teammates (live roster; roles from their "
         "profiles):\n"
         f"{roster_block}"
@@ -303,7 +304,7 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
         surface["roster"] = []
     # Protocol-text version salt: bumping it refreshes every eternal Bot Chat
     # prompt ONCE so existing bots adopt a new protocol section.
-    surface["protocol_version"] = 2
+    surface["protocol_version"] = 3
     # Peer gateways and the Desktop relay roster are part of the messaging
     # surface too: registering a peer or (dis)connecting a machine must show up.
     surface["peers"] = _peers(root)
