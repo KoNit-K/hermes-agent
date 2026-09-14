@@ -192,12 +192,35 @@ def _installed_service(home: Path) -> Optional[tuple[str, bool]]:
 
 
 def _systemd_service_user(home: Path, service: Optional[tuple[str, bool]]) -> Optional[str]:
-    """Read ``User=`` before migration removes a system-scope unit."""
+    """Read ``User=`` before migration removes a system-scope unit.
+
+    A system-scope unit with no ``User=`` directive runs as root. Record that
+    explicitly so later ``systemd_install()`` does not hit the implicit-root refusal.
+    """
     if service != ("systemd", True):
         return None
     from hermes_cli import gateway as gw
     with _home_env(home):
-        return gw._read_systemd_user_from_unit(gw.get_systemd_unit_path(system=True))
+        user = gw._read_systemd_user_from_unit(gw.get_systemd_unit_path(system=True))
+    return user or "root"
+
+
+def _username_for_uid(uid: int) -> Optional[str]:
+    import pwd
+    with contextlib.suppress(KeyError, OverflowError, OSError):
+        return pwd.getpwuid(uid).pw_name
+    return None
+
+
+def _run_as_user_from_record(rec: dict) -> Optional[str]:
+    """Prefer ``run_as_user``; v1 manifests only stored ``uid``."""
+    run_as_user = rec.get("run_as_user")
+    if isinstance(run_as_user, str) and run_as_user.strip():
+        return run_as_user.strip()
+    uid = rec.get("uid")
+    if isinstance(uid, int):
+        return _username_for_uid(uid)
+    return None
 
 
 def _service_op(kind: str, system: bool, verb: str, home: Path, *, run_as_user: Optional[str] = None) -> None:
@@ -718,9 +741,8 @@ def rollback_migration(default_home: Optional[Path] = None) -> bool:
             service = _secondary_service(rec)
             if service is not None:
                 kind, system = service
-                run_as_user = rec.get("run_as_user")
                 _service_op(kind, system, "install", home,
-                            run_as_user=run_as_user if isinstance(run_as_user, str) else None)
+                            run_as_user=_run_as_user_from_record(rec))
                 _service_op(kind, system, "start", home)
                 print(f"  ✓ {name}: reinstalled and started its {kind} service")
             elif rec.get("pid"):

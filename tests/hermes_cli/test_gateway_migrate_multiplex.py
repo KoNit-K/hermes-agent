@@ -178,6 +178,48 @@ def test_migration_preserves_root_system_service_user_for_default_install(fleet,
     assert installs == [("systemd", True, "root")]
 
 
+def test_systemd_service_user_maps_absent_user_on_system_unit_to_root(tmp_path, monkeypatch):
+    """A system unit without User= runs as root; record that before install/forwarding."""
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text("[Service]\nExecStart=/usr/bin/hermes gateway run\n", encoding="utf-8")
+    monkeypatch.setattr("hermes_cli.gateway.get_systemd_unit_path", lambda system=False: unit)
+    assert gm._systemd_service_user(tmp_path, ("systemd", True)) == "root"
+    unit.write_text("[Service]\nUser=alice\n", encoding="utf-8")
+    assert gm._systemd_service_user(tmp_path, ("systemd", True)) == "alice"
+    assert gm._systemd_service_user(tmp_path, ("systemd", False)) is None
+    assert gm._systemd_service_user(tmp_path, ("launchd", False)) is None
+
+
+def test_rollback_v1_manifest_resolves_uid_when_run_as_user_absent(fleet, monkeypatch):
+    """Pre-fix manifests store uid but not run_as_user; uid 0 must reinstall as explicit root."""
+    gm._write_manifest(fleet.root, {
+        "version": 1,
+        "flag_was": False,
+        "default": {"service": None},
+        "secondaries": [{
+            "profile": "coder",
+            "home": str(fleet.root / "profiles/coder"),
+            "pid": None,
+            "service": {"kind": "systemd", "system": True},
+            "uid": 0,
+        }],
+    })
+    fleet.services.clear()
+    fleet.pids.clear()
+    installs = []
+    real_op = gm._service_op
+
+    def _op(kind, system, verb, home, *, run_as_user=None):
+        if verb == "install":
+            installs.append((kind, system, run_as_user))
+        real_op(kind, system, verb, home, run_as_user=run_as_user)
+
+    monkeypatch.setattr(gm, "_service_op", _op)
+    assert gm.rollback_migration(fleet.root) is True
+    assert installs == [("systemd", True, "root")]
+    assert fleet.services["coder"] == ("systemd", True)
+
+
 def test_rollback_with_failed_secondary_still_restarts_default_and_keeps_manifest(fleet, monkeypatch):
     assert gm.apply_migration(gm.build_migration_plan(), served_wait=5.0) is True
     fleet.ops.clear()
