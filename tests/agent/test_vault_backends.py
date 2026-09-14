@@ -20,6 +20,7 @@ import pytest
 
 from agent.vault_backends import unlock as unlock_mod
 from agent.vault_backends.bitwarden import BitwardenLoginBackend
+from agent.vault_backends.onepassword import OnePasswordLoginBackend
 
 # A stand-in `bw` that mimics the three commands the backend uses and the real CLI's password contract
 # (bw 2026.x rejects a piped password: "Master password is required"; it reads --passwordenv <VAR>).
@@ -71,6 +72,38 @@ def _enabled(exe):
     the sibling's own binding — patch both so the fake is the only backend anywhere."""
     backend = BitwardenLoginBackend({"enabled": True, "binary_path": str(exe)})
     return patch("agent.vault_backends.base.enabled_backends", return_value=[backend]), backend
+
+
+def test_onepassword_lists_all_valid_normalized_origins_and_other_backends_stay_single_origin():
+    """1Password can attach several website URLs to a Login; preserve every usable origin.
+
+    Local and Bitwarden retain their established single ``meta.origin`` contract rather than
+    growing a second metadata field merely because 1Password needs it.
+    """
+    op = OnePasswordLoginBackend()
+    op.is_unlocked = lambda: True
+    op._run = lambda *args: json.dumps([{
+        "id": "multi", "title": "Example", "created_at": "2026-01-01T00:00:00Z",
+        "urls": [
+            {"href": "https://PRIMARY.example/login"},
+            {"href": "not an origin"},
+            {"href": "https://alt.example:443/account"},
+            {"href": "https://primary.example/again"},
+        ],
+    }])
+    [op_meta] = op.list_items()
+    assert op_meta.origin == "https://primary.example"
+    assert op_meta.origins == ("https://primary.example", "https://alt.example")
+
+    bw = BitwardenLoginBackend()
+    bw.is_unlocked = lambda: True
+    bw._run = lambda *args: json.dumps([{
+        "id": "single", "type": 1, "name": "Example",
+        "login": {"uris": [{"uri": "https://example.com/login"}]},
+    }])
+    [bw_meta] = bw.list_items()
+    assert bw_meta.origin == "https://example.com"
+    assert bw_meta.origins is None
 
 
 def test_locked_manager_is_reported_not_prompted_when_headless(fake_bw, monkeypatch):

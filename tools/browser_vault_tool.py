@@ -11,8 +11,9 @@ tools):
 - ``browser_vault_fill``  → server-side fill of the CURRENT page from a vault
   handle: the password field for logins, card fields for payment items (after
   the user confirms), address fields for address items. The secret is
-  resolved locally, the page origin must EXACTLY match the item's bound
-  origin (pre-checked AND re-asserted synchronously inside the fill script),
+  resolved locally, the page origin must match the item's bound origin (or,
+  for 1Password Logins, one of its listed origins) pre-checked AND
+  re-asserted synchronously inside the fill script,
   the field is chosen by the ported login-control classifier, injection runs
   exclusively over the supervisor CDP WebSocket (never argv), and the tool
   result reports only ``{filled_fields, kind, origin, success}`` — the
@@ -229,6 +230,8 @@ def browser_vault_list() -> str:
         for meta in metas:
             entry = {"handle": meta.id, "backend": backend.name, "label": meta.label, "kind": meta.kind,
                      "origin": meta.origin, "available": meta.kind == "login" or bool(meta.origin)}
+            if backend.name == "onepassword" and meta.origins is not None:
+                entry["origins"] = list(meta.origins)
             if meta.has_otp or backend.needs_unlock:
                 entry["two_factor"] = "automatic" if meta.has_otp else "automatic if the manager stores a TOTP seed, else the user is asked"
             if meta.identifier:
@@ -438,12 +441,23 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
 
     # ── Origin binding pre-check (cheap early exit; the authoritative check
     # runs synchronously inside the fill script itself) ──────────────────────
-    page_origin = _focus_bound_origin(effective_task_id, str(meta.origin), meta.kind) or _current_page_origin(effective_task_id)
+    # ``origins`` is opt-in external-manager metadata; legacy items remain
+    # strictly bound to their sole ``origin``.
+    allowed_origins = (
+        list(meta.origins)
+        if backend.name == "onepassword" and meta.kind == "login" and meta.origins is not None
+        else [str(meta.origin)]
+    )
+
+    # Resolve the page the user is currently viewing before any tab focus.
+    # The same selected origin is asserted again inside the secret-bearing
+    # fill script.
+    page_origin = _current_page_origin(effective_task_id)
     if not page_origin:
         return json.dumps(
             {"success": False, "error": "Could not determine the current page origin. Navigate to the login page first."}
         )
-    if page_origin != meta.origin:
+    if page_origin not in allowed_origins:
         return json.dumps(
             {
                 "success": False,
@@ -455,6 +469,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
                 ),
             }
         )
+    page_origin = _focus_bound_origin(effective_task_id, page_origin, meta.kind) or page_origin
 
     # ── Inspect + classify page controls ────────────────────────────────────
     nonce = secrets.token_hex(8)  # binds this fill to THIS inspection's stamps
@@ -505,7 +520,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
 
     try:
         fill_result = _eval_js_secret(
-            effective_task_id, build_fill_js(fills, expected_origin=str(meta.origin), nonce=nonce)
+            effective_task_id, build_fill_js(fills, expected_origin=page_origin, nonce=nonce)
         )
     except Exception as exc:
         # Strip any secret material from exception text before surfacing.
@@ -529,7 +544,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
                 "error_type": "origin_changed",
                 "error": (
                     "Refused: the page navigated away from the bound origin "
-                    f"({meta.origin}) before the fill could run "
+                    f"({page_origin}) before the fill could run "
                     f"(now on {parsed.get('found') or 'unknown'}). "
                     "Nothing was written."
                 ),
@@ -538,7 +553,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     filled = parsed.get("filled", 0) if isinstance(parsed, dict) else 0
 
     out = {"success": bool(filled), "filled_fields": int(filled), "backend": backend.name,
-           "kind": meta.kind, "origin": meta.origin}
+           "kind": meta.kind, "origin": page_origin}
     if meta.kind == "login":
         out["next"] = ("Submit. If the site then asks for a verification code, call browser_vault_enter_code with this handle"
                        + (" (a code will be generated automatically)." if meta.has_otp else "."))
@@ -568,7 +583,8 @@ BROWSER_VAULT_LIST_SCHEMA = {
     "name": "browser_vault_list",
     "description": (
         "ALWAYS call this first when a page asks for a password, card or address. Lists saved website logins, "
-        "payment cards and addresses as handles with metadata (kind, label, backend, bound origin; logins also "
+        "payment cards and addresses as handles with metadata (kind, label, backend, bound origin; 1Password "
+        "logins may list alternate allowed origins; logins also "
         "carry identifier + identifier_type so you can type the username yourself with the browser's input tool). "
         "Secret values are NEVER returned. Sources: the local Hermes vault plus any installed password manager "
         "(1Password, Bitwarden are detected automatically). A locked manager appears under `locked`; call "
@@ -603,8 +619,8 @@ BROWSER_VAULT_FILL_SCHEMA = {
         "the password field (type the identifier/username yourself first with the browser's input tool); a "
         "payment item fills card number/name/expiry/CVC after the user confirms in their UI; an address item "
         "fills the address fields. Values are resolved server-side and never appear in the conversation. "
-        "Refused unless the page origin exactly matches the item's bound origin (re-checked atomically at "
-        "fill time). If a password manager is locked the user is prompted to unlock first. Never retry a "
+        "Refused unless the page origin matches the item's bound origin (or a listed 1Password alternate, "
+        "re-checked atomically at fill time). If a password manager is locked the user is prompted to unlock first. Never retry a "
         "payment_declined result."
     ),
     "parameters": {

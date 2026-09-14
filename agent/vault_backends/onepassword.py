@@ -105,13 +105,14 @@ class OnePasswordLoginBackend(LoginBackend):
         out: List[VaultItemMeta] = []
         for item in raw if isinstance(raw, list) else []:
             urls = [str(u["href"]) for u in item.get("urls") or [] if isinstance(u, dict) and u.get("href")]
-            origin = _first_origin(urls)
-            if not origin:
+            origins = _origins(urls)
+            if not origins:
                 continue
             username = str(item.get("additional_information") or "").strip() or None
             out.append(VaultItemMeta(
-                id=f"{self.prefix}{item.get('id')}", kind="login", label=str(item.get("title") or origin),
-                origin=origin, created_at=str(item.get("created_at") or ""),
+                id=f"{self.prefix}{item.get('id')}", kind="login", label=str(item.get("title") or origins[0]),
+                origin=origins[0], created_at=str(item.get("created_at") or ""),
+                origins=tuple(origins),
                 identifier_type="username" if username else None, identifier=username))
         return out
 
@@ -131,10 +132,14 @@ class OnePasswordLoginBackend(LoginBackend):
         return code if code.isdigit() else None
 
 
-def _first_origin(urls: List[str]) -> Optional[str]:
+def _origins(urls: List[str]) -> List[str]:
+    """Return each valid 1Password login URL origin once, preserving URL order."""
+    origins: List[str] = []
     for u in urls:
         try:
-            return normalize_origin(u)
+            origin = normalize_origin(u)
         except Exception:
             continue
-    return None
+        if origin not in origins:
+            origins.append(origin)
+    return origins

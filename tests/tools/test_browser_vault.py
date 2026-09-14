@@ -34,6 +34,7 @@ from agent.vault_login_classifier import (  # noqa: E402
 )
 from agent.vault_store import (  # noqa: E402
     VaultError,
+    VaultItemMeta,
     VaultStore,
     normalize_origin,
     scrub_secret_from_text,
@@ -301,6 +302,112 @@ class TestBrowserVaultTools:
         assert out["success"] is False
         assert "Refused" in out["error"]
         assert "s3cret-pw" not in json.dumps(out)
+
+    def test_external_login_lists_alternate_origins_but_legacy_login_does_not(self):
+        from agent.vault_store import VaultItemMeta
+        from tools import browser_vault_tool
+
+        external = VaultItemMeta(
+            id="op:item", kind="login", label="External", origin="https://primary.example",
+            origins=("https://primary.example", "https://alt.example"), created_at="",
+        )
+        legacy = VaultItemMeta(
+            id="vault_legacy", kind="login", label="Legacy", origin="https://legacy.example", created_at="",
+        )
+
+        class Backend:
+            name = "onepassword"
+            display_name = "1Password"
+            needs_unlock = False
+
+            def is_unlocked(self):
+                return True
+
+            def list_items(self):
+                return [external, legacy]
+
+        with patch("agent.vault_backends.enabled_backends", return_value=[Backend()]):
+            items = json.loads(browser_vault_tool.browser_vault_list())["items"]
+
+        assert items[0]["origins"] == ["https://primary.example", "https://alt.example"]
+        assert "origins" not in items[1]
+
+    def test_fill_allows_an_external_login_alternate_origin(self):
+        from agent.vault_store import VaultItemMeta
+        from tools import browser_vault_tool
+
+        meta = VaultItemMeta(
+            id="op:item", kind="login", label="External", origin="https://primary.example",
+            origins=("https://primary.example", "https://alt.example"), created_at="",
+        )
+        controls = [{"autocomplete": "current-password", "formIndex": 0, "index": 0,
+                     "label": "", "name": "password", "type": "password"}]
+
+        class Backend:
+            name = "onepassword"
+            display_name = "1Password"
+            needs_unlock = False
+
+            def is_unlocked(self):
+                return True
+
+            def get_meta(self, handle):
+                return meta if handle == meta.id else None
+
+            def resolve_password(self, handle):
+                return "s3cret-pw"
+
+        secret_eval = []
+        with patch("agent.vault_backends.backend_for_handle", return_value=Backend()), \
+             patch.object(browser_vault_tool, "_current_page_origin", return_value="https://alt.example"), \
+             patch.object(browser_vault_tool, "_focus_bound_origin", return_value=None), \
+             patch.object(browser_vault_tool, "_eval_js", return_value={"success": True, "result": json.dumps(controls)}), \
+             patch.object(browser_vault_tool, "_eval_js_secret", side_effect=lambda *_args: secret_eval.append(_args[1]) or {"success": True, "result": json.dumps({"filled": 1})}):
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+
+        assert out["success"] is True
+        assert out["origin"] == "https://alt.example"
+        assert '"https://alt.example"' in secret_eval[0]
+
+    def test_external_login_refuses_a_non_member_origin(self):
+        from agent.vault_store import VaultItemMeta
+        from tools import browser_vault_tool
+
+        meta = VaultItemMeta(
+            id="op:item", kind="login", label="External", origin="https://primary.example",
+            origins=("https://primary.example", "https://alt.example"), created_at="",
+        )
+
+        class Backend:
+            name = "onepassword"
+            display_name = "1Password"
+            needs_unlock = False
+
+            def is_unlocked(self):
+                return True
+
+            def get_meta(self, handle):
+                return meta if handle == meta.id else None
+
+        with patch("agent.vault_backends.backend_for_handle", return_value=Backend()), \
+             patch.object(browser_vault_tool, "_current_page_origin", return_value="https://evil.example"), \
+             patch.object(browser_vault_tool, "_focus_bound_origin") as focus:
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+
+        assert out["success"] is False
+        assert out["error_type"] == "origin_mismatch"
+        focus.assert_not_called()
+
+    def test_legacy_login_keeps_single_origin_policy(self, store):
+        from tools import browser_vault_tool
+
+        meta = _add_login(store, origin="https://legacy.example")
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_current_page_origin", return_value="https://other.example"):
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+
+        assert out["success"] is False
+        assert out["error_type"] == "origin_mismatch"
 
     def test_fill_unknown_handle(self, store):
         from tools import browser_vault_tool
