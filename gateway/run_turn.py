@@ -276,6 +276,17 @@ class GatewayTurnMixin:
         except Exception:
             return False
 
+    @staticmethod
+    def _should_suppress_turn_silence(agent_result, response, *, is_human_initiated: bool) -> bool:
+        try:
+            from gateway.response_filters import should_suppress_turn_silence
+            return should_suppress_turn_silence(
+                agent_result, response, is_human_initiated=is_human_initiated,
+            )
+        except Exception:
+            # Fail open: unexpected response-filter errors must never black-hole a user turn.
+            return False
+
     async def _hmwa_resolve_session(self, event, source):
         """Resolve ``source`` to its session entry (topic recovery, internal-route guards, Telegram
         topic-binding heal). Returns ``(source, session_entry, session_key)`` or ``None`` to drop
@@ -1360,7 +1371,7 @@ class GatewayTurnMixin:
                 await _typing_adapter.stop_typing(source.chat_id)
 
     async def _hmwa_shape_agent_response(
-        self, agent_result, source, history, session_entry, session_key,
+        self, agent_result, event, source, history, session_entry, session_key,
         _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
     ):
         """Turn the raw agent result into the outbound text: sentinel/silence handling, response
@@ -1376,7 +1387,11 @@ class GatewayTurnMixin:
         # and would be delivered verbatim (peer agents would ingest it as a completed turn).
         if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
             response = ""
-        _intentional_silence = self._is_intentional_silence(agent_result, response)
+        _intentional_silence = self._should_suppress_turn_silence(
+            agent_result, response, is_human_initiated=not bool(getattr(event, "internal", False)),
+        )
+        if not _intentional_silence and self._is_intentional_silence(agent_result, response):
+            response = ""
 
         # "(empty)" = the model produced no visible content after exhausting all retries.
         if response == "(empty)" and not _intentional_silence:
@@ -2024,6 +2039,7 @@ class GatewayTurnMixin:
                 persist_user_timestamp=prepared.persist_user_timestamp,
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 persist_user_display_metadata={"gateway_input_owner": prepared.persistence_owner},
+                is_human_initiated=not bool(getattr(event, "internal", False)),
                 message_type=event.message_type,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
@@ -2044,7 +2060,7 @@ class GatewayTurnMixin:
                 return None
 
             response, _intentional_silence, agent_messages = await self._hmwa_shape_agent_response(
-                agent_result, source, history, session_entry, session_key,
+                agent_result, event, source, history, session_entry, session_key,
                 _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
             )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
@@ -3486,10 +3502,25 @@ class GatewayTurnMixin:
             _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
         )
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
-        if self._is_intentional_silence(_delivery_result, first_response):
+        if self._should_suppress_turn_silence(
+            _delivery_result, first_response, is_human_initiated=turn_ctx.is_human_initiated,
+        ):
             logger.info(
                 "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
                 session_key or "?",
+            )
+        elif self._is_intentional_silence(_delivery_result, first_response):
+            from gateway.response_filters import HUMAN_SILENCE_FALLBACK
+            first_response = HUMAN_SILENCE_FALLBACK
+            try:
+                _delivery_result["final_response"] = first_response
+            except Exception:
+                pass
+            await self._deliver_queued_first_response(
+                first_response, source=turn_ctx.source, adapter=adapter,
+                metadata=turn_ctx._status_thread_metadata, event_message_id=turn_ctx.event_message_id,
+                text_already_delivered=False, deliver_media=True, stream_consumer=_sc,
+                session_key=session_key, inbound_message_id=turn_ctx.inbound_message_id,
             )
         elif first_response:
             logger.info(
@@ -3948,7 +3979,7 @@ class GatewayTurnMixin:
         channel_prompt: Optional[str] = None, moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
-        persist_user_display_metadata: Optional[dict] = None,
+        persist_user_display_metadata: Optional[dict] = None, is_human_initiated: bool = True,
     ) -> Dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
@@ -3973,6 +4004,7 @@ class GatewayTurnMixin:
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
             persist_user_display_metadata=persist_user_display_metadata,
+            is_human_initiated=is_human_initiated,
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
             turn_ctx, turn_runner, source, event_message_id, disp._native_slack_task_cards,

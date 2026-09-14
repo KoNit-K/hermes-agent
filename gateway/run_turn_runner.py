@@ -923,6 +923,7 @@ class TurnRunner:
                         ),
                         on_before_finalize=pause_typing_before_finalize,
                         initial_reply_to_id=ctx.event_message_id, run_still_current=ctx._run_still_current,
+                        is_human_initiated=ctx.is_human_initiated,
                     )
                     ctx.stream_consumer_holder[0] = stream_consumer
             except Exception as err:

@@ -109,6 +109,23 @@ def _sent_and_edited(adapter):
 
 class TestStreamedSilenceSuppression:
     @pytest.mark.asyncio
+    async def test_human_turn_delivers_empty_response_warning(self):
+        """A human turn replaces a bare marker with a visible recovery message."""
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_1",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1),
+            is_human_initiated=True,
+        )
+        consumer.on_delta("NO_REPLY")
+        consumer.finish()
+        await consumer.run()
+
+        assert consumer.final_content_delivered is True
+        assert all("NO_REPLY" not in text for text in _sent_and_edited(adapter))
+        assert any("no response was generated" in text for text in _sent_and_edited(adapter))
+
+    @pytest.mark.asyncio
     async def test_no_reply_only_stream_is_fully_suppressed(self):
         """A stream whose entire content is NO_REPLY sends nothing visible."""
         adapter = _make_adapter()
@@ -152,5 +169,3 @@ class TestStreamedSilenceSuppression:
         adapter.delete_message.assert_awaited_once_with("chat_1", "preview_1")
         assert consumer.final_content_delivered is False
         assert consumer.already_sent is False
-
-

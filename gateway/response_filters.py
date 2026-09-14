@@ -14,6 +14,14 @@ from typing import Any
 # error/empty-response path, not silence.
 LIVE_GATEWAY_SILENT_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
 
+# A bare marker in response to a human message is not a user-visible answer.
+# Keep this shared by final-response shaping and streaming so the two delivery
+# paths cannot disagree about the recovery message.
+HUMAN_SILENCE_FALLBACK = (
+    "⚠️ Processing completed but no response was generated. "
+    "This may be a transient error — try sending your message again."
+)
+
 # Longer than any marker could plausibly be, even with stray punctuation.
 _MARKER_LENGTH_CAP = 64
 
@@ -78,6 +86,17 @@ def is_autonomous_silence_response(response: Any) -> bool:
 def is_intentional_silence_agent_result(agent_result: dict | None, response: Any) -> bool:
     """Silence markers suppress delivery only for successful agent turns."""
     return isinstance(agent_result, dict) and not agent_result.get("failed") and is_intentional_silence_response(response)
+
+
+def should_suppress_turn_silence(
+    agent_result: dict | None, response: Any, *, is_human_initiated: bool,
+) -> bool:
+    """Whether a completed marker may be withheld from the recipient.
+
+    Silence is valid for synthetic gateway notifications, but a human-triggered
+    turn must surface the normal empty-response fallback instead of vanishing.
+    """
+    return not is_human_initiated and is_intentional_silence_agent_result(agent_result, response)
 
 
 def is_partial_silence_marker(text: Any) -> bool:

@@ -57,6 +57,9 @@ class TurnContext:
     # "internal_notification" for async-delegation/background notifications (#82888).
     persist_user_display_kind: Optional[str] = None
     persist_user_display_metadata: Optional[dict] = None
+    # Human gateway messages must not be silently discarded when a model emits
+    # a bare silence marker; synthetic notifications retain that behavior.
+    is_human_initiated: bool = True
     user_config: Any = None
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None
