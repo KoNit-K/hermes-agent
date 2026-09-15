@@ -9,11 +9,14 @@ import type { SidebarProjectTree } from './workspace-groups'
 
 afterEach(cleanup)
 
+const workspaceOpen = vi.hoisted(() => ({ value: false }))
+
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
     t: {
       sidebar: {
         newSessionIn: (label: string) => `New session in ${label}`,
+        showMoreIn: (count: number, label: string) => `Show ${count} more in ${label}`,
         projects: {
           enter: (label: string) => `Enter ${label}`,
           reorder: (label: string) => `Reorder ${label}`,
@@ -28,7 +31,7 @@ vi.mock('@/i18n', () => ({
 vi.mock('./model', () => ({
   PROJECT_PREVIEW_COUNT: 3,
   latestProjectSessions: () => [],
-  useWorkspaceNodeOpen: () => [false, vi.fn()]
+  useWorkspaceNodeOpen: () => [workspaceOpen.value, vi.fn()]
 }))
 
 // ProjectMenu (the kebab) has its own dedicated test file — stub it here so
@@ -45,6 +48,10 @@ const project = { id: 'p1', label: 'Test D' } as unknown as SidebarProjectTree
 const tipTrigger = (el: HTMLElement) => el.closest('[data-slot="tooltip-trigger"]')
 
 describe('ProjectOverviewRow', () => {
+  afterEach(() => {
+    workspaceOpen.value = false
+  })
+
   it('wraps the "new session" add button in a Tip with the project-scoped label', () => {
     render(<ProjectOverviewRow onNewSession={vi.fn()} project={project} />)
 
@@ -70,6 +77,26 @@ describe('ProjectOverviewRow', () => {
     render(<ProjectOverviewRow project={project} />)
 
     expect(screen.queryByRole('button', { name: 'Show Test D sessions' })).toBeNull()
+  })
+
+  it('reveals the next page of a project preview without requiring Show all sessions', () => {
+    workspaceOpen.value = true
+    const sessions = Array.from({ length: 5 }, (_, index) => ({ id: `s${index + 1}` }) as SessionInfo)
+
+    render(
+      <ProjectOverviewRow
+        previewSessions={sessions}
+        project={project}
+        renderRows={items => <div>{items.map(item => item.id).join(',')}</div>}
+      />
+    )
+
+    expect(screen.getByText('s1,s2,s3')).toBeTruthy()
+    expect(screen.queryByText('s1,s2,s3,s4,s5')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show 2 more in Test D' }))
+
+    expect(screen.getByText('s1,s2,s3,s4,s5')).toBeTruthy()
   })
 
   it('offers the "new session" add button on Home, which starts one with no folder', () => {

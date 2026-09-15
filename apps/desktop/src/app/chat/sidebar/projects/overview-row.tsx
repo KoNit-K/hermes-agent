@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 
 import { type NewSessionSplitHandler, startNewSessionDrag } from '@/app/chat/new-session-drag'
 import { Codicon } from '@/components/ui/codicon'
@@ -26,7 +26,7 @@ import {
 import { latestProjectSessions, PROJECT_PREVIEW_COUNT, useWorkspaceNodeOpen } from './model'
 import { ProjectContextMenu, ProjectMenu } from './project-menu'
 import type { SidebarProjectTree } from './workspace-groups'
-import { WorkspaceAddButton } from './workspace-header'
+import { WorkspaceAddButton, WorkspaceShowMoreButton } from './workspace-header'
 
 // A bare color dot (no icon) or an icon glyph — tinted by `color` when set, else
 // the lead's default tertiary. The glyph wrapper centers + caps size either way.
@@ -109,9 +109,12 @@ export function ProjectOverviewRow({
   // the sidebar's content edge regardless of which side the sidebar is on.
   const rowRef = useRef<HTMLDivElement>(null)
   const showAllSessions = useStore($sidebarShowAllSessions)
-  const limit = showAllSessions ? Infinity : PROJECT_PREVIEW_COUNT
-  const fetched = (previewSessions ?? []).slice(0, limit)
-  const preview = renderRows ? (fetched.length ? fetched : latestProjectSessions(project, limit)) : []
+  const [visibleCount, setVisibleCount] = useState(PROJECT_PREVIEW_COUNT)
+  const limit = showAllSessions ? Infinity : visibleCount
+  const available = previewSessions?.length ? previewSessions : latestProjectSessions(project, Infinity)
+  const preview = renderRows ? available.slice(0, limit) : []
+  const hiddenCount = Math.max(0, available.length - preview.length)
+  const nextCount = Math.min(PROJECT_PREVIEW_COUNT, hiddenCount)
 
   const lead = reorderable ? (
     <SidebarRowGrab
@@ -220,7 +223,18 @@ export function ProjectOverviewRow({
           {shell}
         </ProjectContextMenu>
       )}
-      {open && preview.length > 0 && <SidebarRowNest>{renderRows?.(preview)}</SidebarRowNest>}
+      {open && preview.length > 0 && (
+        <SidebarRowNest>
+          {renderRows?.(preview)}
+          {!showAllSessions && hiddenCount > 0 && (
+            <WorkspaceShowMoreButton
+              count={nextCount}
+              label={project.label}
+              onClick={() => setVisibleCount(count => count + PROJECT_PREVIEW_COUNT)}
+            />
+          )}
+        </SidebarRowNest>
+      )}
     </div>
   )
 }

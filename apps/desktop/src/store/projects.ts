@@ -15,7 +15,7 @@ import { isMissingRestEndpoint, isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { isUnderPath } from '@/lib/path-compare'
 import { persistentAtom } from '@/lib/persisted'
 import { $gateway, activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
-import { $sidebarShowAllSessions, setSidebarAgentsGrouped } from '@/store/layout'
+import { setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import {
   $activeGatewayProfile,
@@ -379,9 +379,11 @@ interface ProjectTreePayload {
   scoped_session_ids: string[]
 }
 
-// Expanded previews need the complete existing tree window before the renderer
-// finds its two recency groups. Keep the normal three-row payload unchanged.
-const projectTreePreviewLimit = () => ($sidebarShowAllSessions.get() ? 2000 : 3)
+// Overview rows page their locally loaded sessions. Fetch enough rows to let a
+// project expand without requiring the global "Show all sessions" preference
+// (which still removes the local cap altogether).
+export const PROJECT_TREE_PREVIEW_LIMIT = 2000
+const projectTreePreviewLimit = () => PROJECT_TREE_PREVIEW_LIMIT
 // The all-profiles fan-out reads one database per profile, so it is allowed the
 // same headroom as the cross-profile session list rather than the interactive
 // default.

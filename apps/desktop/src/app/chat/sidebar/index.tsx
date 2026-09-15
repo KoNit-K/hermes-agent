@@ -95,6 +95,7 @@ import {
   enterProject,
   exitProjectScope,
   openProjectCreate,
+  PROJECT_TREE_PREVIEW_LIMIT,
   refreshProjects,
   refreshProjectTree,
   refreshWorktrees,
@@ -160,7 +161,6 @@ import {
   orderProjectsByIds,
   overlayLiveLanes,
   overlayLivePreviews,
-  PROJECT_PREVIEW_COUNT,
   ProjectBackRow,
   ProjectMenu,
   projectTreeCwd,
@@ -1152,7 +1152,7 @@ export function ChatSidebar({
         projectOverview ?? [],
         agentSessions,
         projects,
-        showAllSessions ? Infinity : PROJECT_PREVIEW_COUNT,
+        showAllSessions ? Infinity : PROJECT_TREE_PREVIEW_LIMIT,
         {
           removed: removedSessionIds,
           // Rank before the trim, so "3 priciest in this project" isn't "3 most
