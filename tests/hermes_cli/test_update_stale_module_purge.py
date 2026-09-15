@@ -163,6 +163,41 @@ def test_stale_symbol_scenario_end_to_end():
             sys.modules[name] = real
 
 
+def test_purge_evicts_stale_utils_before_a_fresh_consumer_import():
+    """A root utility module must not survive into post-update imports.
+
+    ``utils`` is not under a package prefix, but newly-updated CLI modules
+    import ``file_signature`` from it.  A process that cached the pre-update
+    module must therefore evict it before it imports a new consumer.
+    """
+    name = "hermes_cli.managed_scope"
+    real_consumer = sys.modules.pop(name, None)
+    real_utils = sys.modules.get("utils")
+    stale_utils = types.ModuleType("utils")
+    sys.modules["utils"] = stale_utils
+    try:
+        with pytest.raises(ImportError, match="file_signature"):
+            importlib.import_module(name)
+
+        cli_main._purge_stale_hermes_modules()
+
+        consumer = importlib.import_module(name)
+        assert callable(consumer.file_signature)
+    finally:
+        sys.modules.pop(name, None)
+        sys.modules.pop("utils", None)
+        if real_consumer is not None:
+            sys.modules[name] = real_consumer
+        if real_utils is not None:
+            sys.modules["utils"] = real_utils
+
+
+def test_fresh_utils_consumer_import_remains_healthy():
+    """Control: a process with current source still imports its consumer."""
+    consumer = importlib.import_module("hermes_cli.managed_scope")
+    assert callable(consumer.file_signature)
+
+
 def test_purge_keeps_plan_record_class_identity():
     # The pre-update plan is built BEFORE the purge; reconciliation after it filters with
     # ``isinstance(r, RuntimeRecord)``. An evicted ``update_inventory`` yields a fresh class,
