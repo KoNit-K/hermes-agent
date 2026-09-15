@@ -100,12 +100,26 @@ def _purge_stale_hermes_modules() -> None:
     with _best_effort('Could not purge stale Hermes modules: %s'):
         importlib.invalidate_caches()
         modules = _m().sys.modules
+        project_root = _m().PROJECT_ROOT.resolve()
+
+        def _is_project_module(module: object) -> bool:
+            module_file = getattr(module, "__file__", None)
+            if not module_file:
+                return False
+            try:
+                return Path(module_file).resolve().is_relative_to(project_root)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return False
+
         purged = [
             name for name in list(modules)
             if name not in _STALE_PURGE_PROTECTED
             and not name.startswith(_STALE_PURGE_PROTECTED_PREFIX)
             # Root-package check: startswith() alone also matches unrelated ``gateway_foo``.
-            and name.split(".", 1)[0] in _STALE_PURGE_PREFIXES
+            and (
+                name.split(".", 1)[0] in _STALE_PURGE_PREFIXES
+                or _is_project_module(modules.get(name))
+            )
             and modules.pop(name, None) is not None
         ]
         if purged:

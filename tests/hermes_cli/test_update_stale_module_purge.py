@@ -163,6 +163,30 @@ def test_stale_symbol_scenario_end_to_end():
             sys.modules[name] = real
 
 
+def test_purge_evicts_root_module_and_reimports_fresh_symbol():
+    """A root-level helper loaded before pull must not survive later imports."""
+    name = "utils"
+    real = sys.modules.get(name)
+    stale = types.ModuleType(name)
+    stale.__file__ = str(cli_main.PROJECT_ROOT / "utils.py")
+    sys.modules[name] = stale
+    try:
+        try:
+            from utils import is_truthy_value  # noqa: F401
+            raised = False
+        except ImportError:
+            raised = True
+        assert raised, "precondition: stale root module must lack the new symbol"
+
+        cli_main._purge_stale_hermes_modules()
+
+        from utils import is_truthy_value  # noqa: F401
+    finally:
+        sys.modules.pop(name, None)
+        if real is not None:
+            sys.modules[name] = real
+
+
 def test_purge_keeps_plan_record_class_identity():
     # The pre-update plan is built BEFORE the purge; reconciliation after it filters with
     # ``isinstance(r, RuntimeRecord)``. An evicted ``update_inventory`` yields a fresh class,
