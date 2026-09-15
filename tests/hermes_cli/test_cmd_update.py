@@ -1630,3 +1630,34 @@ class TestGitTrampolineSelfHeal:
         assert candidates[1] == (
             profile_home / "git" / "mingw64" / "libexec" / "git-core" / "git.exe"
         )
+
+
+def test_discard_lockfile_churn_keeps_root_lock_for_dirty_workspace_manifest(
+    tmp_path, monkeypatch
+):
+    """The root lockfile represents workspace manifests as well as the root manifest."""
+    calls = []
+
+    def fake_git_run(git_cmd, args, cwd):
+        calls.append(args)
+        if args == ["diff", "--name-only"]:
+            return subprocess.CompletedProcess(
+                git_cmd,
+                0,
+                stdout=(
+                    "apps/desktop/package.json\n"
+                    "package-lock.json\n"
+                    "unrelated/package-lock.json\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(git_cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(update_cmd, "_git_run", fake_git_run)
+
+    update_cmd._discard_lockfile_churn(["git"], tmp_path)
+
+    assert calls == [
+        ["diff", "--name-only"],
+        ["checkout", "--", "unrelated/package-lock.json"],
+    ]

@@ -423,7 +423,8 @@ def _ensure_non_trampoline_git(git_cmd: list) -> list:
 
 def _discard_lockfile_churn(git_cmd, repo_root):
     """Restore ``package-lock.json`` files npm rewrote non-deterministically, so the update sees a clean tree
-    instead of autostashing every run. Only touches lockfiles whose package.json is NOT also dirty. Best-effort."""
+    instead of autostashing every run. The root lockfile covers every workspace, so preserve it whenever any
+    package manifest is dirty; nested lockfiles are preserved only with their local manifest. Best-effort."""
     from hermes_cli.update_cmd import _git_run
     with suppress(Exception):
         diff = _git_run(git_cmd, ["diff", "--name-only"], repo_root)
@@ -431,7 +432,13 @@ def _discard_lockfile_churn(git_cmd, repo_root):
             return
         changed = [line.strip() for line in diff.stdout.splitlines()]
         dirty_package_dirs = {Path(p).parent for p in changed if p.endswith("package.json")}
-        dirty = [p for p in changed if p.endswith("package-lock.json") and Path(p).parent not in dirty_package_dirs]
+        dirty = [
+            p
+            for p in changed
+            if p.endswith("package-lock.json")
+            and Path(p).parent not in dirty_package_dirs
+            and not (p == "package-lock.json" and dirty_package_dirs)
+        ]
         if not dirty:
             return
         _git_run(git_cmd, ["checkout", "--", *dirty], repo_root)
