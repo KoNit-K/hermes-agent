@@ -9,8 +9,9 @@
 # Wrapped-runtime path (Fly Machines, `docker run --init`, some Nomad/K8s
 # setups): the platform's own init is already PID 1 and execs the image
 # entrypoint as a child. s6-overlay aborts there with "can only run as pid 1",
-# so we run the stage2 bootstrap directly and then exec the main wrapper
-# without /init.
+# so we run the stage2 bootstrap directly through a Linux subreaper. This
+# preserves child reaping and signal forwarding without changing the PID-1
+# s6-overlay path.
 
 set -e
 
@@ -22,4 +23,4 @@ echo "[hermes] WARNING: container entrypoint is not PID 1; skipping s6-overlay /
 # /init normally seeds PATH with s6's helpers; the non-PID-1 fallback skips it.
 export PATH="/command:/package/admin/s6/command:${PATH}"
 /opt/hermes/docker/stage2-hook.sh
-exec /opt/hermes/docker/main-wrapper.sh "$@"
+exec /opt/hermes/docker/subreaper /opt/hermes/docker/main-wrapper.sh "$@"

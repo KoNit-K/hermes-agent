@@ -28,6 +28,18 @@ if [ -z "${HERMES_MAIN_WRAPPER_ENV_READY:-}" ] && \
 fi
 unset HERMES_MAIN_WRAPPER_ENV_READY
 
+# Deployments that override ENTRYPOINT to this wrapper bypass the dispatcher.
+# /run/s6/container_environment exists only after /init has installed its
+# PID-1 supervision tree, so that path remains unchanged. The marker prevents
+# a re-exec loop after the subreaper starts this wrapper as its child.
+if [ "$$" -ne 1 ] && [ ! -d /run/s6/container_environment ] && \
+   [ -z "${HERMES_SUBREAPER_ACTIVE:-}" ] && \
+   [ -x /opt/hermes/docker/subreaper ]; then
+    export HERMES_SUBREAPER_ACTIVE=1
+    exec /opt/hermes/docker/subreaper "$0" "$@"
+fi
+unset HERMES_SUBREAPER_ACTIVE
+
 drop() { [ "$(id -u)" = 0 ] && set -- s6-setuidgid hermes "$@"; exec "$@"; }
 
 # --- Reject the unsupported `docker run --user <uid>:<gid>` start ---
