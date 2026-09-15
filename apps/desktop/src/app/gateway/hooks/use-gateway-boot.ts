@@ -1106,7 +1106,7 @@ export function useGatewayBoot({
       // fresh local backend instead of leaving the renderer attached to the
       // descriptor of the process that just died. Keep the toast as a visible
       // fallback if the automatic recovery itself cannot complete.
-      requestBackendRestart()
+      requestBackendRestart('default')
 
       // Post-boot: the shell's restart intent recycles a local service via main
       // (or re-dials a remote one) and does not depend on this hook's
