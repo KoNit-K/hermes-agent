@@ -199,12 +199,14 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
         import httpx
         baseline_headers = {k: v for k, v in headers.items() if k.lower() not in ("authorization", "x-goog-api-key")}
         baseline = httpx.get(url, headers=baseline_headers, timeout=10)
-    except Exception:
-        return _row(pname, "ok", label=label)
+    except Exception as exc:
+        return _row(pname, "warn", f"(could not verify unauthenticated /models baseline: {type(exc).__name__})", label=label)
     if baseline.status_code == 200:
         return _row(pname, "warn", "(endpoint does not authenticate /models — key not verified)",
                     [f"{pname}: /models does not authenticate — API key not verified"], label=label)
-    return _row(pname, "ok", label=label)
+    if baseline.status_code in (401, 403):
+        return _row(pname, "ok", label=label)
+    return _row(pname, "warn", f"(unauthenticated /models baseline returned HTTP {baseline.status_code}; key not verified)", label=label)
 
 
 def _apikey_request(key: str, base_env, default_url) -> tuple:
