@@ -31,6 +31,26 @@ def _make_cli(tmp_path, mcp_servers=None, extra_config=None):
     return obj, cfg_file
 
 
+def test_tui_init_records_config_file_signature(tmp_path, monkeypatch):
+    """TUI startup initializes the config watcher without a NameError."""
+    import cli as cli_mod
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("mcp_servers: {}\n")
+    obj = object.__new__(cli_mod.HermesCLI)
+    obj.config = {"mcp_servers": {}}
+    monkeypatch.setenv("HERMES_DEFER_AGENT_STARTUP", "1")
+
+    with (
+        patch("hermes_cli.config.get_config_path", return_value=cfg_file),
+        patch("hermes_cli.plugins.get_plugin_manager"),
+    ):
+        obj._tui_init_run_state()
+
+    assert obj._config_sig == file_signature(cfg_file.stat())
+    assert obj._config_mcp_servers == {}
+
+
 class TestMCPConfigWatch:
 
 
