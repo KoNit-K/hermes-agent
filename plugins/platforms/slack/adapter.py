@@ -49,6 +49,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes_async, cache_video_from_bytes_async,
 )
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
+from gateway.platforms.inbound_mention import InboundMentionFacts, resolve_inbound_mention_decision
 
 try:  # sibling module; support both package and flat plugin-dir import
     from .block_kit import render_blocks, sanitize_blocks
@@ -4063,14 +4064,18 @@ class SlackAdapter(BasePlatformAdapter):
                 "(thread_require_mention=true): channel=%s thread_ts=%s", channel_id,
                 event_thread_ts)
             return False
-        if free_channel:
+        # Slack's historic wake heuristic is deliberately stricter than the
+        # transport-neutral policy for every *unmentioned* message, including
+        # DMs and free-response channels.  Only use the common resolver for an
+        # explicit address; otherwise retain Slack's conversation-aware gate.
+        if resolve_inbound_mention_decision(
+            InboundMentionFacts(is_mentioned=is_mentioned), require_mention=True,
+        ):
             return True
-        if not is_mentioned:
-            return await self._should_wake_on_unmentioned_message(
-                event_thread_ts=event_thread_ts, channel_id=channel_id, user_id=user_id,
-                team_id=team_id, is_thread_reply=is_thread_reply,
-                chat_type="dm" if is_dm else "group")
-        return True
+        return await self._should_wake_on_unmentioned_message(
+            event_thread_ts=event_thread_ts, channel_id=channel_id, user_id=user_id,
+            team_id=team_id, is_thread_reply=is_thread_reply,
+            chat_type="dm" if is_dm else "group")
 
     def _normalize_changed_message(self, event: dict) -> Optional[dict]:
         """Turn a ``message_changed`` envelope into a plain message event.
