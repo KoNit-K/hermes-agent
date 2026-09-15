@@ -4346,7 +4346,6 @@ def _effective_provider_for_client(client: Any, fallback: str) -> str:
 
 def _to_async_client(sync_client, model: str, is_vision: bool = False):
     """Sync client → async counterpart, preserving Codex routing (``is_vision`` adds the Copilot vision header)."""
-    from openai import AsyncOpenAI
     if isinstance(sync_client, _AuxProbeClientStub):
         return sync_client, model
     if isinstance(sync_client, CodexAuxiliaryClient):
@@ -4362,6 +4361,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # ACP shims (subprocess, not an HTTP pool) are already async-safe and opt out of the wrapper.
     if _client_declares(sync_client, "HERMES_SKIP_ASYNC_WRAP"):
         return sync_client, model
+    from openai import AsyncOpenAI
     sync_base_url = str(sync_client.base_url)
     async_kwargs = {"api_key": sync_client.api_key, "base_url": sync_base_url}
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
@@ -4888,6 +4888,30 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
         if is_native_gemini_base_url(base_url):
             client = GeminiNativeClient(api_key=api_key, base_url=base_url)
             logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
+            return _route_client(req, client, final_model)
+    # API-key authentication does not imply an OpenAI-compatible transport.  An
+    # out-of-tree profile can use a sentinel API key while its native client owns
+    # its real credential lifecycle, just as the main-agent client seam does.
+    # A missing or broken hook deliberately falls through to the existing OpenAI
+    # path so ordinary profiles retain their current behavior.
+    try:
+        from providers import get_provider_profile
+        profile_client = get_provider_profile(provider)
+    except Exception:
+        profile_client = None
+    if profile_client is not None:
+        try:
+            client = profile_client.create_client(
+                api_key=api_key, base_url=base_url, model=final_model)
+        except Exception:
+            logger.warning(
+                "resolve_provider_client: profile %r failed to create an API-key client; "
+                "falling back to OpenAI client construction",
+                provider, exc_info=True)
+            client = None
+        if client is not None:
+            client = _wrap_transport(req, client, final_model, raw_base_url, api_key)
+            logger.debug("resolve_provider_client: %s (%s) via provider profile", provider, final_model)
             return _route_client(req, client, final_model)
     headers = _endpoint_default_headers(base_url, provider, is_vision=req.is_vision, xai=True)
     client = _create_openai_client(api_key=api_key, base_url=base_url, **({"default_headers": headers} if headers else {}))
