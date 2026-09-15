@@ -1808,9 +1808,9 @@ class GatewayNotificationsMixin:
                     # active.  Give the chat its concise completion receipt
                     # now as well; this is deliberately not the raw-output
                     # fallback used by non-agent-notify watchers.
-                    if notify_mode in {"concise", "all", "result"} or (
+                    if delivered is True and (notify_mode in {"concise", "all", "result"} or (
                         notify_mode == "error" and session.exit_code not in {0, None}
-                    ):
+                    )):
                         message_text = self._format_process_final_message(session_id, session, "concise")
                         await self._send_watcher_message(
                             platform_name, chat_id, thread_id, message_text, watcher,

@@ -189,6 +189,31 @@ async def test_agent_notify_sends_concise_receipt_while_agent_delivery_is_queued
 
 
 @pytest.mark.asyncio
+async def test_agent_notify_does_not_send_receipt_when_delivery_is_dropped(monkeypatch, tmp_path):
+    """A terminal or duplicate enqueue result must not cross a session boundary."""
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(
+        output_buffer="done\n", exited=True, exit_code=0, command="echo done", started_at=None,
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions, consumed=False))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "concise")
+    runner._enqueue_process_completion_notification = AsyncMock(return_value=None)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    watcher = _watcher_dict()
+    watcher["notify_on_complete"] = True
+
+    await runner._run_process_watcher(watcher)
+
+    adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_consumed_completion_skips_raw_notification_without_agent_notify(
     monkeypatch, tmp_path
 ):
