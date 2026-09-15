@@ -74,6 +74,24 @@ def test_authenticated_200_unauth_401_stays_ok(monkeypatch):
     assert result.issues == []
 
 
+def test_unauthenticated_baseline_exception_is_warn(monkeypatch):
+    def fake_get(url, headers=None, timeout=None):
+        if "Authorization" in (headers or {}):
+            return SimpleNamespace(status_code=200)
+        raise httpx.TimeoutException("timed out")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert _WARN in _glyph(_probe(monkeypatch))
+
+
+def test_unauthenticated_ambiguous_status_is_warn(monkeypatch):
+    def fake_get(url, headers=None, timeout=None):
+        return SimpleNamespace(status_code=200 if "Authorization" in (headers or {}) else 500)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert _WARN in _glyph(_probe(monkeypatch))
+
+
 def test_authenticated_401_still_fail_invalid_key(monkeypatch):
     """Existing fail path: authenticated 401 is ✗, no baseline required."""
     calls = []
