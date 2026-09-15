@@ -79,22 +79,28 @@ def _clear_gh_auth_probe_task(completed_task: asyncio.Task) -> None:
         _gh_auth_probe_task = None
 
 
+async def _run_gh_auth_probe() -> dict:
+    """Keep the result even when every requester disconnects before completion."""
+    global _gh_auth_cache
+    payload = await asyncio.to_thread(_probe_gh_auth)
+    _gh_auth_cache = (time.monotonic(), payload)
+    return payload
+
+
 @router.get("/api/git/gh-auth")
 async def gh_auth_status_route(refresh: bool = False):
     """``{"available", "authenticated"}`` for the `gh` CLI; cached 5 min
     (``refresh=true`` bypasses so the pill withdraws right after a login)."""
-    global _gh_auth_cache, _gh_auth_probe_task
+    global _gh_auth_probe_task
     if not refresh and _gh_auth_cache and time.monotonic() - _gh_auth_cache[0] < _GH_AUTH_TTL_S:
         return _gh_auth_cache[1]
     if _gh_auth_probe_task is None:
-        _gh_auth_probe_task = asyncio.create_task(asyncio.to_thread(_probe_gh_auth))
+        _gh_auth_probe_task = asyncio.create_task(_run_gh_auth_probe())
         _gh_auth_probe_task.add_done_callback(_clear_gh_auth_probe_task)
     probe_task = _gh_auth_probe_task
     # Shield the shared probe: disconnecting one requester must not cancel the
     # probe that other refreshes/cache misses are awaiting.
-    payload = await asyncio.shield(probe_task)
-    _gh_auth_cache = (time.monotonic(), payload)
-    return payload
+    return await asyncio.shield(probe_task)
 
 
 @router.get("/api/git/worktrees")
