@@ -311,12 +311,16 @@ def stream_tts_to_speaker(
             cleaned = _strip_markdown_for_tts(sentence).strip()
             if not cleaned:
                 return
+            # Model-generated responses can reach both a visible callback and the external
+            # TTS provider. Treat that sentence boundary as forced credential-redaction.
+            from agent.redact import redact_sensitive_text
+            cleaned = redact_sensitive_text(cleaned, force=True)
             cleaned_lower = cleaned.lower().rstrip(".!,")
             if any(prev.lower().rstrip(".!,") == cleaned_lower for prev in spoken_sentences):
                 return
             spoken_sentences.append(cleaned)
             if display_callback is not None:
-                display_callback(sentence)  # raw sentence on screen before TTS processing
+                display_callback(cleaned)
             if sync_pipeline is not None:
                 sync_pipeline.speak(cleaned)
                 return

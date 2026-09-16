@@ -379,7 +379,11 @@ class CLIStreamMixin:
 
     def _emit_stream_line(self, printed_line: str) -> None:
         """Print one response line with the skin's true-color text escape (if any)."""
+        from agent.redact import redact_sensitive_text
         from cli import _RST, _STREAM_PAD, _cprint
+        # Streaming responses are model-generated and therefore untrusted. Redact each
+        # complete rendered line at the terminal boundary, irrespective of user config.
+        printed_line = redact_sensitive_text(printed_line, force=True)
         _tc = getattr(self, "_stream_text_ansi", "")
         _cprint(
             f"{_STREAM_PAD}{_tc}{printed_line}{_RST}" if _tc else f"{_STREAM_PAD}{printed_line}")
@@ -466,12 +470,13 @@ class CLIStreamMixin:
             and not self._in_stream_table
             and not self._stream_buf.lstrip().startswith("|")
             and len(self._stream_buf) >= 80):
+            from agent.redact import redact_sensitive_text
             preview = self._stream_buf[-int(_STREAM_PARTIAL_PREVIEW_LEN):]
             cut = preview.find(" ")
             if 0 < cut < len(preview) - 1:
                 preview = preview[cut + 1:]
             try:
-                self._spinner_text = f"… {preview}"
+                self._spinner_text = f"… {redact_sensitive_text(preview, force=True)}"
                 self._invalidate()
             except Exception:
                 pass

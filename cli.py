@@ -4065,7 +4065,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         _sync_cli_session_id_from_agent(cli)
         resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
         if resp:
-            print(resp)
+            from agent.redact import redact_sensitive_text
+            print(redact_sensitive_text(resp, force=True))
         return resp or ""
 
     def _task_status() -> "str | None":
@@ -4181,6 +4182,10 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
             if isinstance(continued, dict):
                 result = continued
         response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+        # A model response is untrusted display text. Keep this terminal boundary forced even
+        # when a user has disabled storage/log redaction in their configuration.
+        from agent.redact import redact_sensitive_text
+        response = redact_sensitive_text(response, force=True)
     # Surface backend errors that produced no visible output (e.g. invalid model slug
     # -> provider 4xx) on stderr so piped stdout stays clean.
     if emitter is not None:

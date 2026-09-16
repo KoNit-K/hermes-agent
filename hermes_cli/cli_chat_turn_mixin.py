@@ -246,6 +246,7 @@ class CLIChatTurnMixin:
             # display_callback only when token streaming is off: with streaming on,
             # _stream_delta already renders the text and this would print it twice.
             def display_callback(sentence: str):
+                from agent.redact import redact_sensitive_text
                 if not turn.box_opened:
                     turn.box_opened = True
                     label = " ☤ Hermes "
@@ -254,7 +255,7 @@ class CLIChatTurnMixin:
                     w = self._scrollback_box_width(getattr(self.console, "width", 80))
                     fill = w - 2 - self._status_bar_display_width(label)
                     _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
-                _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
+                _cprint(f"{_STREAM_PAD}{redact_sensitive_text(sentence.rstrip(), force=True)}")
 
             turn.tts_thread = threading.Thread(
                 target=stream_tts_to_speaker, args=(turn.text_queue, turn.stop_event, self._voice_tts_done),
@@ -631,6 +632,10 @@ class CLIChatTurnMixin:
             _render_final_assistant_content,
         )
         if response and not (turn.result and turn.result.get("response_previewed", False)):
+            from agent.redact import redact_sensitive_text
+            # Final responses can include arbitrary model text. This is a forced display
+            # boundary, separate from the configurable storage/logging redaction policy.
+            response = redact_sensitive_text(response, force=True)
             try:
                 from hermes_cli.skin_engine import get_active_skin
                 _skin = get_active_skin()
