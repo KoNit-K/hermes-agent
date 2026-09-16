@@ -135,11 +135,15 @@ describe('session.info settles an incomplete live turn', () => {
 
   it('leaves the session sendable after a started turn ends with no payload', async () => {
     mountStream()
+    vi.useFakeTimers()
 
     startTurn(ACTIVE_SID)
     expect(busyFor(ACTIVE_SID)).toBe(true)
 
     sessionInfo(ACTIVE_SID, { running: false })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
 
     const state = sessionStates!.get(ACTIVE_SID)!
     expect(state.awaitingResponse).toBe(false)
@@ -148,6 +152,24 @@ describe('session.info settles an incomplete live turn', () => {
     expect(state.turnStartedAt).toBeNull()
     // The predicate submit.ts and slash.ts actually gate on.
     expect(busyFor(ACTIVE_SID)).toBe(false)
+  })
+
+  it('keeps a tool-heavy turn working across a transient running=false → running=true pair (#113029)', () => {
+    mountStream()
+
+    startTurn(ACTIVE_SID)
+    sessionInfo(ACTIVE_SID, { running: false })
+
+    // A stale session.info snapshot can arrive between live turn updates.
+    // Do not paint this known in-flight turn as completed before the later
+    // running=true heartbeat restores the backend's current state.
+    expect(busyFor(ACTIVE_SID)).toBe(true)
+    expect(sessionStates!.get(ACTIVE_SID)?.awaitingResponse).toBe(true)
+
+    sessionInfo(ACTIVE_SID, { running: true })
+
+    expect(busyFor(ACTIVE_SID)).toBe(true)
+    expect(sessionStates!.get(ACTIVE_SID)?.turnLive).toBe(true)
   })
 
   it('keeps waiting when running=false lands before the turn ever started', async () => {
@@ -186,6 +208,7 @@ describe('session.info settles an incomplete live turn', () => {
   // gateway's running=false is authoritative and must settle the session.
   it('settles an armed-but-never-live turn once the pre-start grace expires (#86795)', async () => {
     mountStream()
+    vi.useFakeTimers()
 
     act(() => {
       sessionStates!.set(ACTIVE_SID, {
@@ -199,6 +222,9 @@ describe('session.info settles an incomplete live turn', () => {
     })
 
     sessionInfo(ACTIVE_SID, { running: false })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
 
     const state = sessionStates!.get(ACTIVE_SID)!
     expect(state.awaitingResponse).toBe(false)
@@ -213,6 +239,7 @@ describe('session.info settles an incomplete live turn', () => {
   // but a regression that forgets the seed must fail open, not latch).
   it('settles an armed turn with no clock instead of latching busy (#86795)', async () => {
     mountStream()
+    vi.useFakeTimers()
 
     act(() => {
       sessionStates!.set(ACTIVE_SID, {
@@ -226,15 +253,22 @@ describe('session.info settles an incomplete live turn', () => {
     })
 
     sessionInfo(ACTIVE_SID, { running: false })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
 
     expect(busyFor(ACTIVE_SID)).toBe(false)
   })
 
-  it('un-latches a background session but does not hydrate its transcript', () => {
+  it('un-latches a background session but does not hydrate its transcript', async () => {
     mountStream()
+    vi.useFakeTimers()
 
     startTurn('session-background')
     sessionInfo('session-background', { running: false })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
 
     // The settle is unscoped — a background session's sidebar dot must clear
     // without the user opening it.
@@ -256,7 +290,7 @@ describe('session.info settles an incomplete live turn', () => {
     sessionInfo(ACTIVE_SID, { running: false })
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(400)
+      await vi.advanceTimersByTimeAsync(500)
     })
 
     expect(hydrateFromStoredSession).toHaveBeenCalledTimes(1)
@@ -265,6 +299,7 @@ describe('session.info settles an incomplete live turn', () => {
 
   it('hydrates a live turn that settles after an interim without message.complete', async () => {
     mountStream()
+    vi.useFakeTimers()
 
     startTurn(ACTIVE_SID)
     act(() =>
@@ -278,6 +313,9 @@ describe('session.info settles an incomplete live turn', () => {
     expect(sessionStates!.get(ACTIVE_SID)?.sawAssistantPayload).toBe(true)
 
     sessionInfo(ACTIVE_SID, { running: false })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
 
     expect(hydrateFromStoredSession).toHaveBeenCalledWith(3, null, ACTIVE_SID)
   })

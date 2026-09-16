@@ -37,6 +37,11 @@ import {
 
 import type { GatewayEventContext } from './types'
 
+// A queued snapshot can report idle just before the gateway publishes the
+// current live state. This is long enough to absorb that ordered burst without
+// making a real terminal edge feel delayed.
+const RUNNING_FALSE_CONFIRMATION_MS = 150
+
 /**
  * Whether a `session.info` payload's `stored_session_id` may be treated as the
  * selected conversation's, so its cwd can be claimed for it (#71254).
@@ -158,14 +163,7 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     const hasStatePatch = hasSessionInfoStatePatch(statePatch)
     const modelChanged = typeof payload?.model === 'string'
     const providerChanged = typeof payload?.provider === 'string'
-    const runningChanged = typeof payload?.running === 'boolean'
-
-    // Reconnect can miss the structured `compacted` edge. A gateway-authored
-    // running=false is a terminal fact; a running heartbeat is intentionally
-    // not used as a timeout-like guess, so genuine compaction stays visible.
-    if (sessionId && payload?.running === false) {
-      reconcileSessionCompacting(sessionId, 'terminal')
-    }
+    let runningChanged = typeof payload?.running === 'boolean'
 
     // The backend stamps model/provider (as strings) on EVERY session.info,
     // so the presence flags above are true on every heartbeat/turn edge —
@@ -176,6 +174,46 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     // cached runtime state, captured before the state patch below applies;
     // composer atoms as the fallback for an uncached session) invalidates.
     const knownState = sessionId ? sessionStateByRuntimeIdRef.current.get(sessionId) : undefined
+
+    const pendingRunningFalseSettlesRef = ctx.pendingRunningFalseSettlesRef
+
+    if (runningChanged && sessionId && payload!.running) {
+      const pending = pendingRunningFalseSettlesRef?.current.get(sessionId)
+
+      if (pending !== undefined) {
+        window.clearTimeout(pending)
+        pendingRunningFalseSettlesRef?.current.delete(sessionId)
+      }
+    }
+
+    if (
+      runningChanged &&
+      sessionId &&
+      payload!.running === false &&
+      !ctx.confirmedRunningFalse &&
+      pendingRunningFalseSettlesRef &&
+      (knownState?.busy || knownState?.awaitingResponse || knownState?.turnLive)
+    ) {
+      const pending = pendingRunningFalseSettlesRef.current.get(sessionId)
+
+      if (pending === undefined) {
+        const timer = window.setTimeout(() => {
+          pendingRunningFalseSettlesRef.current.delete(sessionId)
+          handleSessionInfoEvent({ ...ctx, confirmedRunningFalse: true })
+        }, RUNNING_FALSE_CONFIRMATION_MS)
+
+        pendingRunningFalseSettlesRef.current.set(sessionId, timer)
+      }
+
+      runningChanged = false
+    }
+
+    // Reconnect can miss the structured `compacted` edge. A confirmed
+    // running=false is terminal; a short confirmation window filters an
+    // earlier queued snapshot that a following running=true supersedes.
+    if (sessionId && payload?.running === false && runningChanged) {
+      reconcileSessionCompacting(sessionId, 'terminal')
+    }
     const modelValueChanged = modelChanged && payload!.model !== (knownState?.model ?? $currentModel.get())
 
     const providerValueChanged =

@@ -72,6 +72,10 @@ export interface GatewayEventContext {
   fromActiveSource: () => boolean
   /** Coalesced trailing refreshHermesConfig (one per session.info burst). */
   scheduleConfigRefresh: () => void
+  /** Debounced false edges awaiting a newer session.info liveness report. */
+  pendingRunningFalseSettlesRef?: MutableRefObject<Map<string, number>>
+  /** This false edge survived its confirmation window. */
+  confirmedRunningFalse?: boolean
 }
 
 /** A family handler consumes matching event types and reports whether it did. */

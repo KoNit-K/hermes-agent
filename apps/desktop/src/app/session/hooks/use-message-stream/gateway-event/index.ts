@@ -94,6 +94,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
   const { activeSessionIdRef, compactedTurnRef, refreshHermesConfig, sessionStateByRuntimeIdRef } = deps
 
   const unscopedStreamSessionIdRef = useRef<string | null>(null)
+  // A session.info snapshot may have been queued before a live turn update.
+  // Keep a short-lived false-edge confirmation per runtime so a following
+  // running=true heartbeat can cancel it before the sidebar paints idle.
+  const pendingRunningFalseSettlesRef = useRef<Map<string, number>>(new Map())
 
   // session.info arrives in bursts (agent build ready + turn end + title /
   // MCP / compress edges within the same second). Each used to fire its own
@@ -126,6 +130,16 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         window.clearTimeout(configRefreshTimerRef.current)
         configRefreshTimerRef.current = null
       }
+    },
+    []
+  )
+
+  useEffect(
+    () => () => {
+      for (const timer of pendingRunningFalseSettlesRef.current.values()) {
+        window.clearTimeout(timer)
+      }
+      pendingRunningFalseSettlesRef.current.clear()
     },
     []
   )
@@ -228,7 +242,8 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         isActiveEvent,
         occurredAt,
         fromActiveSource,
-        scheduleConfigRefresh
+        scheduleConfigRefresh,
+        pendingRunningFalseSettlesRef
       }
 
       for (const handler of HANDLERS) {
