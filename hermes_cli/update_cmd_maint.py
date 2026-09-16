@@ -324,10 +324,11 @@ def _format_time_ago(iso_ts: str) -> str:
 
 
 def _reload_process_scan_modules() -> None:
-    """Reload the process-scan modules, dependency-first, so ``dashboard_procs`` binds against a
-    fresh ``_subprocess_compat``: cleanup runs in the PRE-update process and a symbol the update
-    added would otherwise ImportError after the code update succeeded. Called from the cleanup
-    entry point so every caller (git path, ZIP fallback) is covered.
+    """Reload the process-scan modules, dependency-first, before post-update cleanup.
+
+    Cleanup runs in the PRE-update process, so a symbol added to a process-scan module during the
+    update can otherwise be absent from its cached module object when ``dashboard_procs`` uses it.
+    Called from the cleanup entry point so every caller (git path, ZIP fallback) is covered.
 
     ``_finish_dashboard_update_cleanup`` runs in the PRE-update Python process, but
     ``_scan_dashboard_processes`` does a function-level ``from hermes_cli._subprocess_compat import
@@ -336,7 +337,11 @@ def _reload_process_scan_modules() -> None:
     ImportError — after the code update itself already succeeded.
     """
     _reload_modules(
-        ("hermes_cli._subprocess_compat", "hermes_cli.dashboard_procs"),
+        (
+            "hermes_cli._subprocess_compat",
+            "hermes_cli.main_dashboard",
+            "hermes_cli.dashboard_procs",
+        ),
         modules=sys.modules,
         # warning, not debug: a failed reload surfaces as ImportError seconds later.
         log=lambda name, exc: logger.warning(

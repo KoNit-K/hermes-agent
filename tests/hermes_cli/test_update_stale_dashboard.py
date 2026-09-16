@@ -920,6 +920,24 @@ class TestPostUpdateStaleModuleReload:
             importlib.reload(sys.modules["hermes_cli._subprocess_compat"])
             importlib.reload(sys.modules["hermes_cli.dashboard_procs"])
 
+    def test_cleanup_tolerates_missing_launchd_helper(self):
+        """Post-update cleanup must finish when its cached dashboard module predates this helper.
+
+        Regression for #112604: the update process can retain a pre-launchd-support
+        ``main_dashboard`` module while the refreshed cleanup code calls into it.
+        """
+        assert hasattr(main_dashboard, "_loaded_launchd_backend_jobs")
+        try:
+            delattr(main_dashboard, "_loaded_launchd_backend_jobs")
+            with patch.object(main_dashboard, "_find_stale_dashboard_pids", return_value=[8765]), \
+                 patch.object(dashboard_procs, "_kill_pids_posix", side_effect=lambda pids, killed, failed: killed.extend(pids)):
+                result = _kill_stale_dashboard_processes()
+
+            assert result["killed"] == [8765]
+        finally:
+            importlib.reload(sys.modules["hermes_cli.main_dashboard"])
+            importlib.reload(sys.modules["hermes_cli.dashboard_procs"])
+
     def test_reload_failure_is_nonfatal(self):
         """A reload failure must log and continue, never raise — the cleanup
         step runs after the update already succeeded."""

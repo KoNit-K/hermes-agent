@@ -363,7 +363,8 @@ def _kill_stale_dashboard_processes(
     # job then fails every KeepAlive restart with "port already in use", and the running backend
     # is left unsupervised. Snapshot the loaded jobs once, before the kill; ``--stop`` reads them
     # too, so it can say that a KeepAlive job will undo the stop.
-    launchd_jobs = _dash._loaded_launchd_backend_jobs() if sys.platform != "win32" else []
+    load_launchd_jobs = getattr(_dash, "_loaded_launchd_backend_jobs", None)
+    launchd_jobs = load_launchd_jobs() if sys.platform != "win32" and load_launchd_jobs else []
 
     def _launchd_owner(pid: int, cmdline: list[str] | None):
         return _dash._launchd_job_owning_backend(pid, cmdline, launchd_jobs, ancestors=_process_ancestors(pid))
