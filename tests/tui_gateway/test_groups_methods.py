@@ -88,6 +88,7 @@ def test_capabilities_are_honest_about_the_driver_boundary(home):
 
 def test_member_mutations_are_atomic_and_advertised(home):
     (home / "profiles" / "reviewer").mkdir()
+    (home / "profiles" / "reviewer" / "config.yaml").write_text("{}\n")  # identity marker: local roster
     room = _create_room()
     capability = _result(srv._methods["groups.capabilities"](1, {}))
 
