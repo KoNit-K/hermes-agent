@@ -8,7 +8,7 @@ import contextlib
 import logging
 import threading
 from agent.turn_context import extract_api_content_sidecar
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     from gateway.session import SessionEntry
@@ -76,6 +76,7 @@ class SessionTranscriptMixin:
 
     def advance_compression_session(
         self, session_key: str, expected_session_id: str, target_session_id: str,
+        *, authorize: Optional[Callable[[], bool]] = None,
     ) -> Optional[SessionEntry]:
         """CAS-advance one route along an already-verified compression lineage. Unlike
         ``switch_session`` this never ends/reopens SQLite rows (the compression transaction owns
@@ -83,7 +84,9 @@ class SessionTranscriptMixin:
         must fail closed."""
         if not session_key or not expected_session_id or not target_session_id:
             return None
-        with self._lock:
+        with self.routing_authority(), self._lock:
+            if authorize is not None and not authorize():
+                return None
             entry = self._entry_locked(session_key)
             if entry is None:
                 return None

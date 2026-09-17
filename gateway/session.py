@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, fields
-from typing import Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 
 from .config import Platform, GatewayConfig, HomeChannel
 from .whatsapp_identity import canonical_whatsapp_identifier
@@ -1202,6 +1202,7 @@ class SessionStore(
 
     def switch_session_if_current(
         self, session_key: str, expected_session_id: str, target_session_id: str,
+        *, authorize: Optional[Callable[[], bool]] = None,
     ) -> Optional[SessionEntry]:
         """Switch a route only when it still points at the caller's snapshot.
 
@@ -1211,7 +1212,9 @@ class SessionStore(
         """
         if not session_key or not expected_session_id or not target_session_id:
             return None
-        with self._lock:
+        with self.routing_authority(), self._lock:
+            if authorize is not None and not authorize():
+                return None
             old_entry = self._entry_locked(session_key)
             if old_entry is None or old_entry.session_id != expected_session_id:
                 return None
@@ -1236,6 +1239,14 @@ class SessionStore(
                 display_name=new_entry.display_name, include_compression_ancestors=True,
             )
         return new_entry
+
+    def routing_authority(self) -> "threading.RLock":
+        """Lock a caller-held authority together with one routing mutation.
+
+        Routing writes are offloaded because their persistence work can be expensive. A generation
+        must therefore be sampled under this lock, which is also held when that generation changes.
+        """
+        return self._lazy("_routing_authority_lock", threading.RLock)
 
     def list_sessions(self, active_minutes: Optional[int] = None) -> List[SessionEntry]:
         """List all sessions, optionally filtered by activity."""

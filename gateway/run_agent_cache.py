@@ -391,21 +391,35 @@ class GatewayAgentCacheMixin:
         from a worker /stop or /new invalidated is recognized and dropped."""
         if not session_key:
             return 0
-        persistent = self._session_state(session_key).persistent
-        # Monotonic by design (#28686): incremented here, NEVER reset.
-        persistent.run_generation = int(persistent.run_generation) + 1
-        return persistent.run_generation
+        with self._routing_authority():
+            persistent = self._session_state(session_key).persistent
+            # Monotonic by design (#28686): incremented here, NEVER reset.
+            persistent.run_generation = int(persistent.run_generation) + 1
+            return persistent.run_generation
 
     def _invalidate_session_run_generation(self, session_key: str, *, reason: str = "") -> int:
         """Invalidate any in-flight run token for ``session_key``.
 
         Settles a pending one-shot model override first: the displaced turn's finalizer is
         generation-guarded and would otherwise leave ``/moa`` / ``/model --once`` in force."""
-        self._restore_pending_one_turn_model_override(session_key)
-        generation = self._begin_session_run_generation(session_key)
+        with self._routing_authority():
+            self._restore_pending_one_turn_model_override(session_key)
+            generation = self._begin_session_run_generation(session_key)
         if reason:
             logger.info("Invalidated run generation for %s → %d (%s)", session_key, generation, reason)
         return generation
+
+    def _routing_authority(self):
+        """Authority shared by run-generation changes and routing commits."""
+        from contextlib import nullcontext
+
+        holder = getattr(getattr(self, "session_store", None), "routing_authority", None)
+        if holder is None:
+            return nullcontext()
+        try:
+            return holder()
+        except Exception:
+            return nullcontext()
 
     def _is_session_run_current(self, session_key: str, generation: int) -> bool:
         """Return True when ``generation`` is still current for ``session_key``."""

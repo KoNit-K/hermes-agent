@@ -199,7 +199,7 @@ class GatewayNotificationsMixin:
 
     async def _resolve_async_delegation_session(
         self, session_entry: SessionEntry, pinned_session_id: str,
-        *, run_generation: Optional[int] = None,
+        *, run_generation: Optional[int] = None, run_session_key: Optional[str] = None,
     ) -> Optional[SessionEntry]:
         """Resolve an async completion to its verified owning gateway session.
 
@@ -208,6 +208,8 @@ class GatewayNotificationsMixin:
         closed; the result stays in the delegation records.
         """
         from gateway.run import _USER_BOUNDARY_END_REASONS
+        generation_key = run_session_key or session_entry.session_key
+        expected_generation = run_generation
         session_db = cast(Any, self._session_db)
         if session_db is None:
             logger.warning(
@@ -224,18 +226,6 @@ class GatewayNotificationsMixin:
             logger.warning(
                 "Async-delegation completion has unknown spawning session %s; "
                 "dropping injection (#55578 fail-closed).", pinned_session_id,
-            )
-            return None
-        # A /stop or /new may revoke the active turn while the session-store
-        # lookup above is offloaded. That boundary intentionally does not
-        # have to replace the route, so a session-id CAS alone cannot see it.
-        if run_generation is not None and not self._is_session_run_current(
-            session_entry.session_key, run_generation
-        ):
-            logger.warning(
-                "Async-delegation completion lost run generation %s for routing key %s; "
-                "dropping injection.",
-                run_generation, session_entry.session_key,
             )
             return None
         target_session_id = pinned_session_id
@@ -257,23 +247,38 @@ class GatewayNotificationsMixin:
                     "retargeting to the chat's current session %s.",
                     _end_reason or "idle", pinned_session_id, session_entry.session_id,
                 )
-                return session_entry
-            follows_compression = True
-            target_session_id = await self._resolve_compression_lineage_target(
-                session_db, session_entry, pinned_session_id,
+                target_session_id = session_entry.session_id
+            else:
+                follows_compression = True
+                target_session_id = await self._resolve_compression_lineage_target(
+                    session_db, session_entry, pinned_session_id,
+                )
+                if target_session_id is None:
+                    return None
+
+        def _still_authorized() -> bool:
+            return expected_generation is None or self._is_session_run_current(
+                generation_key, expected_generation,
             )
-            if target_session_id is None:
-                return None
+
         if target_session_id == session_entry.session_id:
+            if not _still_authorized():
+                logger.warning(
+                    "Async-delegation completion lost run generation %s for routing key %s; "
+                    "dropping injection.", expected_generation, generation_key,
+                )
+                return None
             return session_entry
         prior_session_id = session_entry.session_id
         if follows_compression:
             switched = await self.async_session_store.advance_compression_session(
                 session_entry.session_key, prior_session_id, target_session_id,
+                authorize=_still_authorized,
             )
         else:
             switched = await self.async_session_store.switch_session_if_current(
                 session_entry.session_key, prior_session_id, target_session_id,
+                authorize=_still_authorized,
             )
         if switched is None:
             logger.warning(
