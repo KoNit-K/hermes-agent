@@ -21,6 +21,8 @@ static snapshot only).
 
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.models import (
     _KEYLESS_STABLE_CACHE_PROVIDERS,
     _PROVIDER_MODELS,
@@ -295,6 +297,17 @@ class TestOpencodeFreeAvailabilityInventory:
 
         result = self._fetch(mod, {"data": [
             {"id": "mimo-v2.5-free", "status": "rate_limited"},
+            {"id": "nemotron-3-ultra-free", "status": "available"},
+        ]})
+
+        assert result == ["nemotron-3-ultra-free"]
+
+    @pytest.mark.parametrize("status", ["rate-limited", "rate limited", "rateLimited"])
+    def test_excludes_rate_limited_status_regardless_of_separator(self, status):
+        import hermes_cli.models as mod
+
+        result = self._fetch(mod, {"data": [
+            {"id": "mimo-v2.5-free", "status": status},
             {"id": "nemotron-3-ultra-free", "status": "available"},
         ]})
 

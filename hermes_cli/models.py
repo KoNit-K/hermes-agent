@@ -2162,13 +2162,18 @@ _OPENCODE_FREE_EXCLUDED_MODELS = frozenset({"ox-alpha-free", "deepseek-v4-flash-
 _opencode_free_live_memo: Optional[tuple[float, Optional[list[str]]]] = None
 _OPENCODE_FREE_LIVE_MEMO_TTL = 300.0  # 5 min; SWR disk cache handles the rest
 _OPENCODE_FREE_UNAVAILABLE_STATUSES = frozenset({
-    "rate_limited", "rate-limited", "unavailable", "disabled", "decommissioned",
+    "ratelimited", "unavailable", "disabled", "decommissioned",
 })
 _OPENCODE_FREE_AVAILABILITY_INVENTORY_LIMIT = 128
 
 
 class _AuthoritativeEmptyOpenCodeFreeCatalog(list[str]):
     """A successful inventory that explicitly marks every listed free model unavailable."""
+
+
+def _normalized_opencode_free_status(status: str) -> str:
+    """Compare relay status spellings without treating unknown states as unavailable."""
+    return "".join(char for char in status.strip().lower() if char.isalnum())
 
 
 def opencode_zen_free_headers() -> dict:
@@ -2202,7 +2207,7 @@ def _opencode_free_unavailable_inventory(items: list[Any]) -> set[str]:
         if (
             isinstance(model_id, str)
             and isinstance(status, str)
-            and status.strip().lower() in _OPENCODE_FREE_UNAVAILABLE_STATUSES
+            and _normalized_opencode_free_status(status) in _OPENCODE_FREE_UNAVAILABLE_STATUSES
         ):
             unavailable.add(model_id.lower())
             if len(unavailable) >= _OPENCODE_FREE_AVAILABILITY_INVENTORY_LIMIT:
