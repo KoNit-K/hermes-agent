@@ -2,6 +2,7 @@ import { type RefObject, useCallback, useLayoutEffect, useState } from 'react'
 
 import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { $connection } from '@/store/session'
+import { subscribeTitlebarChromeRevision } from '@/store/titlebar-chrome'
 
 /** The window-chrome inputs that move the fixed titlebar clusters without
  *  changing their size (macOS fullscreen hides the traffic lights → the left
@@ -62,6 +63,9 @@ export function usePanelTitlebar(ref: RefObject<HTMLElement | null>, enabled: bo
     }
 
     window.addEventListener('resize', measure)
+    // CSS geometry revisions from ContribWiring (tool cluster CSS vars) when
+    // the fixed chrome translates without a size change.
+    const unsubscribeChromeRevision = subscribeTitlebarChromeRevision(measure)
 
     // A fullscreen transition first fires `resize` (measured against the
     // pre-transition cluster) and only then lands the window-state IPC that
@@ -87,6 +91,7 @@ export function usePanelTitlebar(ref: RefObject<HTMLElement | null>, enabled: bo
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', measure)
+      unsubscribeChromeRevision()
       unsubscribeChrome()
       cancelAnimationFrame(frame)
     }

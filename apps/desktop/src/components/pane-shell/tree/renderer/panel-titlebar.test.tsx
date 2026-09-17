@@ -13,6 +13,12 @@ import { usePanelTitlebar } from './panel-titlebar'
 // ResizeObserver nor the window `resize` (which fires before the state IPC
 // lands) re-measures — the reservation stayed stale until a sidebar toggle or
 // reload (#108641). Chrome-state changes must schedule a re-measure.
+//
+// ContribWiring also emits a titlebar-chrome revision when CSS geometry for
+// the tool clusters changes (controlsPos / titlebarToolsRight), covering
+// translations that do not go through $connection.
+
+const chromeRevisionEvent = 'hermes:titlebar-chrome-revision'
 
 let clusterLeft = 100
 
@@ -80,6 +86,38 @@ describe('usePanelTitlebar', () => {
     act(() => {
       $connection.set({ ...$connection.get()!, connected: true } as HermesConnection)
     })
+
+    expect(element.style.getPropertyValue('--panel-titlebar-left')).toBe('172px')
+  })
+
+  it('remeasures translated titlebar clusters when chrome geometry is revised', () => {
+    const element = document.createElement('div')
+    element.getBoundingClientRect = () => rect(0, 1000)
+    document.body.append(element)
+    const ref = { current: element }
+
+    renderHook(() => usePanelTitlebar(ref, true, false))
+    expect(element.style.getPropertyValue('--panel-titlebar-left')).toBe('172px')
+
+    // Fullscreen repositions fixed chrome without changing its dimensions, so
+    // ResizeObserver has no entry to deliver for this translation.
+    clusterLeft = 14
+    act(() => window.dispatchEvent(new CustomEvent(chromeRevisionEvent, { detail: 1 })))
+
+    expect(element.style.getPropertyValue('--panel-titlebar-left')).toBe('86px')
+  })
+
+  it('retains the last safe reservation when a chrome cluster is missing', () => {
+    const element = document.createElement('div')
+    element.getBoundingClientRect = () => rect(0, 1000)
+    document.body.append(element)
+    const ref = { current: element }
+
+    renderHook(() => usePanelTitlebar(ref, true, false))
+    expect(element.style.getPropertyValue('--panel-titlebar-left')).toBe('172px')
+
+    document.querySelector('[data-titlebar-cluster="right"]')?.remove()
+    act(() => window.dispatchEvent(new CustomEvent(chromeRevisionEvent, { detail: 1 })))
 
     expect(element.style.getPropertyValue('--panel-titlebar-left')).toBe('172px')
   })
