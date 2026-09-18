@@ -23,9 +23,21 @@ function mount() {
   surface.dataset.composerSurfaceId = 'surface-1'
   const button = document.createElement('button')
   surface.appendChild(button)
+
+  const editableControls = [
+    document.createElement('input'),
+    document.createElement('textarea'),
+    document.createElement('select'),
+    document.createElement('div')
+  ]
+
+  editableControls[3].setAttribute('contenteditable', 'true')
+
+  editableControls[3].tabIndex = 0
+  editableControls.forEach(control => surface.appendChild(control))
   document.body.appendChild(surface)
 
-  return { button, editor, transcript }
+  return { button, editor, editableControls, transcript }
 }
 
 function selectTranscript(el: HTMLElement) {
@@ -37,8 +49,8 @@ function selectTranscript(el: HTMLElement) {
 }
 
 /** Button-up movement: the gesture that follows every mouse text selection. */
-function movePointerOver(target: Element) {
-  target.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, buttons: 0, clientX: 43, clientY: 44 }))
+function movePointerOver(target: Element, clientX = 43) {
+  target.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, buttons: 0, clientX, clientY: 44 }))
 }
 
 /** Selecting transcript text and then moving the mouse (or a programmatic
@@ -86,5 +98,38 @@ describe('floating composer focus-follow vs transcript selection', () => {
     movePointerOver(editor)
 
     expect(document.activeElement).toBe(editor)
+  })
+
+  it.each([
+    ['input', 0],
+    ['textarea', 1],
+    ['select', 2],
+    ['contenteditable', 3]
+  ])('keeps an inline %s focused when the pointer moves over it', (_, index) => {
+    const { editor, editableControls } = mount()
+    const control = editableControls[index]
+    unregister = registerFloatingComposer('surface-1', { groupId: 'g1', target: 'main' })
+
+    control.focus()
+    movePointerOver(control, 43 + index)
+
+    expect(document.activeElement).toBe(control)
+    expect(document.activeElement).not.toBe(editor)
+  })
+
+  it.each([
+    ['input', 0],
+    ['textarea', 1],
+    ['select', 2],
+    ['contenteditable', 3]
+  ])('keeps an inline %s focused when it receives focusin', (_, index) => {
+    const { editor, editableControls } = mount()
+    const control = editableControls[index]
+    unregister = registerFloatingComposer('surface-1', { groupId: 'g1', target: 'main' })
+
+    control.focus()
+
+    expect(document.activeElement).toBe(control)
+    expect(document.activeElement).not.toBe(editor)
   })
 })

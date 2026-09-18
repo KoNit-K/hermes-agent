@@ -22,6 +22,19 @@ let reconcileQueued = false
  * the edit ~80ms after it opened (#112935). */
 const inInlineEdit = (el: Element | null) => Boolean(el?.closest(EDIT_COMPOSER_ROOT))
 
+/** Native fields and contenteditable regions embedded in a transcript belong
+ * to the user once focused. Exclude composer editors here: their existing
+ * owner-selection path remains responsible for moving between composers. */
+function inInlineEditableControl(el: Element | null): boolean {
+  const control = el?.closest<HTMLElement>('input, textarea, select, [contenteditable]')
+
+  return Boolean(
+    control && control.dataset.slot !== 'composer-rich-input' && control.getAttribute('contenteditable') !== 'false'
+  )
+}
+
+const isUserOwnedFocusTarget = (el: Element | null) => inInlineEdit(el) || inInlineEditableControl(el)
+
 function rememberCaret(editor: EventTarget | null) {
   const selection = window.getSelection()
 
@@ -160,7 +173,7 @@ function trackPointer(event: PointerEvent) {
     active.dataset.slot === 'composer-rich-input' &&
     active.closest<HTMLElement>('[data-composer-owner]')?.dataset.composerOwner === id
 
-  if (event.type === 'pointermove' && !alreadyTyping && !inInlineEdit(active)) {
+  if (event.type === 'pointermove' && !alreadyTyping && !isUserOwnedFocusTarget(active)) {
     focusSelectedComposer()
   }
 }
@@ -191,7 +204,11 @@ function trackFocus(event: FocusEvent) {
   // A delayed focus/restore isn't a navigation gesture. A clicked control,
   // keyboard Tab, or the inline edit opened by a bubble click still keeps its
   // normal focus, without redirecting to the input.
-  if (keyboardNavigation || inInlineEdit(target) || (pointerDownTarget && target.contains(pointerDownTarget))) {
+  if (
+    keyboardNavigation ||
+    isUserOwnedFocusTarget(target) ||
+    (pointerDownTarget && target.contains(pointerDownTarget))
+  ) {
     flushSync(() => selectSurface(id))
   } else {
     // A refused redirect leaves focus where it landed: that element's focusin
