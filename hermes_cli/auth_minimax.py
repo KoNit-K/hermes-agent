@@ -229,7 +229,12 @@ def _refresh_minimax_oauth_state(state: Dict[str, Any], *, timeout_seconds: floa
     """Refresh MiniMax OAuth access token if close to expiry (or forced)."""
     from hermes_cli.auth import _minimax_save_auth_state
     if not state.get("refresh_token"):
-        raise _minimax_err("MiniMax OAuth state has no refresh_token; please re-login.", "no_refresh_token", relogin=True)
+        raise _minimax_err(
+            "MiniMax OAuth state has no refresh_token; please re-login.",
+            "no_refresh_token",
+            relogin=True,
+            category=missing_credential_category_for_state(state),
+        )
     try:
         expires_at = datetime.fromisoformat(state.get("expires_at", "")).timestamp()
     except Exception:
@@ -303,9 +308,15 @@ def build_minimax_oauth_token_provider() -> Callable[[], str]:
     static bearer would start 401-ing mid-session.
     """
     def _provide() -> str:
-        token = _minimax_fresh_state().get("access_token")
+        state = _minimax_fresh_state()
+        token = state.get("access_token")
         if not token:
-            raise _minimax_err("MiniMax OAuth state has no access_token after refresh.", "no_access_token", relogin=True)
+            raise _minimax_err(
+                "MiniMax OAuth state has no access_token after refresh.",
+                "no_access_token",
+                relogin=True,
+                category=missing_credential_category_for_state(state),
+            )
         return token
 
     return _provide

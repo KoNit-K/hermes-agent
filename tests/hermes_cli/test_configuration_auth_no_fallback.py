@@ -146,6 +146,68 @@ def test_tui_empty_codex_oauth_resolver_does_not_walk_fallback(monkeypatch):
     assert fallback_loads == []
 
 
+def test_tui_expired_minimax_without_refresh_does_not_walk_fallback(monkeypatch):
+    """The real MiniMax resolver must not spend a fallback when re-login is required."""
+    from hermes_cli import auth as auth_mod
+    from hermes_cli import runtime_provider
+    from tui_gateway import server
+
+    requested = []
+    fallback_loads = []
+    minimax_state = {
+        "access_token": "expired-token",
+        "expires_at": "2000-01-01T00:00:00+00:00",
+        "inference_base_url": "https://api.minimax.io/anthropic",
+    }
+
+    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {"provider": "minimax-oauth"})
+    monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
+    monkeypatch.setattr(auth_mod, "get_provider_auth_state", lambda _provider: minimax_state)
+
+    def fake_resolve_provider(requested_provider, **_kwargs):
+        requested.append(requested_provider)
+        if requested_provider == "minimax-oauth":
+            return "minimax-oauth"
+        pytest.fail(f"fallback resolver called for {requested_provider}")
+
+    monkeypatch.setattr(runtime_provider, "resolve_provider", fake_resolve_provider)
+
+    def fallback_model():
+        fallback_loads.append(True)
+        return [{"provider": "gemini", "model": "gemini-2.5-flash"}]
+
+    monkeypatch.setattr(server, "_load_fallback_model", fallback_model)
+
+    with pytest.raises(AuthError) as exc_info:
+        server._resolve_runtime_with_fallback({"requested": "minimax-oauth"})
+
+    assert exc_info.value.code == "no_refresh_token"
+    assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+    assert requested == ["minimax-oauth"]
+    assert fallback_loads == []
+
+
+def test_minimax_token_provider_missing_access_token_is_configuration_error(monkeypatch):
+    """A token disappearing after initial resolution also requires re-login, not fallback."""
+    from hermes_cli import auth_minimax
+
+    states = iter((
+        {
+            "access_token": "initial-token",
+            "inference_base_url": "https://api.minimax.io/anthropic",
+        },
+        {},
+    ))
+    monkeypatch.setattr(auth_minimax, "_minimax_fresh_state", lambda: next(states))
+
+    runtime = auth_minimax.resolve_minimax_oauth_runtime_credentials(as_token_provider=True)
+    with pytest.raises(AuthError) as exc_info:
+        runtime["api_key"]()
+
+    assert exc_info.value.code == "no_access_token"
+    assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+
 def test_codex_pool_cooldown_is_not_missing_credential(monkeypatch):
     """Existing but unavailable pool material must retain legal fallback semantics."""
     from hermes_cli import auth_codex

@@ -991,14 +991,10 @@ def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, targe
             lambda: _resolve_external_process_runtime(provider, requested_provider),
         )
     if provider == "anthropic":
-<<<<<<< HEAD
-        yield _anthropic_env_runtime(requested_provider, model_cfg, target_model)
-=======
         yield _resolve_rung(
             requested_provider,
-            lambda: _anthropic_env_runtime(requested_provider, model_cfg),
+            lambda: _anthropic_env_runtime(requested_provider, model_cfg, target_model),
         )
->>>>>>> 55ab99ba7a (fix(auth): preserve quarantine and auto fallback semantics)
     if provider == "bedrock":
         yield _resolve_rung(
             requested_provider,
