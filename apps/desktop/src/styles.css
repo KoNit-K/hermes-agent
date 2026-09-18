@@ -882,6 +882,25 @@
   box-decoration-break: clone;
 }
 
+/* `--dt-primary` follows a skin's primary swatch and can sit too close to a
+   dark surface. Inline prose references need a foreground-led fallback;
+   group-room mentions retain their distinct agent, human, and broadcast hues. */
+:root.dark .ref {
+  --ref-color: color-mix(in srgb, var(--dt-foreground) 78%, var(--ui-accent));
+}
+
+:root.dark [data-ref='agent'] {
+  --ref-color: color-mix(in srgb, var(--ui-accent) 72%, var(--dt-foreground));
+}
+
+:root.dark [data-ref='human'] {
+  --ref-color: color-mix(in srgb, var(--ui-warm) 72%, var(--dt-foreground));
+}
+
+:root.dark [data-ref='broadcast'] {
+  --ref-color: color-mix(in srgb, var(--dt-foreground) 82%, var(--ui-accent));
+}
+
 /* Affordance without chrome: only the ones you can actually activate respond,
    and they do it with an underline rather than a background. */
 :where(a, button).ref:hover {
