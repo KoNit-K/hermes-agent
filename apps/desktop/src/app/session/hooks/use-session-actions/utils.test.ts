@@ -558,6 +558,49 @@ describe('reconcileResumeMessages', () => {
     expect(out.parts.some(p => p.type === 'reasoning')).toBe(true)
   })
 
+  it('does not graft a settled empty-text tool call onto a later live assistant turn', () => {
+    const previous = [
+      msg('1-user', 'user', 'earlier question'),
+      msg('2-assistant', 'assistant', '', {
+        parts: [
+          { type: 'reasoning', text: 'earlier reasoning' },
+          { type: 'tool-call', toolCallId: 'earlier-call', toolName: 'terminal', result: 'done' }
+        ]
+      } as Partial<ChatMessage>)
+    ]
+
+    const next = [
+      msg('1-user', 'user', 'later question'),
+      msg('assistant-stream-later', 'assistant', '', {
+        pending: true,
+        parts: [
+          { type: 'reasoning', text: 'later reasoning' },
+          { type: 'tool-call', toolCallId: 'later-call', toolName: 'terminal' }
+        ]
+      } as Partial<ChatMessage>)
+    ]
+
+    const reconciled = reconcileResumeMessages(next, previous)
+
+    expect(reconciled[1].parts.map(part => part.type === 'tool-call' ? part.toolCallId : part.type)).toEqual([
+      'reasoning',
+      'later-call'
+    ])
+  })
+
+  it('preserves traces for an empty-text projection of the same live turn', () => {
+    const previous = [msg('1-user', 'user', 'run the tools'), streamingMsg('assistant-stream-live', '')]
+    const next = [
+      msg('1-user', 'user', 'run the tools'),
+      msg('inflight-assistant-session', 'assistant', '', { pending: true })
+    ]
+
+    const reconciled = reconcileResumeMessages(next, previous)
+
+    expect(reconciled[1].id).toBe('assistant-stream-live')
+    expect(reconciled[1].parts.map(part => part.type)).toEqual(['reasoning', 'tool-call'])
+  })
+
   it('preserves attachment refs for a matching user turn', () => {
     const next = [msg('stored-user', 'user', 'describe this image')]
 
