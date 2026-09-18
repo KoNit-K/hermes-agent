@@ -1,11 +1,7 @@
-// Two contracts with no coverage before the invalidation-scoping work split
-// AssistantMessage into InterAgentAssistantMessage + AssistantMessageBody:
+// Two contracts guard assistant-message rendering:
 //
-// 1. The collapse gate. A reply to an inter-agent delivery renders collapsed
-//    ("Replied to <sender>", expandable) ONLY once it settles — never while it
-//    streams, because the user should see progress. That gate is the sole
-//    remaining root-level `isRunning` subscription, so it is the thing most
-//    likely to break if the split is revisited.
+// 1. A reply to an inter-agent delivery stays expanded after it settles, so
+//    the operator can read the substantive answer without expanding a notice.
 // 2. The streaming marker. `data-message-streaming` moved off the message root
 //    onto a permanently-mounted hidden leaf, and
 //    scripts/run-short-session-hang-repro.mjs derives its settled-row count by
@@ -82,15 +78,16 @@ function Harness({ messages }: { messages: ThreadMessage[] }) {
 
 const DELIVERY = 'Message from 🤖 Hermes (@hermes): please check the build'
 
-describe('inter-agent collapse gate', () => {
-  it('collapses a settled reply to an inter-agent delivery', async () => {
+describe('inter-agent replies', () => {
+  it('keeps a settled reply to an inter-agent delivery expanded', async () => {
     render(<Harness messages={[user('u1', DELIVERY), assistant('a1', 'build is green', false)]} />)
 
-    expect(await screen.findByText(/Replied to/)).toBeTruthy()
-    expect(screen.getByText('show reply')).toBeTruthy()
+    expect(await screen.findByText('build is green')).toBeTruthy()
+    expect(screen.queryByText(/Replied to/)).toBeNull()
+    expect(screen.queryByText('show reply')).toBeNull()
   })
 
-  it('does NOT collapse while that reply is still streaming', async () => {
+  it('keeps an inter-agent reply visible while it is still streaming', async () => {
     const { container } = render(<Harness messages={[user('u1', DELIVERY), assistant('a1', 'working on it', true)]} />)
 
     await screen.findByText('working on it')

@@ -8,7 +8,7 @@ import {
   useThreadRuntime
 } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type FC, type ReactNode, useCallback, useContext, useMemo, useState } from 'react'
+import { type FC, useCallback, useContext, useMemo, useState } from 'react'
 import { useInRouterContext, useNavigate } from 'react-router'
 
 import { useSessionView } from '@/app/chat/session-view'
@@ -25,7 +25,6 @@ import { ResponseMessageIds } from '@/components/assistant-ui/thread/response-gr
 import { ResponseLoadingIndicator, TurnActivityIndicator } from '@/components/assistant-ui/thread/status'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
 import { useMessageReactions, useTapbackDoubleClick } from '@/components/assistant-ui/thread/use-message-reactions'
-import { AGENT_MESSAGE_RE } from '@/components/assistant-ui/thread/user-message'
 import { isApprovalActivity, isCurrentTurnMessage } from '@/components/assistant-ui/tool/approval-activity'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 import { formatElapsed } from '@/components/chat/activity-timer'
@@ -91,101 +90,10 @@ interface AssistantMessageProps {
 }
 
 export const AssistantMessage: FC<AssistantMessageProps> = props => {
-  // A reply to an inter-agent delivery is part of that exchange, not part of
-  // the human conversation — collapse it under a compact notice ("Reply to
-  // <sender>", expandable), mirroring the sender-side notice the previous
-  // user message already renders as. Grok-bots parity: the transcript shows
-  // events; the texts are one click away. Detection: the immediately
-  // preceding user message matches AGENT_MESSAGE_RE.
-  const interAgentSender = useAuiState(s => {
-    const messages = s.thread.messages
-
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].id !== s.message.id) {
-        continue
-      }
-
-      for (let j = i - 1; j >= 0; j--) {
-        const prev = messages[j] as { content?: unknown; role?: string }
-
-        if (prev.role === 'assistant') {
-          return null
-        }
-
-        if (prev.role === 'user') {
-          const match = AGENT_MESSAGE_RE.exec(messageContentText(prev.content as never).trim())
-
-          return match ? (match[1] || match[3] || 'agent').trim() : null
-        }
-      }
-
-      return null
-    }
-
-    return null
-  })
-
-  // The collapse gate below needs the LIVE running status, but only an
-  // inter-agent reply can ever be collapsed. Dispatching on that first keeps
-  // the status subscription out of the standard path entirely — the standard
-  // message root now re-renders for content, never for a pending flip.
-  return interAgentSender ? (
-    <InterAgentAssistantMessage {...props} sender={interAgentSender} />
-  ) : (
-    <AssistantMessageBody {...props} />
-  )
+  return <AssistantMessageBody {...props} />
 }
 
-/** The compact stand-in a settled inter-agent reply collapses to (Grok-bots
- *  parity — the transcript shows the event; the text is one click away). */
-const InterAgentCollapsedNotice: FC<{ sender: string }> = ({ sender }) => (
-  <div className="flex max-w-[min(86%,44rem)] flex-col gap-0.5 self-center px-2 py-0.5 text-[0.6875rem] leading-5 text-muted-foreground/60">
-    <span className="flex items-center justify-center gap-1.5">
-      <Codicon className="shrink-0 text-muted-foreground/55" name="arrow-small-right" size="0.8125rem" />
-      <span className="wrap-anywhere">Replied to {sender}</span>
-    </span>
-    <details className="self-center">
-      <summary className="cursor-pointer select-none text-center text-muted-foreground/45 hover:text-muted-foreground/70">
-        show reply
-      </summary>
-      <div className="mt-1 max-w-[36rem] rounded-lg border border-(--ui-stroke-tertiary) px-3 py-2 text-left text-[0.75rem] leading-5 text-foreground/85">
-        {MESSAGE_PARTS}
-      </div>
-    </details>
-  </div>
-)
-
-/**
- * An assistant reply that answers an inter-agent delivery. Owns the only
- * root-level `isRunning` subscription left in this file, and it is confined to
- * the rare inter-agent case: the reply renders collapsed once it settles, so
- * the gate genuinely needs live status. Never collapse while streaming — the
- * user should see progress.
- *
- * The collapse is expressed as a CHILD of the normal body, not as a competing
- * root. Returning a bare MessagePrimitive.Root here for the settled case put a
- * different element type in this position than the running case
- * (AssistantMessageBody), so settling unmounted the whole row and mounted a
- * fresh one — throwing away the DOM the scroll anchor was holding, which can
- * jump the transcript under the reader. One component, one root, children
- * vary: settling is now a prop change React applies in place.
- */
-const InterAgentAssistantMessage: FC<AssistantMessageProps & { sender: string }> = ({ sender, ...props }) => {
-  const isRunning = useAuiState(s => s.message.status?.type === 'running')
-
-  return (
-    <AssistantMessageBody
-      {...props}
-      collapsedNotice={isRunning ? null : <InterAgentCollapsedNotice sender={sender} />}
-    />
-  )
-}
-
-const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null | ReactNode }> = ({
-  collapsedNotice = null,
-  onBranchInNewChat,
-  onDismissError
-}) => {
+const AssistantMessageBody: FC<AssistantMessageProps> = ({ onBranchInNewChat, onDismissError }) => {
   const messageId = useAuiState(s => s.message.id)
   const messageRuntime = useMessageRuntime()
   const threadRuntime = useThreadRuntime()
@@ -250,20 +158,15 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
   return (
     <MessagePrimitive.Root
       className={cn(
-        'group flex w-full min-w-0 max-w-full flex-col gap-0 self-start overflow-hidden',
-        collapsedNotice && 'pb-(--conversation-turn-gap)'
+        'group flex w-full min-w-0 max-w-full flex-col gap-0 self-start overflow-hidden'
       )}
       data-approval-activity-only={approval && activityOnly ? '' : undefined}
       data-role="assistant"
       data-slot="aui_assistant-message-root"
-      // Collapsed inter-agent rows never carried the tapback listener; keeping
-      // that exact truth table means gating it on the notice rather than on
-      // whether the hook returned a handler.
-      onDoubleClick={collapsedNotice ? undefined : onDoubleClick}
+      onDoubleClick={onDoubleClick}
       ref={enterRef}
     >
-      {collapsedNotice ?? (
-        <>
+      <>
           <div
             className="wrap-anywhere min-w-0 max-w-full overflow-hidden text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground"
             data-slot="aui_assistant-message-content"
@@ -309,8 +212,7 @@ const AssistantMessageBody: FC<AssistantMessageProps & { collapsedNotice?: null 
           turn on its summary rather than burying it above the controls. */}
           <SettledChangedFiles />
           <StreamingMarker />
-        </>
-      )}
+      </>
     </MessagePrimitive.Root>
   )
 }
