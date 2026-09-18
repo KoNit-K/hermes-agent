@@ -98,6 +98,41 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
     assert build_kanban_stop_nudge(messages=messages) is None
 
 
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {"name": "kanban_request_review", "arguments": "{}"},
+                    }
+                ],
+            }
+        ],
+        [
+            {
+                "role": "tool",
+                "name": "kanban_request_review",
+                "tool_call_id": "1",
+                "content": "Review requested",
+            }
+        ],
+    ],
+    ids=("assistant_review_handoff", "tool_review_handoff"),
+)
+def test_no_nudge_after_kanban_review_handoff(clear_kanban_env, messages):
+    """A card under review is terminal for the worker stop guard."""
+    clear_kanban_env.setenv("HERMES_KANBAN_TASK", "t_abc")
+
+    assert session_called_kanban_terminal(messages) is True
+    assert build_kanban_stop_nudge(messages=messages) is None
+
+
 
 
 
@@ -108,7 +143,6 @@ def test_no_nudge_after_kanban_complete(clear_kanban_env):
 # without a terminal call, the dispatcher's bounded retry (streak of 3)
 # handles it.  See also tests/hermes_cli/test_kanban_core_functionality.py
 # for the dispatcher-side streak tests.
-
 
 
 
