@@ -996,8 +996,6 @@ def contacts_birthdays(args):
                 except ValueError:
                     continue
                 days_until = (next_date - today).days
-                if days_until > days:
-                    continue
                 candidate = (value, next_date, days_until)
                 if selected is None or birthday.get("metadata", {}).get("primary"):
                     selected = candidate
@@ -1005,6 +1003,8 @@ def contacts_birthdays(args):
                     break
             if selected is not None:
                 value, next_date, days_until = selected
+                if days_until > days:
+                    continue
                 entry = {"name": name, "birthday": _format_birthday(value),
                          "nextDate": next_date.isoformat(), "daysUntil": days_until}
                 year = value.get("year")

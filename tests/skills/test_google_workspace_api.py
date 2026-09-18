@@ -365,6 +365,22 @@ def test_contacts_birthdays_emits_one_primary_or_first_valid_birthday_per_person
     }]
 
 
+def test_contacts_birthdays_does_not_replace_an_out_of_window_primary_with_a_secondary(api_module, monkeypatch, capsys):
+    """Primary-source preference is per contact, rather than a way around --days."""
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 3, 1))
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: "gws")
+    monkeypatch.setattr(api_module, "_people_connections_page", lambda *_args, **_kwargs: {
+        "connections": [{"names": [{"displayName": "Ada"}], "birthdays": [
+            {"date": {"month": 3, "day": 2}},
+            {"metadata": {"primary": True}, "date": {"month": 9, "day": 10}},
+        ]}],
+    })
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=10, name=""))
+
+    assert json.loads(capsys.readouterr().out) == []
+
+
 def test_contacts_birthdays_uses_python_people_client(api_module, monkeypatch, capsys):
     """The fallback backend requests the same birthday fields."""
     calls = []
