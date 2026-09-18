@@ -36,7 +36,7 @@ from hermes_cli.web_server_config import (
 from hermes_cli.web_server_gateway import _strip_session_list_rows
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK
 from hermes_cli.web_server_profiles import (
-    _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
+    _config_profile_scope, _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
 )
 from hermes_cli.web_server_sessions import _open_session_db_at_path
 from starlette.concurrency import run_in_threadpool
@@ -913,9 +913,18 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
     model = (body.model or "").strip()
     if not provider or not model:
         raise HTTPException(status_code=400, detail="provider and model are required")
+
+    def _write_scoped() -> None:
+        # ``run_in_threadpool`` does not create a profile secret scope. In a
+        # multiplexed dashboard, custom-provider ``key_env`` validation must
+        # read the named profile rather than fail closed or borrow the launch
+        # profile's process environment.
+        with _config_profile_scope(name):
+            _write_profile_model(profile_dir, provider, model)
+
     with _profile_errors("PUT /api/profiles/%s/model failed", name,
                          not_found=(), bad_request=()):
-        await run_in_threadpool(_write_profile_model, profile_dir, provider, model)
+        await run_in_threadpool(_write_scoped)
     return {"ok": True, "provider": provider, "model": model}
 
 

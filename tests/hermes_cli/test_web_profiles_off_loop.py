@@ -27,6 +27,7 @@ import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -421,3 +422,55 @@ def test_update_profile_model_runs_off_loop(client, monkeypatch, loop_probe):
 
     assert resp.status_code == 200, resp.text
     assert_off_loop(seen, "write_profile_model")
+
+
+def test_update_profile_model_keeps_404_and_400_prevalidation(client):
+    """The worker-only scope does not change the route's existing client errors."""
+    assert client.put(
+        "/api/profiles/missing/model", json={"provider": "acme", "model": "acme/chat"}
+    ).status_code == 404
+    assert client.put(
+        "/api/profiles/demo/model", json={"provider": "", "model": "acme/chat"}
+    ).status_code == 400
+
+
+def test_update_profile_model_uses_named_secret_scope_under_multiplexing(
+    client, profile_dir, monkeypatch, loop_probe,
+):
+    """The worker must validate a custom ``key_env`` in the selected profile's scope."""
+    from agent import secret_scope
+    from hermes_constants import get_hermes_home
+    from hermes_cli.web_routers import profiles as router_mod
+    from hermes_cli.web_server_profiles import _hermes_home_scope
+
+    seen, probe = loop_probe
+
+    @contextmanager
+    def named_profile_scope(name):
+        assert name == "demo"
+        with _hermes_home_scope(profile_dir):
+            token = secret_scope.set_secret_scope({"ACME_KEY": "named-profile-key"})
+            try:
+                yield profile_dir
+            finally:
+                secret_scope.reset_secret_scope(token)
+
+    def fake_write_model(profile, provider, model):
+        probe("write_profile_model")
+        seen.append(("secret", secret_scope.get_secret("ACME_KEY")))
+        seen.append(("home", get_hermes_home()))
+
+    monkeypatch.setattr(router_mod, "_write_profile_model", fake_write_model)
+    monkeypatch.setattr(router_mod, "_config_profile_scope", named_profile_scope)
+    secret_scope.set_multiplex_active(True)
+    try:
+        resp = client.put(
+            "/api/profiles/demo/model", json={"provider": "acme", "model": "acme/chat"}
+        )
+    finally:
+        secret_scope.set_multiplex_active(False)
+
+    assert resp.status_code == 200, resp.text
+    assert_off_loop(seen, "write_profile_model")
+    assert ("secret", "named-profile-key") in seen
+    assert ("home", profile_dir) in seen
