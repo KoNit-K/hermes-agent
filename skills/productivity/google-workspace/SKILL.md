@@ -261,6 +261,9 @@ $GAPI contacts birthdays --days 365 --max 100
 $GAPI contacts birthdays --name "Ada"
 ```
 
+With `--name`, the default window expands to the next year; pass `--days` to
+request a narrower or wider window. The unnamed feed remains a 30-day view.
+
 For birthday questions, use `contacts birthdays` rather than searching for a
 Calendar named "Birthdays". Google Calendar's UI Birthdays calendar is not
 always exposed through CalendarList or regular event queries. Feb 29 birthdays

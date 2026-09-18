@@ -331,6 +331,40 @@ def test_contacts_birthdays_name_filter_and_leap_day(api_module, monkeypatch, ca
     }]
 
 
+def test_contacts_birthdays_named_query_defaults_to_an_annual_window(api_module, monkeypatch, capsys):
+    """A named birthday question is useful even when the date is outside the 30-day feed."""
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 3, 1))
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: "gws")
+    monkeypatch.setattr(api_module, "_people_connections_page", lambda *_args, **_kwargs: {
+        "connections": [{"resourceName": "people/ada", "names": [{"displayName": "Ada"}],
+                         "birthdays": [{"date": {"month": 9, "day": 10}}]}],
+    })
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=None, max=10, name="Ada"))
+
+    assert json.loads(capsys.readouterr().out) == [{
+        "name": "Ada", "birthday": "10.09.", "nextDate": "2025-09-10", "daysUntil": 193,
+    }]
+
+
+def test_contacts_birthdays_emits_one_primary_or_first_valid_birthday_per_person(api_module, monkeypatch, capsys):
+    """Multiple People birthday entries must not duplicate one contact in the answer."""
+    monkeypatch.setattr(api_module, "_today", lambda: date(2025, 3, 1))
+    monkeypatch.setattr(api_module, "_gws_binary", lambda: "gws")
+    monkeypatch.setattr(api_module, "_people_connections_page", lambda *_args, **_kwargs: {
+        "connections": [{"resourceName": "people/ada", "names": [{"displayName": "Ada"}], "birthdays": [
+            {"date": {"month": 3, "day": 2}},
+            {"metadata": {"primary": True}, "date": {"month": 3, "day": 3}},
+        ]}],
+    })
+
+    api_module.contacts_birthdays(types.SimpleNamespace(days=30, max=10, name=""))
+
+    assert json.loads(capsys.readouterr().out) == [{
+        "name": "Ada", "birthday": "03.03.", "nextDate": "2025-03-03", "daysUntil": 2,
+    }]
+
+
 def test_contacts_birthdays_uses_python_people_client(api_module, monkeypatch, capsys):
     """The fallback backend requests the same birthday fields."""
     calls = []

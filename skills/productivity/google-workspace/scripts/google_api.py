@@ -977,6 +977,7 @@ def contacts_birthdays(args):
     page_token = None
     birthdays = []
     name_filter = args.name.casefold()
+    days = args.days if args.days is not None else (366 if name_filter else 30)
     gws_binary = _gws_binary()
 
     while True:
@@ -985,6 +986,7 @@ def contacts_birthdays(args):
             name = _contact_display_name(person)
             if name_filter and name_filter not in name.casefold():
                 continue
+            selected = None
             for birthday in person.get("birthdays", []):
                 value = birthday.get("date", {})
                 if not value.get("month") or not value.get("day"):
@@ -994,14 +996,17 @@ def contacts_birthdays(args):
                 except ValueError:
                     continue
                 days_until = (next_date - today).days
-                if days_until > args.days:
+                if days_until > days:
                     continue
-                entry = {
-                    "name": name,
-                    "birthday": _format_birthday(value),
-                    "nextDate": next_date.isoformat(),
-                    "daysUntil": days_until,
-                }
+                candidate = (value, next_date, days_until)
+                if selected is None or birthday.get("metadata", {}).get("primary"):
+                    selected = candidate
+                if birthday.get("metadata", {}).get("primary"):
+                    break
+            if selected is not None:
+                value, next_date, days_until = selected
+                entry = {"name": name, "birthday": _format_birthday(value),
+                         "nextDate": next_date.isoformat(), "daysUntil": days_until}
                 year = value.get("year")
                 if isinstance(year, int) and not isinstance(year, bool):
                     entry["turningAge"] = next_date.year - year
@@ -1375,7 +1380,8 @@ def main():
     p.set_defaults(func=contacts_list)
 
     p = con_sub.add_parser("birthdays", help="List upcoming contact birthdays from People API")
-    p.add_argument("--days", type=int, default=30, help="Include birthdays in the next N days")
+    p.add_argument("--days", type=int, default=None,
+                   help="Include birthdays in the next N days (30 by default; 366 with --name)")
     p.add_argument("--max", type=_positive_int, default=100, help="Maximum results to return (at least 1)")
     p.add_argument("--name", default="", help="Only include contacts whose name contains this text")
     p.set_defaults(func=contacts_birthdays)
