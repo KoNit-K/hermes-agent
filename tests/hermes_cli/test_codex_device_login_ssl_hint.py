@@ -36,6 +36,27 @@ class _RaisingClient:
         raise self._exc
 
 
+class _PollingClient:
+    """Context-manager client that returns or raises scripted poll results."""
+
+    def __init__(self, results) -> None:
+        self._results = iter(results)
+        self.calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def post(self, url, **kwargs):
+        self.calls += 1
+        result = next(self._results)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
 def _login_post():
     return auth_codex._codex_login_post(
         "https://auth.openai.com/api/accounts/deviceauth/usercode",
@@ -74,3 +95,42 @@ def test_plain_timeout_has_no_ssl_hint(monkeypatch):
 
     assert "timed out" in str(excinfo.value)
     assert "OPENSSL_CONF" not in str(excinfo.value)
+
+
+def test_poll_retries_a_transient_transport_error_until_approval(monkeypatch):
+    client = _PollingClient([
+        httpx.ConnectError("connection reset"),
+        httpx.Response(200, json={"authorization_code": "code", "code_verifier": "verifier"}),
+    ])
+    monkeypatch.setattr(auth_codex, "_codex_http_client", lambda **kw: client)
+    monkeypatch.setattr(auth_codex.time, "sleep", lambda _seconds: None)
+
+    result = _poll()
+
+    assert result["authorization_code"] == "code"
+    assert client.calls == 2
+
+
+def test_poll_still_rejects_terminal_http_errors(monkeypatch):
+    client = _PollingClient([httpx.Response(401)])
+    monkeypatch.setattr(auth_codex, "_codex_http_client", lambda **kw: client)
+    monkeypatch.setattr(auth_codex.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(AuthError, match="status 401"):
+        _poll()
+
+    assert client.calls == 1
+
+
+def test_poll_transport_errors_still_respect_the_device_code_deadline(monkeypatch):
+    client = _PollingClient([httpx.ConnectTimeout("timed out")])
+    monotonic_values = iter([0, 0, 901])
+    monkeypatch.setattr(auth_codex, "_codex_http_client", lambda **kw: client)
+    monkeypatch.setattr(auth_codex.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(auth_codex.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(AuthError) as excinfo:
+        _poll()
+
+    assert excinfo.value.code == "device_code_timeout"
+    assert client.calls == 1

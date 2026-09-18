@@ -776,6 +776,12 @@ def _codex_poll_authorization_code(
                         f"{issuer}/api/accounts/deviceauth/token",
                         json={"device_auth_id": device_auth_id, "user_code": user_code},
                         headers={"Content-Type": "application/json"})
+                except httpx.TransportError as exc:
+                    # The device code remains valid after a failed connection. Keep polling until
+                    # the existing deadline so a browser approval is not discarded by a transient
+                    # network failure.
+                    logger.warning("Codex device auth poll transport error; retrying: %s", exc)
+                    continue
                 except Exception as exc:
                     raise _codex_err(
                         f"Device auth polling request failed: {exc}{_ssl_interop_hint(exc)}",
