@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  getHermesConfigDefaults,
   getHermesConfigRecord,
   peekConfigReadOrigin,
   resolveConfigWriteScope,
@@ -98,5 +99,19 @@ describe('config read/write route binding', () => {
     const record = await getHermesConfigRecord(null)
 
     expect(peekConfigReadOrigin(record)).toEqual({ connectionId: 'connection-a', profile: 'worker' })
+  })
+
+  it('writes reset defaults back through the route that fetched them', async () => {
+    setApiRequestConnection('connection-a')
+    setApiRequestProfile('default')
+
+    const defaults = await getHermesConfigDefaults()
+    setApiRequestConnection('connection-b')
+
+    await saveHermesConfig(defaults)
+
+    expect(api.mock.calls.find(call => call[0].method === 'PUT')?.[0]).toEqual(
+      expect.objectContaining({ connectionId: 'connection-a', profile: 'default' })
+    )
   })
 })
