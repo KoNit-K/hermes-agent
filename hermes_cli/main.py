@@ -1001,7 +1001,7 @@ def _auth_store_logged_in(auth_file: Path, registry, strict_profile_scope: bool)
     try:
         auth = json.loads(auth_file.read_text(encoding="utf-8-sig")) if auth_file.exists() else {}
         active = auth.get("active_provider") if isinstance(auth, dict) else None
-        if not active:
+        if not active and (auth_file.parent / ".share_auth").is_file():
             from hermes_constants import get_default_hermes_root
 
             shared_auth_file = get_default_hermes_root() / "auth.json"
