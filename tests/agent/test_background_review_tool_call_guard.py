@@ -25,6 +25,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import agent.background_review as bg  # noqa: E402
+from run_agent import AIAgent  # noqa: E402
 
 
 def _fake_parent(client, *, runtime=None) -> SimpleNamespace:
@@ -123,3 +124,33 @@ def test_an_incapable_provider_still_reviews_when_the_review_is_routed_away():
     }
     with patch.object(bg, "_resolve_review_runtime", return_value=routed):
         assert _run(_fake_parent(_IncapableClient())).called
+
+
+def test_background_context_rejection_never_uses_foreground_overflow_copy():
+    """A failed review is auxiliary work, even if its server says "context size"."""
+    parent = _fake_parent(MagicMock())
+    parent._emit_auxiliary_failure = MagicMock()
+    rejection = Exception("Context size has been exceeded.")
+
+    with (
+        patch("hermes_cli.config.load_config", return_value={}),
+        patch.object(bg, "_run_review_fork", side_effect=rejection),
+        patch("tools.terminal_tool.set_approval_callback"),
+    ):
+        bg._run_review_in_thread(
+            parent, [{"role": "user", "content": "one short prompt"}], "review please"
+        )
+
+    parent._emit_auxiliary_failure.assert_called_once_with(
+        "background review", rejection, context_isolated=True
+    )
+
+    foreground = object.__new__(AIAgent)
+    foreground._emit_warning = MagicMock()
+    AIAgent._emit_auxiliary_failure(
+        foreground, "background review", rejection, context_isolated=True
+    )
+    warning = foreground._emit_warning.call_args.args[0]
+    assert "background review" in warning.lower()
+    assert "conversation has grown too long" not in warning.lower()
+    assert "/compress" not in warning

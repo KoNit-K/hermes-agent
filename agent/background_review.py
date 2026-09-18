@@ -1223,7 +1223,7 @@ def _run_review_in_thread(
         logger.warning("Background memory/skill review failed: %s", e)
         if st.review_usage:
             _log_review_completion(st.review_usage, "error")
-        agent._emit_auxiliary_failure("background review", e)
+        agent._emit_auxiliary_failure("background review", e, context_isolated=True)
     finally:
         # Safety net for the exception path (setup failures before the request-phase finally).
         # Both cleanups are identity-scoped and idempotent; re-enter thread-scoped silence so

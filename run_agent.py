@@ -510,8 +510,33 @@ class AIAgent(
     _log_stream_retry = _forward("agent.stream_diag", "log_stream_retry")
     _emit_stream_drop = _forward("agent.stream_diag", "emit_stream_drop")
 
-    def _emit_auxiliary_failure(self, task: str, exc: BaseException) -> None:
-        """Surface a compact warning for failed auxiliary work."""
+    def _emit_auxiliary_failure(
+        self, task: str, exc: BaseException, *, context_isolated: bool = False,
+    ) -> None:
+        """Surface a compact warning for failed auxiliary work.
+
+        ``context_isolated`` is for detached workers such as background review:
+        their provider rejection must not be presented as the foreground
+        conversation exhausting its context window.
+        """
+        if context_isolated:
+            try:
+                from agent.error_classifier import FailoverReason, classify_api_error
+
+                classified = classify_api_error(
+                    exc,
+                    provider=str(getattr(self, "provider", "") or ""),
+                    model=str(getattr(self, "model", "") or ""),
+                )
+                if classified.reason is FailoverReason.context_overflow:
+                    self._emit_warning(
+                        f"⚠ Auxiliary {task} failed: the model server rejected the "
+                        "auxiliary request as too large. Your conversation was not "
+                        "identified as too long."
+                    )
+                    return
+            except Exception:
+                pass
         try:
             detail = self._summarize_api_error(exc)
         except Exception:
