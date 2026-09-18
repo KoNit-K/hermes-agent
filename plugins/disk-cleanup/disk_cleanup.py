@@ -9,7 +9,6 @@ Scope: strictly HERMES_HOME and /tmp/hermes-*; never ~/.hermes/logs/ or system d
 from __future__ import annotations
 
 import contextlib
-import functools
 import json
 import logging
 import shutil
@@ -105,20 +104,28 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     "patches", "projects", "skins", "themes", "contributors",
     "profiles", "backups", "optional-skills", "workspace", "plans", "home"})
 
-@functools.lru_cache(maxsize=8)  # keyed by home: a multiplexed process serves several profiles
-def _protected_cron_paths(home: Path) -> frozenset:
-    """Defense-in-depth for quick(): EXACT cron control-plane paths (``cron/``, ``output/`` root,
-    ``jobs.json``, ``.tick.lock``) never deleted regardless of stored category (stale tracked.json).
-    Never widen to everything under ``cron/output/``: run artifacts there are disposable; only
-    wholesale deletion of ``output/`` is fatal."""
-    return frozenset(str(x) for parent in ("cron", "cronjobs") for base in (home / parent,)
-                     for x in (base, base / "output", base / "jobs.json", base / ".tick.lock"))
+def _is_protected_tracked_path(path: Path) -> bool:
+    """Whether a path is durable user or control-plane state, not cleanup data.
 
-
-# Paths under $HERMES_HOME that must NEVER be deleted by quick(), regardless of what the stored category
-# says. This is a defense-in-depth guard against stale tracked.json entries from before #34840.
-def _is_protected_cron_path(p: Path) -> bool:
-    return str(p.resolve()) in _protected_cron_paths(get_hermes_home())
+    ``tracked.json`` can outlive category changes, so this guard applies to both
+    new tracking and deletion. Cron output remains the sole protected-tree
+    exception because individual run artifacts are intentionally disposable.
+    """
+    try:
+        rel = path.resolve().relative_to(get_hermes_home())
+    except ValueError:
+        return False
+    except OSError:
+        # A path we cannot resolve cannot be shown to be disposable.
+        return True
+    if not rel.parts:
+        return True
+    top = rel.parts[0]
+    if top in ("cron", "cronjobs"):
+        # ``cron/output`` itself is control-plane; only descendants are
+        # disposable run artifacts.
+        return len(rel.parts) < 3 or rel.parts[1] != "output"
+    return top in _EMPTY_DIR_PROTECTED_TOP_LEVEL
 
 
 def fmt_size(n: float) -> str:
@@ -140,6 +147,9 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
         return False
     if not is_safe_path(path):
         _log(f"REJECT: {path} (outside HERMES_HOME)")
+        return False
+    if _is_protected_tracked_path(path):
+        _log(f"REJECT: {path} (protected path)")
         return False
     size = path.stat().st_size if path.is_file() else 0
     tracked = load_tracked()
@@ -236,9 +246,9 @@ def quick() -> Dict[str, Any]:
             # Misclassified stale entry — drop it rather than delete the file.
             _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
             continue
-        # Hard safety net even if re-validation above somehow let it through.
-        if _is_protected_cron_path(p):
-            _log(f"SKIP protected cron path: {p}")
+        # Hard safety net for stale entries that predate the protected-path guard.
+        if _is_protected_tracked_path(p):
+            _log(f"SKIP protected tracked path: {p}")
             continue
         if not _is_auto_delete(cat, age):
             new_tracked.append(item)
@@ -324,13 +334,11 @@ def guess_category(path: Path) -> Optional[str]:
     with contextlib.suppress(ValueError):  # not under HERMES_HOME (/tmp/hermes-*) — name rules only
         rel = path.resolve().relative_to(get_hermes_home())
         top = rel.parts[0] if rel.parts else ""
-        if top in _NEVER_TRACK_TOP_LEVEL:
+        if _is_protected_tracked_path(path) or top in _NEVER_TRACK_TOP_LEVEL:
             return None
         if top in ("cron", "cronjobs"):
             # Only the disposable ``output/`` subtree; control-plane state (jobs.json,
             # .tick.lock) must never be tracked — deleting it wipes the scheduler registry.
             return "cron-output" if len(rel.parts) >= 3 and rel.parts[1] == "output" else None
-        if top == "cache":
-            return "temp"
     name = path.name
     return "test" if name.startswith(_TEST_PATTERNS) or name.endswith(_TEST_SUFFIXES) else None

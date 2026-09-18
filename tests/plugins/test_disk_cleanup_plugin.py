@@ -15,6 +15,7 @@ Covers the bundled plugin at ``plugins/disk-cleanup/``:
 import importlib
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -269,6 +270,60 @@ class TestStaleCronEntryMigration:
         summary = dg.quick()
         assert summary["deleted"] == 1, "valid old cron-output should be deleted"
         assert not run_md.exists()
+
+
+class TestProtectedTrackedEntryMigration:
+    """Stale tracked entries must not turn durable plugin state into cleanup targets."""
+
+    @pytest.mark.parametrize(
+        "relative_path",
+        (
+            "cache/terminal/snapshots/command.json",
+            "plugins/kanban/attachments/card-image.png",
+        ),
+    )
+    def test_quick_keeps_protected_stale_temp_entries(self, _isolate_env, relative_path):
+        dg = _load_lib()
+        protected_file = _isolate_env / relative_path
+        protected_file.parent.mkdir(parents=True)
+        protected_file.write_text("important state")
+        assert dg.guess_category(protected_file) is None
+        assert dg.track(str(protected_file), "temp", silent=True) is False
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([{
+            "path": str(protected_file),
+            "category": "temp",
+            "timestamp": old_ts,
+            "size": protected_file.stat().st_size,
+        }]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 0
+        assert protected_file.exists()
+        assert json.loads(tracked_file.read_text()) == []
+
+    def test_quick_still_deletes_ordinary_tracked_test_and_temp_files(self, _isolate_env):
+        dg = _load_lib()
+        test_file = _isolate_env / "test_scratch.py"
+        temp_file = _isolate_env / "temporary-output.txt"
+        test_file.write_text("x")
+        temp_file.write_text("x")
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        tracked_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_file.write_text(json.dumps([
+            {"path": str(test_file), "category": "test", "timestamp": old_ts, "size": 1},
+            {"path": str(temp_file), "category": "temp", "timestamp": old_ts, "size": 1},
+        ]))
+
+        summary = dg.quick()
+
+        assert summary["deleted"] == 2
+        assert not test_file.exists()
+        assert not temp_file.exists()
 
 
 class TestTrackForgetQuick:
