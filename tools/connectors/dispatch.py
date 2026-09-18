@@ -28,7 +28,10 @@ def dispatch_connector_batch(calls, ids, *, user_task, enabled_tools,
                           "Retry with fewer calls per batch.")
     partition = partition_calls(calls)
     if partition.local:
-        return tool_error("Local tools require one entry per tool_call; mixed and multi-local batches are not supported.")
+        return tool_error(
+            "Local tools require one entry per tool_call; use "
+            '{"calls":[{"name":"...","arguments":{...}}]}. '
+            "Mixed and multi-local batches are not supported.")
     entries = list(partition.errors)
     for offset, plan in enumerate(partition.remote):
         if is_interrupted():

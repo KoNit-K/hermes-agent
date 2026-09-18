@@ -7,6 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 
+SINGLE_ENTRY_SHAPE = '{"calls":[{"name":"...","arguments":{...}}]}'
+
+
 @pytest.mark.parametrize("mixed", [False, True])
 def test_local_batches_rejected_before_any_entry_executes(monkeypatch, mixed):
     import model_tools
@@ -22,14 +25,25 @@ def test_local_batches_rejected_before_any_entry_executes(monkeypatch, mixed):
         {"name": "connectors__gmail__SEND_EMAIL" if mixed else "todo_list", "arguments": {}},
     ]
     name, args, error = resolve_underlying_call({"calls": calls})
-    assert name is None and "one entry per tool_call" in error
+    assert name is None
+    assert SINGLE_ENTRY_SHAPE in error
     invoked = []
     monkeypatch.setattr(model_tools.registry, "dispatch", lambda *a, **kw: invoked.append(a))
     monkeypatch.setattr(bridge, "_default_client_factory", lambda: invoked.append("gateway"))
     result = json.loads(model_tools.handle_function_call(
         "tool_call", {"calls": calls}, enabled_toolsets=["connections", "session_search", "todo"]))
-    assert "one entry per tool_call" in result["error"]
+    assert SINGLE_ENTRY_SHAPE in result["error"]
     assert invoked == []
+
+
+def test_connector_dispatch_rejects_a_local_batch_with_the_single_entry_shape():
+    from tools.connectors.dispatch import dispatch_connector_batch
+
+    result = json.loads(dispatch_connector_batch(
+        [{"name": "session_search", "arguments": {}}], None,
+        user_task="test", enabled_tools=[], middleware_trace=[],
+        enabled_toolsets=[], disabled_toolsets=[]))
+    assert SINGLE_ENTRY_SHAPE in result["error"]
 
 
 @pytest.mark.parametrize("flatten_probe", [False, True])

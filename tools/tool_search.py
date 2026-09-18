@@ -552,7 +552,9 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
 
     if len(entries) > 1 and any(not is_connector_name(e["name"]) for e in entries):
         return None, {}, (
-            "Local tools require one entry per tool_call; mixed and multi-local batches are not supported."
+            "Local tools require one entry per tool_call; use "
+            '{"calls":[{"name":"...","arguments":{...}}]}. '
+            "Mixed and multi-local batches are not supported."
         )
     if is_connector_name(entries[0]["name"]):
         return CONNECTOR_BATCH_SENTINEL, {"calls": entries}, None
