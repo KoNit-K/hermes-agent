@@ -257,18 +257,11 @@ class GatewayNotificationsMixin:
                     return None
 
         def _still_authorized() -> bool:
-            return expected_generation is None or self._is_session_run_current(
-                generation_key, expected_generation,
+            return expected_generation is None or (
+                generation_key == session_entry.session_key
+                and self._is_session_run_current(generation_key, expected_generation)
             )
 
-        if target_session_id == session_entry.session_id:
-            if not _still_authorized():
-                logger.warning(
-                    "Async-delegation completion lost run generation %s for routing key %s; "
-                    "dropping injection.", expected_generation, generation_key,
-                )
-                return None
-            return session_entry
         prior_session_id = session_entry.session_id
         if follows_compression:
             switched = await self.async_session_store.advance_compression_session(
