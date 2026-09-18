@@ -158,7 +158,9 @@ class TestCacheDiscordImage:
             result = await adapter._cache_discord_image(att, ".png")
 
         assert result == "/tmp/fallback.png"
-        mock_url.assert_awaited_once()
+        mock_url.assert_awaited_once_with(
+            att.url, ext=".png", filename="file.png"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -270,4 +272,3 @@ class TestHandleMessageUsesAuthenticatedRead:
         event = adapter.handle_message.call_args[0][0]
         assert event.media_urls == ["/tmp/img_from_read.png"]
         assert event.media_types == ["image/png"]
-
