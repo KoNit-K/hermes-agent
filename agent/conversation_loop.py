@@ -33,7 +33,7 @@ from agent.runtime_cwd import resolve_agent_cwd
 from agent.surface_switch import (
     identity_line_value, note_inert_pinned_tools, split_runtime_boundary, stage_surface_switch_note,
 )
-from agent.turn_context import PreflightCompressionTimedOut, build_turn_context
+from agent.turn_context import PreflightCompressionDeferred, PreflightCompressionTimedOut, build_turn_context
 from agent.turn_retry_state import TurnRetryState
 # Phase helpers of the turn loop, bound at import so a source-tree swap cannot load a
 # skewed phase mid-turn.
@@ -1003,6 +1003,16 @@ def _compression_deferred_result(agent, messages: List[Dict], api_call_count: in
             "Context compression is temporarily paused after a recent failed attempt. Please retry "
             "in a moment — compression will resume automatically (or run /compress to force a retry now)."
         )
+    elif reason == "timeout_prune":
+        logger.info(
+            "turn deferred: preflight summary timed out and emergency pruning did not make the "
+            "request safe (session=%s) — not counting as compression exhaustion", session,
+        )
+        _final = (
+            "Context compression timed out before it could safely reduce this request. Hermes kept any "
+            "emergency tool-result pruning and did not reset the session; please retry in a moment or run "
+            "/compress to retry manually."
+        )
     else:
         holder = getattr(agent, "_compression_skipped_due_to_lock", None)
         logger.info(
@@ -1487,6 +1497,16 @@ def _run_conversation_turn(
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
+    except PreflightCompressionDeferred as _preflight_deferred_exc:
+        # The deterministic fallback may have durably pruned tool results, but
+        # still could not make this request safe. Keep that progress and defer
+        # rather than setting compression_exhausted (which resets the session).
+        agent._persist_session(
+            _preflight_deferred_exc.messages, _preflight_deferred_exc.conversation_history
+        )
+        return _compression_deferred_result(
+            agent, _preflight_deferred_exc.messages, 0, reason="timeout_prune"
+        )
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not

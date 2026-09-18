@@ -308,6 +308,17 @@ class PreflightCompressionTimedOut(RuntimeError):
     """Raised when an oversized turn cannot safely finish preflight."""
 
 
+class PreflightCompressionDeferred(RuntimeError):
+    """Raised when a timed-out preflight prune still leaves the request oversized."""
+
+    def __init__(
+        self, messages: List[Dict[str, Any]], conversation_history: Optional[List[Dict[str, Any]]]
+    ):
+        super().__init__("Context compression timed out and emergency pruning could not make the request safe.")
+        self.messages = messages
+        self.conversation_history = conversation_history
+
+
 def _fail_closed_after_preflight_timeout(agent, request_tokens: int) -> None:
     """Stop an oversized turn instead of sending its unchanged provider payload."""
     from agent.conversation_compression import context_compression_timed_out

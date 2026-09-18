@@ -403,6 +403,22 @@ def _run_preflight_passes(
         if not _tc.compression_made_progress(
             _orig_len, len(out.messages), _orig_tokens, _preflight_tokens
         ):
+            if _emergency_prune_after_timeout(
+                agent, out, _compressor, _orig_tokens,
+            ):
+                _preflight_tokens = _tc._preflight_request_tokens(
+                    agent, out.messages, out.active_system_prompt or ""
+                )
+                if not _compressor.should_compress(_preflight_tokens):
+                    break
+                from agent.turn_context import PreflightCompressionDeferred
+
+                raise PreflightCompressionDeferred(out.messages, out.conversation_history)
+            from agent.conversation_compression import context_compression_timed_out
+            if context_compression_timed_out(agent):
+                from agent.turn_context import PreflightCompressionDeferred
+
+                raise PreflightCompressionDeferred(out.messages, out.conversation_history)
             _tc._fail_closed_after_preflight_timeout(agent, _preflight_tokens)
             out.blocked = True
             break  # Cannot compress further: neither rows nor tokens moved
@@ -422,6 +438,62 @@ def _run_preflight_passes(
                 f"{_orig_tokens:,}", f"{_preflight_tokens:,}",
             )
             break
+
+
+def _emergency_prune_after_timeout(
+    agent: Any, out: CompactionOutcome, compressor: Any, original_tokens: int,
+) -> bool:
+    """Try the durable, deterministic tool-result fallback after a summary timeout.
+
+    A host watchdog can stop before the summary provider's own deadline.  Do not
+    turn that timing mismatch into ``compression_exhausted``: only adopt a new
+    transcript when the regular material-progress rule agrees it shrank.
+    """
+    from agent import turn_context as _tc
+    from agent.conversation_compression import (
+        context_compression_timed_out,
+        reset_context_compression_timeout_outcome,
+    )
+
+    if not context_compression_timed_out(agent):
+        return False
+    prune = getattr(compressor, "prune_tool_results_only", None)
+    if not callable(prune):
+        return False
+    original_messages = out.messages
+    try:
+        pruned_messages, pruned_count = prune(original_messages, current_tokens=original_tokens)
+    except Exception:
+        logger.debug("emergency preflight tool-result prune failed", exc_info=True)
+        return False
+    if not pruned_count or pruned_messages is original_messages:
+        return False
+    pruned_tokens = _tc._preflight_request_tokens(
+        agent, pruned_messages, out.active_system_prompt or ""
+    )
+    if not _tc.compression_made_progress(
+        len(original_messages), len(pruned_messages), original_tokens, pruned_tokens
+    ):
+        return False
+    current_message = (
+        original_messages[out.current_turn_user_idx]
+        if 0 <= out.current_turn_user_idx < len(original_messages) else None
+    )
+    current_user_content = (
+        current_message.get("content") if isinstance(current_message, dict) else None
+    )
+    out.messages = pruned_messages
+    out.conversation_history = conversation_history_after_compression(
+        agent, pruned_messages, out.conversation_history
+    )
+    out.current_turn_user_idx = _reanchor(agent, pruned_messages, current_user_content)
+    _reset_retry_state_after_compaction(agent)
+    reset_context_compression_timeout_outcome(agent)
+    logger.warning(
+        "Preflight summary timed out; emergency-pruned %s tool results (~%s -> ~%s tokens)",
+        pruned_count, f"{original_tokens:,}", f"{pruned_tokens:,}",
+    )
+    return True
 
 
 def _engine_preflight_maintenance(
