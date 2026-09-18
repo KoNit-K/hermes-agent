@@ -134,15 +134,11 @@ def start_loop_liveness_watchdog(
                 logger.debug("Loop liveness faulthandler dump failed", exc_info=True)
             if stop_event.is_set():
                 return
-            # This has to be the final status writer before the irreversible exit.
-            # The loop may recover long enough to publish its ordinary "running"
-            # status while diagnostics are being collected above.
-            _mark_loop_unresponsive_quietly()
-            # The status write is synchronous and can itself overlap a graceful
-            # shutdown. Preserve the late-stop-wins contract before any exit.
-            if stop_event.is_set():
-                return
+            # The ledger first records the restart cause. A loop can recover
+            # during that synchronous I/O and publish "running", so degraded
+            # must be the final status writer immediately before os._exit.
             _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
+            _mark_loop_unresponsive_quietly()
             os._exit(exit_code)
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
     try:

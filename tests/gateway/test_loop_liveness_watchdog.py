@@ -189,8 +189,8 @@ def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
     )
 
 
-def test_loop_liveness_watchdog_restores_terminal_status_after_diagnostics():
-    """A late loop status update cannot erase the watchdog's terminal record."""
+def test_loop_liveness_watchdog_restores_terminal_status_after_ledger_write():
+    """Recovery during ledger I/O cannot erase the final watchdog status."""
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     hard_exit_called = threading.Event()
     handle_ref = {}
@@ -201,10 +201,11 @@ def test_loop_liveness_watchdog_restores_terminal_status_after_diagnostics():
 
     with (
         patch("gateway.shutdown_watchdog.os._exit", side_effect=fake_exit),
-        patch("gateway.shutdown_watchdog.faulthandler.dump_traceback") as dump,
+        patch("gateway.shutdown_watchdog.faulthandler.dump_traceback"),
+        patch("gateway.shutdown_watchdog._mark_exited_quietly") as mark_exited,
         patch("gateway.status.write_runtime_status") as write_status,
     ):
-        dump.side_effect = lambda **_kwargs: write_status(gateway_state="running")
+        mark_exited.side_effect = lambda *_args, **_kwargs: write_status(gateway_state="running")
         handle = start_loop_liveness_watchdog(
             loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=1
         )
@@ -218,10 +219,11 @@ def test_loop_liveness_watchdog_restores_terminal_status_after_diagnostics():
         "exit_reason": "loop_liveness_watchdog",
         "restart_requested": True,
     }
+    assert mark_exited.call_args_list[0].args == (75, "loop_liveness_watchdog")
 
 
-def test_loop_liveness_watchdog_stop_during_terminal_status_write_disarms_exit():
-    """A shutdown arriving inside the final synchronous write still wins."""
+def test_loop_liveness_watchdog_stop_during_terminal_status_write_cannot_preempt_exit():
+    """The final stop check precedes the ledger and terminal status writes."""
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     handle_ready = threading.Event()
     handle_ref = {}
@@ -245,8 +247,8 @@ def test_loop_liveness_watchdog_stop_during_terminal_status_write_disarms_exit()
         handle.join(timeout=2.0)
 
     assert not handle.is_alive()
-    mark_exited.assert_not_called()
-    hard_exit.assert_not_called()
+    mark_exited.assert_called_once_with(75, "loop_liveness_watchdog")
+    hard_exit.assert_called_once_with(75)
 
 
 def test_gateway_config_loop_watchdog_round_trip():
