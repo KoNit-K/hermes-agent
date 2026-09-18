@@ -48,6 +48,29 @@ def test_providers_dict_roundtrip_leaves_cached_config_untouched():
     assert config == snapshot
 
 
+def test_invalid_legacy_custom_providers_keeps_v12_providers_visible():
+    """A malformed legacy value must not hide valid v12 provider entries."""
+    config = {
+        "custom_providers": "not-a-list",
+        "providers": {
+            "v12-provider": {
+                "name": "V12 Provider",
+                "api": "https://v12.example/v1",
+                "default_model": "v12-model",
+            }
+        },
+    }
+
+    assert get_compatible_custom_providers(config) == [
+        {
+            "name": "V12 Provider",
+            "base_url": "https://v12.example/v1",
+            "provider_key": "v12-provider",
+            "model": "v12-model",
+        }
+    ]
+
+
 def test_normalized_models_mapping_is_not_shared_with_input():
     entry = {
         "base_url": "https://x.example/v1",
