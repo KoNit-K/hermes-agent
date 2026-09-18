@@ -4065,11 +4065,17 @@ class SlackAdapter(BasePlatformAdapter):
                 event_thread_ts)
             return False
         # Slack's historic wake heuristic is deliberately stricter than the
-        # transport-neutral policy for every *unmentioned* message, including
-        # DMs and free-response channels.  Only use the common resolver for an
-        # explicit address; otherwise retain Slack's conversation-aware gate.
+        # transport-neutral policy for unmentioned DMs and mention-required
+        # channels. Top-level free-response channels retain their established
+        # direct-admission behavior. `_slack_message_mentions_self` also
+        # recognizes Slack's pipe-form mention, which the payload flag alone
+        # does not always capture.
         if resolve_inbound_mention_decision(
-            InboundMentionFacts(is_mentioned=is_mentioned), require_mention=True,
+            InboundMentionFacts(
+                is_mentioned=is_mentioned or self._slack_message_mentions_self(routing_text, self_uids),
+                is_free_response_scope=free_channel,
+            ),
+            require_mention=True,
         ):
             return True
         return await self._should_wake_on_unmentioned_message(
