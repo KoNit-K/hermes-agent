@@ -19,44 +19,10 @@ import {
   hermesApi,
   type ProfileScope,
   profileScoped,
-  scopedDialPriority,
   STARTUP_REQUEST_TIMEOUT_MS
 } from './client'
 
 const configReadOrigins = new WeakMap<object, { connectionId?: string; profile?: string }>()
-
-/**
- * Electron stamps this enumerable key onto config GET payloads with the
- * effective `(connectionId, profile)` that actually served the request.
- * Must match `CONFIG_SERVED_ROUTE_KEY` in electron/connection-config.ts.
- * Structured clone keeps enumerable own properties across `hermes:api` IPC.
- */
-export const CONFIG_SERVED_ROUTE_KEY = '__hermesConfigServedRoute'
-
-/** Read and strip Electron's served-route stamp from a config GET payload. */
-export function takeConfigServedRoute(
-  record: object | undefined | null
-): { connectionId?: string; profile?: string } | undefined {
-  if (!record || typeof record !== 'object') {
-    return undefined
-  }
-
-  const raw = (record as Record<string, unknown>)[CONFIG_SERVED_ROUTE_KEY]
-
-  if (!raw || typeof raw !== 'object') {
-    return undefined
-  }
-
-  delete (record as Record<string, unknown>)[CONFIG_SERVED_ROUTE_KEY]
-
-  const connectionId = String((raw as { connectionId?: unknown }).connectionId ?? '').trim()
-  const profile = String((raw as { profile?: unknown }).profile ?? '').trim()
-
-  return {
-    ...(connectionId ? { connectionId } : {}),
-    ...(profile ? { profile } : {})
-  }
-}
 
 /** Snapshot the `(connectionId, profile)` that served a config GET. */
 export function bindConfigReadOrigin(
@@ -158,20 +124,17 @@ export async function getHermesConfigRecord(
   profile?: ProfileScope,
   { includeDefaults = true }: { includeDefaults?: boolean } = {}
 ): Promise<HermesConfigRecord> {
-  const requestScope = capabilityScoped(profile)
+  // `null` is an absent override here, not a request to discard the active
+  // profile. The cache API therefore keeps the default scope `undefined`.
+  const requestScope = capabilityScoped(profile ?? undefined)
 
   const record = await window.hermesDesktop.api<HermesConfigRecord>({
     ...requestScope,
-    ...scopedDialPriority(profile),
     path: includeDefaults ? '/api/config' : '/api/config?include_defaults=false'
   })
 
   if (record && typeof record === 'object') {
-    // Prefer the route Electron actually dispatched to. Ambient requests may
-    // omit connectionId while main still serves the registry primary; binding
-    // the renderer request scope would leave the record unpinned.
-    const served = takeConfigServedRoute(record)
-    bindConfigReadOrigin(record, served ?? requestScope)
+    bindConfigReadOrigin(record, requestScope)
   }
 
   return record
@@ -188,7 +151,6 @@ export function getHermesConfigDefaults(): Promise<HermesConfigRecord> {
 export function getHermesConfigSchema(profile?: null | string): Promise<ConfigSchemaResponse> {
   return hermesApi<ConfigSchemaResponse>({
     ...profileScoped(profile),
-    ...scopedDialPriority(profile),
     path: '/api/config/schema'
   })
 }
@@ -198,11 +160,8 @@ export function saveHermesConfig(
   profile?: ProfileScope,
   { preserveLanguage = false }: { preserveLanguage?: boolean } = {}
 ): Promise<{ ok: boolean }> {
-  // Bypass hermesApi's ambient connectionScoped() merge so a captured GET
-  // route cannot be retargeted when the live primary changes.
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...resolveConfigWriteScope(config, profile),
-    ...scopedDialPriority(profile),
     path: preserveLanguage ? '/api/config?preserve_language=true' : '/api/config',
     method: 'PUT',
     body: { config }
@@ -215,7 +174,6 @@ export function saveHermesConfig(
 export function saveHermesConfigRecord(config: HermesConfigRecord, profile?: ProfileScope): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...resolveConfigWriteScope(config, profile),
-    ...scopedDialPriority(profile),
     path: '/api/config',
     method: 'PUT',
     body: { config }
@@ -225,7 +183,6 @@ export function saveHermesConfigRecord(config: HermesConfigRecord, profile?: Pro
 export function getEnvVars(profile?: null | string): Promise<Record<string, EnvVarInfo>> {
   return hermesApi<Record<string, EnvVarInfo>>({
     ...profileScoped(profile),
-    ...scopedDialPriority(profile),
     path: '/api/env'
   })
 }
@@ -233,7 +190,6 @@ export function getEnvVars(profile?: null | string): Promise<Record<string, EnvV
 export function setEnvVar(key: string, value: string, profile?: ProfileScope): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...capabilityScoped(profile),
-    ...scopedDialPriority(profile),
     path: '/api/env',
     method: 'PUT',
     body: { key, value }
@@ -243,7 +199,6 @@ export function setEnvVar(key: string, value: string, profile?: ProfileScope): P
 export function deleteEnvVar(key: string, profile?: ProfileScope): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     ...capabilityScoped(profile),
-    ...scopedDialPriority(profile),
     path: '/api/env',
     method: 'DELETE',
     body: { key }
@@ -253,7 +208,6 @@ export function deleteEnvVar(key: string, profile?: ProfileScope): Promise<{ ok:
 export function revealEnvVar(key: string, profile?: ProfileScope): Promise<{ key: string; value: string }> {
   return window.hermesDesktop.api<{ key: string; value: string }>({
     ...capabilityScoped(profile),
-    ...scopedDialPriority(profile),
     path: '/api/env/reveal',
     method: 'POST',
     body: { key }
@@ -316,7 +270,6 @@ export function deleteCustomEndpoint(id: string): Promise<CustomEndpointsRespons
 export function listOAuthProviders(profile?: null | string): Promise<OAuthProvidersResponse> {
   return hermesApi<OAuthProvidersResponse>({
     ...profileScoped(profile),
-    ...scopedDialPriority(profile),
     path: '/api/providers/oauth'
   })
 }
@@ -327,7 +280,6 @@ export function disconnectOAuthProvider(
 ): Promise<{ ok: boolean; provider: string }> {
   return hermesApi<{ ok: boolean; provider: string }>({
     ...profileScoped(profile),
-    ...scopedDialPriority(profile),
     path: `/api/providers/oauth/${encodeURIComponent(providerId)}`,
     method: 'DELETE'
   })
@@ -336,7 +288,6 @@ export function disconnectOAuthProvider(
 export function startOAuthLogin(providerId: string, profile?: ProfileScope): Promise<OAuthStartResponse> {
   return window.hermesDesktop.api<OAuthStartResponse>({
     ...capabilityScoped(profile),
-    ...scopedDialPriority(profile),
     path: `/api/providers/oauth/${encodeURIComponent(providerId)}/start`,
     method: 'POST',
     body: {}
@@ -351,7 +302,6 @@ export function submitOAuthCode(
 ): Promise<OAuthSubmitResponse> {
   return hermesApi<OAuthSubmitResponse>({
     ...profileScoped(profile),
-    ...scopedDialPriority(profile),
     path: `/api/providers/oauth/${encodeURIComponent(providerId)}/submit`,
     method: 'POST',
     body: { session_id: sessionId, code }
@@ -365,7 +315,6 @@ export function pollOAuthSession(
 ): Promise<OAuthPollResponse> {
   return window.hermesDesktop.api<OAuthPollResponse>({
     ...capabilityScoped(profile),
-    ...scopedDialPriority(profile),
     path: `/api/providers/oauth/${encodeURIComponent(providerId)}/poll/${encodeURIComponent(sessionId)}`
   })
 }
@@ -373,7 +322,6 @@ export function pollOAuthSession(
 export function cancelOAuthSession(sessionId: string, profile?: null | string): Promise<{ ok: boolean }> {
   return hermesApi<{ ok: boolean }>({
     ...profileScoped(profile),
-    ...scopedDialPriority(profile),
     path: `/api/providers/oauth/sessions/${encodeURIComponent(sessionId)}`,
     method: 'DELETE'
   })

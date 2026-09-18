@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  CONFIG_SERVED_ROUTE_KEY,
   getHermesConfigRecord,
   peekConfigReadOrigin,
   resolveConfigWriteScope,
@@ -20,19 +19,7 @@ describe('config read/write route binding', () => {
         return { ok: true }
       }
 
-      const record: Record<string, unknown> = { model: 'from-read' }
-      const connectionId = String(request.connectionId ?? '').trim()
-      const profile = String(request.profile ?? '').trim()
-
-      // Mirror Electron: stamp the route that actually served the GET.
-      if (connectionId || profile) {
-        record[CONFIG_SERVED_ROUTE_KEY] = {
-          ...(connectionId ? { connectionId } : {}),
-          ...(profile ? { profile } : {})
-        }
-      }
-
-      return record
+      return { model: 'from-read' }
     })
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
@@ -56,7 +43,6 @@ describe('config read/write route binding', () => {
     const record = await getHermesConfigRecord()
 
     expect(peekConfigReadOrigin(record)).toEqual({ connectionId: 'connection-a', profile: 'default' })
-    expect(record).not.toHaveProperty(CONFIG_SERVED_ROUTE_KEY)
     expect(api).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: 'connection-a', path: '/api/config', profile: 'default' })
     )
@@ -76,50 +62,6 @@ describe('config read/write route binding', () => {
       })
     )
     expect(puts.filter(call => call[0].connectionId === 'connection-b')).toHaveLength(0)
-  })
-
-  it('binds provenance from the Electron-served route, not ambient request scope', async () => {
-    // Ambient request carries no connectionId; Electron still served primary A.
-    api.mockImplementationOnce(async () => {
-      const record: Record<string, unknown> = { model: 'from-a' }
-      record[CONFIG_SERVED_ROUTE_KEY] = { connectionId: 'connection-a', profile: 'default' }
-
-      return record
-    })
-
-    const record = await getHermesConfigRecord()
-
-    expect(peekConfigReadOrigin(record)).toEqual({ connectionId: 'connection-a', profile: 'default' })
-    expect(record).not.toHaveProperty(CONFIG_SERVED_ROUTE_KEY)
-    expect(api.mock.calls[0][0].connectionId).toBeUndefined()
-  })
-
-  it('GET served by A then primary→local keeps PUT on A (not B/local)', async () => {
-    api.mockImplementationOnce(async () => {
-      const record: Record<string, unknown> = { model: 'from-a' }
-      record[CONFIG_SERVED_ROUTE_KEY] = { connectionId: 'connection-a', profile: 'default' }
-
-      return record
-    })
-
-    const record = await getHermesConfigRecord()
-
-    // Primary handoff: ambient becomes local / empty — must not retarget.
-    setApiRequestConnection(null)
-    await saveHermesConfig(record)
-
-    const put = api.mock.calls.find(call => call[0].method === 'PUT')?.[0]
-
-    expect(put).toEqual(
-      expect.objectContaining({
-        connectionId: 'connection-a',
-        method: 'PUT',
-        path: '/api/config',
-        profile: 'default'
-      })
-    )
-    expect(put.connectionId).not.toBe('connection-b')
-    expect(put.connectionId).not.toBe('local')
   })
 
   it('explicit connection/profile pins still win over a captured origin', async () => {
@@ -147,5 +89,14 @@ describe('config read/write route binding', () => {
       connectionId: 'connection-b',
       profile: 'coder'
     })
+  })
+
+  it('treats a null read scope as absent and preserves the active profile', async () => {
+    setApiRequestConnection('connection-a')
+    setApiRequestProfile('worker')
+
+    const record = await getHermesConfigRecord(null)
+
+    expect(peekConfigReadOrigin(record)).toEqual({ connectionId: 'connection-a', profile: 'worker' })
   })
 })

@@ -3,11 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  CONFIG_SERVED_ROUTE_KEY,
-  setApiRequestConnection,
-  setApiRequestProfile
-} from '@/hermes'
+import { setApiRequestConnection, setApiRequestProfile } from '@/hermes'
 import { queryClient } from '@/lib/query-client'
 
 import { useHermesConfigRecord } from './use-config-record'
@@ -24,14 +20,8 @@ describe('useHermesConfigRecord writeScope ownership', () => {
 
       const connectionId = String(request.connectionId ?? '').trim()
       const profile = String(request.profile ?? '').trim()
-      const record: Record<string, unknown> = { model: `from-${connectionId || 'local'}` }
 
-      record[CONFIG_SERVED_ROUTE_KEY] = {
-        ...(connectionId ? { connectionId } : {}),
-        ...(profile ? { profile } : {})
-      }
-
-      return record
+      return { model: `from-${connectionId || 'local'}` }
     })
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
@@ -49,7 +39,7 @@ describe('useHermesConfigRecord writeScope ownership', () => {
     Reflect.deleteProperty(window, 'hermesDesktop')
   })
 
-  it('same query key A→B refetch updates ownership', async () => {
+  it('two observers sharing a key retain the route paired with the cached record', async () => {
     setApiRequestConnection('connection-a')
     setApiRequestProfile('default')
 
@@ -63,12 +53,16 @@ describe('useHermesConfigRecord writeScope ownership', () => {
     expect(result.current.writeScope).toEqual({ connectionId: 'connection-a', profile: 'default' })
 
     setApiRequestConnection('connection-b')
+    const second = renderHook(() => useHermesConfigRecord(), { wrapper })
+
+    expect(second.result.current.data?.model).toBe('from-connection-a')
+    expect(second.result.current.writeScope).toEqual({ connectionId: 'connection-a', profile: 'default' })
 
     await act(async () => {
       await result.current.refetch()
     })
 
-    await waitFor(() => expect(result.current.data?.model).toBe('from-connection-b'))
-    expect(result.current.writeScope).toEqual({ connectionId: 'connection-b', profile: 'default' })
+    await waitFor(() => expect(second.result.current.data?.model).toBe('from-connection-b'))
+    expect(second.result.current.writeScope).toEqual({ connectionId: 'connection-b', profile: 'default' })
   })
 })
