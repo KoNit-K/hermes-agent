@@ -7,9 +7,8 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 
 * ``dependency`` blocks route to ``todo`` (parent-gated, auto-resumed) and
   never enter the human ``blocked`` bucket a cron would keep unblocking.
-* ``needs_input`` / ``capability`` / un-typed blocks land in ``blocked``;
-  each same-cause re-block after an unblock increments ``block_recurrences``,
-  and at ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+* Each same-cause re-block increments ``block_recurrences``; at
+  ``BLOCK_RECURRENCE_LIMIT`` every kind routes to ``triage`` for a human.
 * ``unblock_task`` deliberately does NOT reset ``block_recurrences`` (the
   amnesia that let the loop run unbounded).
 * A successful ``complete_task`` resets the loop memory.
@@ -101,6 +100,37 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
         assert kb.get_task(conn, child).status == "ready"
 
 
+def test_repeated_dependency_block_with_terminal_parent_escalates(kanban_home: Path) -> None:
+    """A dependency wait that cannot make progress is surfaced for triage."""
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = _running_task(conn, title="child")
+        kb.link_tasks(conn, parent_id=parent, child_id=child)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+
+        kb.block_task(conn, child, reason="wait", kind="dependency")
+        first = kb.get_task(conn, child)
+        assert first.status == "todo"
+        assert first.block_recurrences == 1
+        dependency_waits = [event for event in kb.list_events(conn, child)
+                            if event.kind == "dependency_wait"]
+        assert dependency_waits
+        assert dependency_waits[-1].payload["recurrences"] == 1
+
+        kb.recompute_ready(conn)
+        _make_running_again(conn, child)
+        kb.block_task(conn, child, reason="wait", kind="dependency")
+
+        task = kb.get_task(conn, child)
+        assert task.status == "triage"
+        events = [event for event in kb.list_events(conn, child)
+                  if event.kind == "block_loop_detected"]
+        assert events
+        assert events[-1].payload["kind"] == "dependency"
+        assert events[-1].payload["recurrences"] == kb.BLOCK_RECURRENCE_LIMIT
+
+
 # ---------------------------------------------------------------------------
 # Completion resets loop memory
 # ---------------------------------------------------------------------------
@@ -109,5 +139,3 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
 # ---------------------------------------------------------------------------
 # Validation + back-compat
 # ---------------------------------------------------------------------------
-
-
