@@ -1,10 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { $sessionTiles } from '@/store/session-states'
+import { setActiveSessionId, setSessions } from '@/store/session'
+import { $focusedRuntimeId, $sessionTiles } from '@/store/session-states'
 import { $toursEnabled } from '@/store/tours'
+import type { SessionInfo } from '@/types/hermes'
 
-import { handleServerRequest } from './server-requests'
+import { handleServerRequest, previewSessionRoute } from './server-requests'
 import type { ServerRequestContext } from './server-requests'
 
 const deps = {
@@ -42,13 +44,43 @@ describe('connection request routing', () => {
   })
 })
 
+describe('approval request routing', () => {
+  const notify = vi.fn().mockResolvedValue(true)
+  const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDesktop'] }
+
+  beforeEach(() => {
+    notify.mockClear()
+    desktopWindow.hermesDesktop = { notify } as unknown as Window['hermesDesktop']
+    setSessions([{ id: 'session-a', title: 'Fix the flaky test' } as SessionInfo])
+    setActiveSessionId('session-b')
+  })
+
+  afterEach(() => {
+    delete desktopWindow.hermesDesktop
+    setSessions([])
+    setActiveSessionId(null)
+  })
+
+  it('titles the parked approval toast with the session it belongs to', () => {
+    deliver(
+      'approval',
+      { command: 'rm -rf /', description: 'dangerous', request_id: 'r1', session_id: 'session-a' },
+      'session-b'
+    )
+
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'approval', title: 'Approval needed — Fix the flaky test' })
+    )
+  })
+})
+
 describe('preview action request routing', () => {
   afterEach(() => {
     $sessionTiles.set([])
   })
 
   it('answers a scoped action for an on-screen tile even when another session is active', async () => {
-    $sessionTiles.set([{ runtimeId: 'session-a', storedSessionId: 'stored-a' }])
+    $sessionTiles.set([{ runtimeId: 'session-a', storedSessionId: 'stored-a' } as never])
     const { respond } = deliver('preview.act', { action: 'elements', session_id: 'session-a' }, 'session-b')
 
     await vi.waitFor(() => {
@@ -61,6 +93,19 @@ describe('preview action request routing', () => {
     })
   })
 
+  it('routes a focused tree tab as visible', () => {
+    $focusedRuntimeId.set('session-a')
+    expect(previewSessionRoute({ replayed: false, sessionId: 'session-a', activeSessionId: 'session-b' })).toBe('run')
+    $focusedRuntimeId.set(null)
+  })
+
+  it('retries a replayed scoped request only while no session is bound yet', () => {
+    expect(previewSessionRoute({ replayed: true, sessionId: 'session-a', activeSessionId: null })).toBe('retry')
+    expect(previewSessionRoute({ replayed: true, sessionId: 'session-a', activeSessionId: 'session-a' })).toBe('run')
+    expect(previewSessionRoute({ replayed: true, sessionId: 'session-a', activeSessionId: 'session-b' })).toBe('ignore')
+    expect(previewSessionRoute({ replayed: true, sessionId: '', activeSessionId: null })).toBe('run')
+  })
+
   it('leaves a scoped action request unanswered in a window showing another session', () => {
     const { handled, respond, fail } = deliver('preview.act', { action: 'elements', session_id: 'session-a' }, 'session-b')
 
@@ -69,7 +114,41 @@ describe('preview action request routing', () => {
     expect(fail).not.toHaveBeenCalled()
   })
 
-  it('fails fast when no session is on screen', () => {
+  it('leaves scoped pane reads unanswered in a window showing another session', async () => {
+    const reads = ['preview.read', 'terminal.read', 'window.read'].map(method =>
+      deliver(method, { session_id: 'session-a' }, 'session-b')
+    )
+
+    await Promise.resolve()
+
+    for (const { handled, respond } of reads) {
+      expect(handled).toBe(true)
+      expect(respond).not.toHaveBeenCalled()
+    }
+  })
+
+  it('answers pane reads for a session hosted in one of this window\'s tiles', async () => {
+    // The tile session is not the active one, but this window hosts it: its
+    // panes are here, so an 'ignore' would stall the tool until its deadline.
+    $sessionTiles.set([{ runtimeId: 'session-a', storedSessionId: 'stored-a' } as never])
+
+    try {
+      const reads = ['preview.read', 'terminal.read', 'window.read'].map(method =>
+        deliver(method, { session_id: 'session-a' }, 'session-b')
+      )
+
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      for (const { handled, respond } of reads) {
+        expect(handled).toBe(true)
+        expect(respond).toHaveBeenCalledTimes(1)
+      }
+    } finally {
+      $sessionTiles.set([])
+    }
+  })
+
+  it('fails fast for an unscoped request with no session in view', () => {
     const { respond } = deliver('preview.act', { action: 'elements' }, null)
 
     expect(respond).toHaveBeenCalledWith({
