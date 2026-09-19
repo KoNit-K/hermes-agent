@@ -1311,3 +1311,19 @@ async def test_get_cron_job_falls_back_when_explicit_profile_is_not_owner(isolat
     assert fetched["id"] == job["id"]
     assert fetched["profile"] == "worker_alpha"
     assert fetched["prompt"] == "owned by worker"
+
+
+def test_list_cron_jobs_carries_each_profiles_ticker_heartbeat_age(isolated_profiles):
+    """Every listed job carries its owning profile's ticker heartbeat age."""
+    import time
+
+    for name, home in isolated_profiles.items():
+        with _web_server_cron._cron_store_scope(home) as cron_jobs:
+            cron_jobs.create_job(prompt=f"{name} hourly", schedule="every 1h")
+    (isolated_profiles["worker_alpha"] / "cron" / "ticker_heartbeat").write_text(
+        str(time.time() - 25 * 3600)
+    )
+
+    ages = {job["profile"]: job["scheduler_heartbeat_age_s"] for job in _rt_cron._list_cron_jobs_sync("all")}
+    assert ages["default"] is None
+    assert 25 * 3600 <= ages["worker_alpha"] < 25 * 3600 + 60
