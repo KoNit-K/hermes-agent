@@ -3718,6 +3718,7 @@ def set_config_value(key: str, value: str, force: bool = False):
 
     # Read the RAW user config (not merged) so defaults are never dumped back; fail-closed.
     config_path = get_config_path()
+    _route_notice = ""
     with _user_config_mutation_lock(config_path):
         user_config = require_readable_config_before_write(config_path)
         value = _coerce_config_set_value(key, value)
