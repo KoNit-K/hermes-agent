@@ -232,8 +232,8 @@ def test_codex_pool_cooldown_is_not_missing_credential(monkeypatch):
     assert should_try_fallback_on_auth_error(empty_exc.value) is False
 
 
-def test_auto_codex_empty_store_keeps_internal_provider_ladder(monkeypatch):
-    """Semantic missing credentials must not change the auto-provider ladder."""
+def test_auto_codex_empty_store_does_not_spend_openrouter_fallback(monkeypatch):
+    """Never-configured Codex must fail closed before a paid auto fallback."""
     from hermes_cli import auth_codex, runtime_provider
 
     monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
@@ -251,9 +251,9 @@ def test_auto_codex_empty_store_keeps_internal_provider_ladder(monkeypatch):
         lambda *_args: {"provider": "openrouter", "api_key": "fallback-key"},
     )
 
-    runtime = runtime_provider.resolve_runtime_provider(requested="auto")
-
-    assert runtime["provider"] == "openrouter"
+    with pytest.raises(AuthError) as exc_info:
+        runtime_provider.resolve_runtime_provider(requested="auto")
+    assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
 
 
 def test_quarantined_oauth_states_keep_fallback_semantics(monkeypatch):
@@ -376,15 +376,14 @@ def test_category_checks_tolerate_custom_auth_error_without_attribute():
     del error.category
 
     assert should_try_fallback_on_auth_error(error) is True
-    with pytest.raises(AuthError):
-        runtime_provider._resolve_rung(
-            "auto",
-            lambda: (_ for _ in ()).throw(error),
-        )
+    assert runtime_provider._resolve_rung(
+        "auto",
+        lambda: (_ for _ in ()).throw(error),
+    ) is None
 
 
-def test_auto_rung_centrally_absorbs_missing_category(monkeypatch):
-    """Auto absorbs semantic absence from shortcuts, Anthropic env, and MiniMax alike."""
+def test_auto_rung_propagates_missing_category(monkeypatch):
+    """Auto must not convert credential absence into a paid provider fallback."""
     from hermes_cli import auth as auth_mod
     from hermes_cli import runtime_provider
 
@@ -392,7 +391,8 @@ def test_auto_rung_centrally_absorbs_missing_category(monkeypatch):
         "missing",
         category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL,
     )
-    assert runtime_provider._resolve_rung("auto", lambda: (_ for _ in ()).throw(missing)) is None
+    with pytest.raises(AuthError):
+        runtime_provider._resolve_rung("auto", lambda: (_ for _ in ()).throw(missing))
     with pytest.raises(AuthError):
         runtime_provider._resolve_rung("anthropic", lambda: (_ for _ in ()).throw(missing))
 
@@ -400,10 +400,11 @@ def test_auto_rung_centrally_absorbs_missing_category(monkeypatch):
         "agent.anthropic_credentials.resolve_anthropic_token",
         lambda *a, **k: "",
     )
-    assert runtime_provider._resolve_rung(
-        "auto",
-        lambda: runtime_provider._anthropic_env_runtime("auto", {}),
-    ) is None
+    with pytest.raises(AuthError):
+        runtime_provider._resolve_rung(
+            "auto",
+            lambda: runtime_provider._anthropic_env_runtime("auto", {}),
+        )
 
     monkeypatch.setattr(
         auth_mod,
@@ -412,15 +413,16 @@ def test_auto_rung_centrally_absorbs_missing_category(monkeypatch):
             AuthError("missing", category=AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL)
         ),
     )
-    assert runtime_provider._resolve_rung(
-        "auto",
-        lambda: runtime_provider._minimax_oauth_runtime("minimax-oauth", "auto"),
-    ) is None
+    with pytest.raises(AuthError):
+        runtime_provider._resolve_rung(
+            "auto",
+            lambda: runtime_provider._minimax_oauth_runtime("minimax-oauth", "auto"),
+        )
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "minimax-oauth"])
-def test_auto_runtime_ladder_continues_after_provider_missing(provider, monkeypatch):
-    """Exercise the real ladder boundary for non-spec OAuth and Anthropic producers."""
+def test_auto_runtime_ladder_stops_after_provider_missing(provider, monkeypatch):
+    """A missing configured provider must not consume the OpenRouter fallback."""
     from hermes_cli import auth as auth_mod
     from hermes_cli import runtime_provider
 
@@ -447,13 +449,13 @@ def test_auto_runtime_ladder_continues_after_provider_missing(provider, monkeypa
         ),
     )
 
-    runtime = runtime_provider.resolve_runtime_provider(requested="auto")
+    with pytest.raises(AuthError) as exc_info:
+        runtime_provider.resolve_runtime_provider(requested="auto")
+    assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
 
-    assert runtime["provider"] == "openrouter"
 
-
-def test_auto_azure_shortcut_missing_category_does_not_escape(monkeypatch):
-    """A categorized shortcut failure is absorbed at the same centralized auto boundary."""
+def test_auto_azure_shortcut_missing_category_does_not_fallback(monkeypatch):
+    """A missing Azure shortcut credential must not spend an explicit paid route."""
     from hermes_cli import runtime_provider
 
     def missing_shortcut(*_args):
@@ -473,12 +475,12 @@ def test_auto_azure_shortcut_missing_category_does_not_escape(monkeypatch):
         lambda **_kwargs: {"provider": "openrouter", "api_key": "explicit-route"},
     )
 
-    runtime = runtime_provider.resolve_runtime_provider(
-        requested="auto",
-        explicit_base_url="https://example.services.ai.azure.com",
-    )
-
-    assert runtime["provider"] == "openrouter"
+    with pytest.raises(AuthError) as exc_info:
+        runtime_provider.resolve_runtime_provider(
+            requested="auto",
+            explicit_base_url="https://example.services.ai.azure.com",
+        )
+    assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
 
 
 def test_azure_explicit_shortcut_preserves_preexisting_empty_key_behavior(monkeypatch):
