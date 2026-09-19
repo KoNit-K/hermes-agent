@@ -40,7 +40,7 @@ from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
 # Re-export from hermes_constants — canonical definition lives there.
 from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F401
-from utils import atomic_replace, atomic_roundtrip_yaml_update, atomic_yaml_write, fast_safe_load, file_signature
+from utils import atomic_replace, atomic_roundtrip_yaml_mutate, atomic_yaml_write, fast_safe_load, file_signature
 
 logger = logging.getLogger(__name__)
 
@@ -3628,10 +3628,15 @@ def _user_config_mutation_lock(config_path: Path):
                 pass
 
 
-def _write_user_config(config_path: Path, key: str, value: Any) -> None:
+def _write_user_config(
+    config_path: Path, key: Optional[str] = None, value: Any = None, *,
+    extra_updates: Optional[Dict[str, Any]] = None, removals: tuple[str, ...] = (),
+) -> None:
     """Mutate one raw user-config path without rewriting unrelated YAML structure."""
     ensure_hermes_home()
-    atomic_roundtrip_yaml_update(config_path, key, value)
+    updates = {key: value} if key is not None else {}
+    updates.update(extra_updates or {})
+    atomic_roundtrip_yaml_mutate(config_path, updates, removals=removals)
 
 
 def _print_unknown_key_notice(key: str, suggestion: Optional[str]) -> None:
@@ -3725,10 +3730,14 @@ def set_config_value(key: str, value: str, force: bool = False):
         # A scalar ``model`` shorthand must become a dict before writing sub-keys, or _set_nested
         # replaces it with an empty dict and the model id is lost.
         _model_val = user_config.get("model")
+        _scalar_model_default = _model_val if (
+            key.strip().lower().startswith("model.") and isinstance(_model_val, str) and _model_val
+        ) else None
         if key.strip().lower().startswith("model.") and isinstance(_model_val, str) and _model_val:
             user_config["model"] = {"default": _model_val}
         key = _guard_section_overwrite(key, value, user_config, force)
         value = _refuse_container_type_mismatch(key, value, user_config, force)
+        _old_provider = _model_val.get("provider") if isinstance(_model_val, dict) else None
         try:
             _set_nested(user_config, key, value)
         except ValueError as e:
@@ -3740,7 +3749,28 @@ def set_config_value(key: str, value: str, force: bool = False):
             # being silently ignored.
             key = "model.base_url"
             print("  (note: 'api_base' is an alias — saved as model.base_url)")
-        _write_user_config(config_path, key, value)
+        removals: tuple[str, ...] = ()
+        _old_provider_name = str(_old_provider or "").strip() or "the previous provider"
+        if key == "model.provider" and _old_provider_name.lower() != str(value).strip().lower():
+            from hermes_cli.route_identity import drop_stale_model_route
+
+            _popped, _unverified = drop_stale_model_route(user_config.get("model"), value, user_config)
+            removals = tuple(f"model.{route_key}" for route_key in _popped)
+            if _popped:
+                _route_notice = (
+                    "  Cleared " + ", ".join(f"model.{route_key} ({old_value})" for route_key, old_value in _popped.items())
+                    + f" — that route belonged to {_old_provider_name}, not {value}. {value}'s endpoint resolves "
+                    "automatically; set model.base_url again if you meant a custom endpoint.")
+            elif _unverified:
+                _route_notice = color(
+                    f"⚠ model.base_url ({user_config['model'].get('base_url')}) was set under {_old_provider_name} and "
+                    f"still applies to {value} — requests go there. If it is not {value}'s endpoint: "
+                    "`hermes config unset model.base_url` (and model.api_mode).", Colors.YELLOW)
+        _write_user_config(
+            config_path, key, value,
+            extra_updates={"model.default": _scalar_model_default} if _scalar_model_default is not None else None,
+            removals=removals,
+        )
 
     # Keep .env in sync: terminal_tool reads TERMINAL_ENV etc. directly from env vars.
     env_var = terminal_config_env_var_for_key(key)
@@ -3857,7 +3887,7 @@ def unset_config_value(key: str):
     if not removed:
         _exit_invalid(f"Config key not set: {key}")
 
-    _write_user_config(config_path, user_config)
+    _write_user_config(config_path, removals=(key,))
     print(f"✓ Unset {key} from {config_path}")
 
 

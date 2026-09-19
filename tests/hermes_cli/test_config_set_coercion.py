@@ -148,6 +148,32 @@ class TestConfigSetRoundTripSafety:
             {"provider": "changed"},
         ]
 
+    def test_unrelated_anchors_aliases_and_block_scalars_survive(self, tmp_path, monkeypatch):
+        """A leaf update must not turn a hand-edited document into a fresh YAML dump."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "defaults: &defaults\n"
+            "  retries: 3 # retain this\n"
+            "custom_provider:\n"
+            "  <<: *defaults\n"
+            "  prompt: |\n"
+            "    Keep this block scalar exactly as a block.\n"
+            "display:\n"
+            "  verbose: false\n",
+            encoding="utf-8",
+        )
+
+        cfg.set_config_value("display.verbose", "true")
+
+        saved = config_path.read_text(encoding="utf-8")
+        assert "defaults: &defaults" in saved
+        assert "<<: *defaults" in saved
+        assert "prompt: |" in saved
+        assert "    Keep this block scalar exactly as a block." in saved
+        assert "retries: 3 # retain this" in saved
+        assert _read(tmp_path, "display", "verbose") is True
+
 
 class TestStringTypedGuardPreserved:
     def test_enum_off_stays_string(self, tmp_path, monkeypatch):
