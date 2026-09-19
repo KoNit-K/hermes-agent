@@ -59,6 +59,19 @@ def _parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
     return metadata, 0
 
 
+def _parse_evidence_flag(raw: Optional[str]) -> tuple[Optional[list], int]:
+    """Parse ``--evidence`` JSON without borrowing metadata's object contract."""
+    if not raw:
+        return None, 0
+    try:
+        evidence = json.loads(raw)
+        if not isinstance(evidence, list):
+            raise ValueError("must be a JSON list of {kind, detail} objects")
+    except (ValueError, json.JSONDecodeError) as exc:
+        return None, _err(f"kanban: --evidence: {exc}", 2)
+    return evidence, 0
+
+
 def _run_state_kwargs(args: argparse.Namespace, cmd: str) -> tuple[Optional[dict[str, str]], int]:
     """``--state-type``/``--state-name`` must be given together: ``(kwargs, 0)`` or ``(None, 2)``."""
     st = getattr(args, "state_type", None)
