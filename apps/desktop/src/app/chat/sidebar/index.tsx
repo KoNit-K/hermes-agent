@@ -83,9 +83,11 @@ import {
   normalizeProfileKey,
   sidebarProfileForScope
 } from '@/store/profile'
+import { $profileRailVisible } from '@/store/profile-rail-prefs'
 import {
   $activeProjectId,
   $newProjectDropPlacement,
+  $projectOwnerBySessionId,
   $projects,
   $projectScope,
   $projectTree,
@@ -136,11 +138,11 @@ import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
 import {
   type AppView,
   ARTIFACTS_ROUTE,
+  CAPABILITIES_ROUTE,
   CRON_ROUTE,
   MESSAGING_ROUTE,
   SIDEBAR_NAV_AREA,
-  type SidebarNavContribution,
-  SKILLS_ROUTE
+  type SidebarNavContribution
 } from '../../routes'
 import type { SidebarNavItem } from '../../types'
 import { type NewSessionSplitHandler, startNewSessionDrag } from '../new-session-drag'
@@ -165,6 +167,7 @@ import {
   ProjectMenu,
   projectTreeCwd,
   reconcileEnteredProjectSessions,
+  sessionBucketId,
   sessionMatchesProjectFilter,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
@@ -206,11 +209,11 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     keybindActionId: 'session.new'
   },
   {
-    id: 'skills',
+    id: 'capabilities',
     label: '',
     icon: props => <Codicon name="symbol-misc" {...props} />,
-    route: SKILLS_ROUTE,
-    keybindActionId: 'nav.skills'
+    route: CAPABILITIES_ROUTE,
+    keybindActionId: 'nav.capabilities'
   },
   {
     id: 'messaging',
@@ -439,6 +442,7 @@ export function ChatSidebar({
   const projectOrderIds = useStore($sidebarProjectOrderIds)
   const projects = useStore($projects)
   const projectTree = useStore($projectTree)
+  const projectOwners = useStore($projectOwnerBySessionId)
 
   // The persisted project filter's storage is shared across profiles, so ids
   // picked in another profile don't resolve in the active one and the raw
@@ -500,6 +504,7 @@ export function ChatSidebar({
   }, [])
 
   const activeSidebarSessionId = currentView === 'chat' ? selectedSessionId : null
+  const profileRailVisible = useStore($profileRailVisible)
 
   const dndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -551,9 +556,10 @@ export function ChatSidebar({
         return false
       }
 
-      // Same membership the sidebar groups and colors by, so a filtered row
-      // lands in the lane the user picked it from.
-      return sessionMatchesProjectFilter(session, projectFilter, projects)
+      // Same membership the sidebar groups and colors by (backend owner first,
+      // cwd walk otherwise), so a filtered row lands in the lane the user
+      // picked it from.
+      return sessionMatchesProjectFilter(session, projectFilter, projects, projectOwners)
     },
     [
       statusFilter,
@@ -564,6 +570,7 @@ export function ChatSidebar({
       recencyFilter,
       pullRequests,
       projects,
+      projectOwners,
       dotStates
     ]
   )
@@ -1060,8 +1067,10 @@ export function ChatSidebar({
   // overlay always has a lane to place a missing in-project session into.
   const enteredProjectContent = useMemo(
     () =>
-      enteredProject ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds) : undefined,
-    [enteredProject, enteredProjectOverlaySessions, removedSessionIds]
+      enteredProject
+        ? overlayLiveLanes(enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners)
+        : undefined,
+    [enteredProject, enteredProjectOverlaySessions, removedSessionIds, projectOwners]
   )
 
   const scopedRepoPaths = useMemo(
@@ -1178,6 +1187,27 @@ export function ChatSidebar({
       ),
     [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds, showAllSessions]
   )
+
+  // A row's "Show all" hydrates raw backend lanes, which — like the drill-in —
+  // must go through the same exclusion as the previews above (pins, filter
+  // misses, optimistic removals), or a pinned chat renders twice and a
+  // just-deleted one comes back. The per-project count of loaded sessions
+  // that exclusion hides also corrects the backend's `sessionCount` in the
+  // "Show all N" label (a pin is always loaded — it renders in Pinned).
+  const overviewHidden = useMemo(() => {
+    const isHidden = (session: SessionInfo) => isHiddenFromProjects(session) || removedSessionIds.has(session.id)
+    const counts: Record<string, number> = {}
+
+    for (const session of sessions) {
+      const projectId = isHidden(session) ? sessionBucketId(session, projects, projectOwners) : null
+
+      if (projectId) {
+        counts[projectId] = (counts[projectId] ?? 0) + 1
+      }
+    }
+
+    return { isHidden, counts }
+  }, [sessions, projects, projectOwners, isHiddenFromProjects, removedSessionIds])
 
   const onEnterProject = useCallback(
     (id: string) => {
@@ -1496,7 +1526,7 @@ export function ChatSidebar({
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
-                  (item.id === 'skills' && currentView === 'skills') ||
+                  (item.id === 'capabilities' && currentView === 'capabilities') ||
                   (item.id === 'messaging' && currentView === 'messaging') ||
                   (item.id === 'artifacts' && currentView === 'artifacts') ||
                   (item.id === 'cron' && currentView === 'cron') ||
@@ -1873,6 +1903,7 @@ export function ChatSidebar({
                 }
                 projectContent={inProject ? enteredProjectContent : undefined}
                 projectOverview={projectOverview}
+                projectOverviewHidden={overviewHidden}
                 projectOverviewPreviews={overviewPreviews}
                 projectRepoWorktrees={inProject ? scopedRepoWorktrees : undefined}
                 projectsLoading={worktreeGroupingActive ? projectTreeLoading : false}
@@ -1948,9 +1979,13 @@ export function ChatSidebar({
 
         {!showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
 
-        <div className="shrink-0 px-0.5 pb-1 pt-0.5">
-          <ProfileRail />
-        </div>
+        {/* Off, the statusbar's profile dropdown (beside the gateway switcher)
+            takes over — the rail is a duplicate door for bot-only setups. */}
+        {profileRailVisible && (
+          <div className="shrink-0 px-0.5 pb-1 pt-0.5">
+            <ProfileRail />
+          </div>
+        )}
       </SidebarContent>
       <ProjectDialog />
       {/* One mount for the whole app. The header of WorktreeDialog tells why. */}
