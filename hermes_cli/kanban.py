@@ -59,19 +59,6 @@ def _parse_metadata_flag(raw: Optional[str]) -> tuple[Optional[dict], int]:
     return metadata, 0
 
 
-def _parse_evidence_flag(raw: Optional[str]) -> tuple[Optional[list], int]:
-    """Parse ``--evidence`` JSON without borrowing metadata's object contract."""
-    if not raw:
-        return None, 0
-    try:
-        evidence = json.loads(raw)
-        if not isinstance(evidence, list):
-            raise ValueError("must be a JSON list of {kind, detail} objects")
-    except (ValueError, json.JSONDecodeError) as exc:
-        return None, _err(f"kanban: --evidence: {exc}", 2)
-    return evidence, 0
-
-
 def _run_state_kwargs(args: argparse.Namespace, cmd: str) -> tuple[Optional[dict[str, str]], int]:
     """``--state-type``/``--state-name`` must be given together: ``(kwargs, 0)`` or ``(None, 2)``."""
     st = getattr(args, "state_type", None)
@@ -691,11 +678,18 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                                   tuple(diags_by_task.keys())):
                 meta[r["id"]] = {k: r[k] for k in ("title", "status", "assignee")}
 
+    # What this home believes it may claim on a shared board (#113620).
+    allowlist = kbd.dispatch_profile_allowlist_summary()
+
     if getattr(args, "json", False):
+        # Per-task rows unchanged; the home-scope allowlist rides as a trailing row
+        # (task_id null) so existing `payload[0]["diagnostics"]` consumers keep working.
         _print_json([{"task_id": tid, **meta.get(tid, {}), "diagnostics": [d.to_dict() for d in dl]}
-                     for tid, dl in diags_by_task.items()])
+                     for tid, dl in diags_by_task.items()]
+                    + [{"task_id": None, "dispatch_profiles": allowlist, "diagnostics": []}])
         return 0
 
+    print(f"kanban.dispatch_profiles: {allowlist}")
     if not diags_by_task:
         print("No active diagnostics on this board.")
         return 0
@@ -712,8 +706,14 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 
 
 def _cmd_link(args: argparse.Namespace) -> int:
+    # A worker linking its own running card (dependency-block handoff) proves
+    # ownership with its run id; linking a foreign task never needs one.
+    expected_child_run_id = (
+        _worker_run_id_for(args.child_id)
+        if args.child_id == os.environ.get("HERMES_KANBAN_TASK") else None)
     with kbc.connect_closing() as conn:
-        gated = kb.link_tasks(conn, args.parent_id, args.child_id)
+        gated = kb.link_tasks(conn, args.parent_id, args.child_id,
+                              expected_child_run_id=expected_child_run_id)
     print(f"Linked {args.parent_id} -> {args.child_id}")
     if gated:
         print(
@@ -851,15 +851,31 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
 
     from hermes_cli.goals import judge_goal
 
-    verdict, reason = "done", ""
+    verdict, reason, transport_failed = "done", "", False
     try:
-        verdict, reason, _, _, _ = judge_goal(goal=f"{task.title}\n\n{task.body or ''}".strip(),
-                                              last_response=evidence.strip())
+        # Headless handoff checks run outside any agent turn: bind the per-task relay-affinity
+        # scope (mirrors kanban_specify) so the relay does not reject the judge call (#113669).
+        from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
+        affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
+        try:
+            verdict, reason, _, _, transport_failed = judge_goal(
+                goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                last_response=evidence.strip())
+        finally:
+            if affinity_token is not None:
+                reset_affinity_scope(affinity_token)
     except Exception as judge_exc:
         import logging as _logging
 
         _logging.getLogger(__name__).warning("goal judge check failed, allowing lifecycle handoff: %s",
                                              judge_exc, exc_info=True)
+    if transport_failed:
+        # ``judge_goal`` fails open to ``continue`` on transport errors (relay 400, auth, timeout);
+        # an unreachable judge is not a human "not done" and must not reject the handoff (#83610).
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
+        return ("done", None)
     return (verdict, None if verdict == "done" else reason)
 
 
@@ -897,9 +913,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
         return rc
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
-        # Validate the handoff before the bulk loop.  `_bulk_apply` deliberately has
-        # best-effort semantics for ordinary per-item failures, but an invalid
-        # invocation must not close an earlier card and then die on a later
+        # Validate the handoff before the bulk loop. `_bulk_apply` deliberately
+        # has best-effort semantics for ordinary per-item failures, but a bad
+        # invocation must not mutate an earlier card before rejecting a later
         # evidence-required card.
         try:
             normalize_completion_evidence(evidence, required=False)
@@ -928,7 +944,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 return False
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
             try:
-                return kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
+                done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
                                         force=bool(getattr(args, "force", False)), evidence=evidence)
             except kb.LiveClaimError:
@@ -937,11 +953,19 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                                  f"--force to close its run and complete anyway.")
                 return False
             except CompletionEvidenceError as exc:
-                # A contract can change between the preflight and the mutation.
-                # Keep the CLI boundary readable even in that race; normal calls
-                # are rejected above before any bulk mutation begins.
+                # A contract can change between preflight and mutation. Keep the
+                # CLI boundary readable even in that race.
                 fail_msg[tid] = f"cannot complete {tid}: invalid completion evidence: {exc}"
                 return False
+            if not done:
+                # complete_task returns bare False for a dependency refusal too;
+                # name the open parents instead of claiming the id is unknown.
+                blockers = kb.unsatisfied_parents(conn, tid)
+                if blockers:
+                    detail = ", ".join(f"{pid} ({status})" for pid, status in blockers)
+                    fail_msg[tid] = (f"cannot complete {tid}: unsatisfied parent dependencies: {detail}; "
+                                     f"complete the parents first, or `hermes kanban unlink <parent> {tid}`.")
+            return done
 
         return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
 
@@ -978,9 +1002,12 @@ def _cmd_block(args: argparse.Namespace) -> int:
             where = landed.status if landed else "blocked"
             if where == "todo":
                 return f"{tid} → todo (dependency wait){suffix}"
+            if kind == "dependency" and where == "blocked":
+                return f"Blocked {tid} as needs_input (no open parent to wait on){suffix}"
             if where == "triage":
                 # Only a typed owner-input block carries a question for a human.
-                verdict = "needs a human decision" if kind == "needs_input" else "orchestration attention needed"
+                verdict = ("needs a human decision" if (landed.block_kind if landed else kind) == "needs_input"
+                           else "orchestration attention needed")
                 return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
             return f"Blocked {tid}{suffix}"
 
