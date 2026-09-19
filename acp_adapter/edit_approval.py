@@ -208,6 +208,7 @@ def make_acp_edit_approval_requester(
     request_permission_fn: Callable, loop: asyncio.AbstractEventLoop, session_id: str,
     timeout: float = 60.0, auto_approve_getter: Callable[[], tuple[str, str | None]] | None = None,
     state: EditApprovalState | None = None,
+    send_update: Callable[[object], None] | None = None,
 ) -> EditApprovalRequester:
     """Return a sync requester that bridges edit proposals to ACP permissions."""
     state = state or EditApprovalState()
@@ -232,7 +233,7 @@ def make_acp_edit_approval_requester(
             request_permission_fn, loop, session_id, tool_call=build_acp_edit_tool_call(proposal),
             options=[PermissionOption(option_id="allow_once", kind="allow_once", name="Allow edit"),
                      PermissionOption(option_id="deny", kind="reject_once", name="Deny")],
-            timeout=timeout, what="Edit approval request",
+            timeout=timeout, what="Edit approval request", send_update=send_update,
         )
         if timed_out is True:
             state.timed_out = True
