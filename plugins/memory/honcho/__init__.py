@@ -124,6 +124,9 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         self._manager = None   # HonchoSessionManager
         self._config = None    # HonchoClientConfig
         self._session_key = ""
+        # Gateway chats normally keep this stable so their Honcho memory survives
+        # ordinary turns. A true /new boundary derives a distinct key from it.
+        self._gateway_session_key = ""
         self._query_rewriter = query_rewriter
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
@@ -256,6 +259,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             # aiPeer comes from honcho.json only; SOUL.md is persona content, not identity config.
             self._lazy_init_kwargs = dict(kwargs)
             self._lazy_init_session_id = session_id
+            self._gateway_session_key = kwargs.get("gateway_session_key") or ""
             self._session_key = self._resolve_session_key(cfg, session_id, **kwargs)
 
             # Session creation can block on Honcho/DB outages, so context/hybrid startup
@@ -725,8 +729,31 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
                              "is_bot": bool(kwargs.get("author_is_bot"))}
 
     def on_session_switch(self, new_session_id: str, **kwargs) -> None:
-        """Discard in-flight recall even when the configured backend session is pinned."""
+        """Discard stale recall and rotate a gateway key only for a real ``/new``."""
         self._recall_generation = object()
+        if not (
+            kwargs.get("reset")
+            and kwargs.get("reason") == "new_session"
+            and new_session_id
+            and self._gateway_session_key
+            and self._config
+        ):
+            return
+
+        # Gateway session keys deliberately win over ``per-session`` for ordinary
+        # messages. At /new, retain the gateway identity while adding Hermes' fresh
+        # session ID so the new transcript gets a separate Honcho conversation.
+        gateway_key = f"{self._gateway_session_key}:session:{new_session_id}"
+        self._session_key = self._resolve_session_key(
+            self._config, new_session_id, gateway_session_key=gateway_key,
+        )
+        if self._lazy_init_kwargs is not None:
+            self._lazy_init_kwargs["gateway_session_key"] = gateway_key
+            self._lazy_init_session_id = new_session_id
+        self._base_context_cache = None
+        self._turn_count = 0
+        self._last_context_turn = self._last_dialectic_turn = -999
+        logger.debug("Honcho gateway session key rotated for new Hermes session: %s", self._session_key)
 
     # ----- Writes -----
 
