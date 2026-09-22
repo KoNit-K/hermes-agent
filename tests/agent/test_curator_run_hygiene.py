@@ -62,10 +62,13 @@ def test_only_one_process_claims_a_due_pass(env, monkeypatch):
     runs = []
 
     def _slow_review(**kw):
-        runs.append(kw)
-        started.set()
-        release.wait(10)
-        return {}
+        try:
+            runs.append(kw)
+            started.set()
+            release.wait(10)
+            return {}
+        finally:
+            kw["_on_complete"]()
 
     monkeypatch.setattr(curator, "run_curator_review", _slow_review)
     holder = threading.Thread(target=curator.maybe_run_curator, daemon=True)
@@ -79,3 +82,47 @@ def test_only_one_process_claims_a_due_pass(env, monkeypatch):
         holder.join(5)
     assert not curator._run_claim_path().exists(), "claim released after the pass"
     assert curator.maybe_run_curator() is not None, "and the next due pass can claim again"
+
+
+def test_async_review_keeps_claim_until_worker_finishes(env, monkeypatch):
+    """A due tick cannot launch another mutating review while the worker runs."""
+    curator, home = env["curator"], env["home"]
+    skill_dir = home / "skills" / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\n", encoding="utf-8")
+    from tools import skill_usage
+    skill_usage.mark_agent_created("alpha")
+    monkeypatch.setattr(curator, "should_run_now", lambda now=None: True)
+    monkeypatch.setattr(curator, "get_consolidate", lambda: True)
+    started, release = threading.Event(), threading.Event()
+
+    def _blocking_review(prompt):
+        started.set()
+        release.wait(10)
+        return {"summary": "llm-stub", "tool_calls": [], "final": "", "error": None}
+
+    from hermes_cli.observability import shared_metrics_loop
+    metrics = []
+
+    def _record_run(**kwargs):
+        metrics.append({**kwargs, "counts": kwargs["counts"](), "claim_held": curator._run_claim_path().exists()})
+
+    monkeypatch.setattr(shared_metrics_loop, "record_curator_run", _record_run)
+    monkeypatch.setattr(curator, "_run_llm_review", _blocking_review)
+    try:
+        assert curator.maybe_run_curator() is not None
+        assert started.wait(5)
+        assert curator._run_claim_path().exists()
+        assert curator.maybe_run_curator() is None
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == "curator-review":
+                thread.join(timeout=5)
+    assert not curator._run_claim_path().exists()
+    assert len(metrics) == 1
+    assert metrics[0]["claim_held"], "metrics are recorded before releasing the claim"
+    assert metrics[0]["trigger"] == "scheduled"
+    assert metrics[0]["outcome"] == "success"
+    assert metrics[0]["hermes_home"] == home
+    assert metrics[0]["counts"] == {"archived": 0, "created": 0, "merged": 0, "patched": 0}
