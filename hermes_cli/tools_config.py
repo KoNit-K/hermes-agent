@@ -700,15 +700,34 @@ def _merge_mcp_servers(
     explicit_passthrough = {ts[4:] if ts.startswith("mcp-") and ts not in known
                             and ts[4:] in known else ts for ts in explicit_passthrough}
 
+    def normalized_scope(server_name: str, field: str, value) -> Optional[Set[str]]:
+        """Return an absent scope as ``None`` and malformed explicit scopes as empty.
+
+        An explicitly authored restriction must never fall back to unrestricted
+        exposure.  Strings are the natural single-value YAML form; sequences
+        retain the established list semantics.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return {value}
+        if isinstance(value, (list, tuple, set)) and all(isinstance(item, str) for item in value):
+            return set(value)
+        logger.warning(
+            "Ignoring MCP server %s: %s must be a string or a sequence of strings; refusing to expose it without "
+            "a valid explicit scope.", server_name, field,
+        )
+        return set()
+
     def allowed_on_platform(name: str) -> bool:
         server_cfg = configured_servers.get(name)
         if not isinstance(server_cfg, dict):
             return True  # Portable plugin servers have no per-server config to scope.
-        allowed = server_cfg.get("platforms")
-        excluded = server_cfg.get("exclude_platforms")
-        if isinstance(allowed, (list, tuple, set)) and platform not in {str(p) for p in allowed}:
+        allowed = normalized_scope(name, "platforms", server_cfg.get("platforms"))
+        excluded = normalized_scope(name, "exclude_platforms", server_cfg.get("exclude_platforms"))
+        if allowed is not None and platform not in allowed:
             return False
-        return not (isinstance(excluded, (list, tuple, set)) and platform in {str(p) for p in excluded})
+        return excluded is None or platform not in excluded
 
     enabled_mcp_servers = {name for name in globally_enabled_mcp_servers if allowed_on_platform(name)}
     result = explicit_passthrough - known
