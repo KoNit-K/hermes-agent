@@ -61,6 +61,7 @@ import {
   type SpawnPriority
 } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { openBrowserTab } from '@/store/preview'
 import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
@@ -1375,6 +1376,11 @@ export const host = {
 
     revealTreePane(id)
   },
+
+  /** Open (or re-front) the in-app Browser without replacing its current
+   *  page. Feature-detect on older desktops (`typeof host.openBrowser ===
+   *  'function'`) and keep an in-plugin fallback when unavailable. */
+  openBrowser: (): void => openBrowserTab(),
 
   /** HEAR the gateway stream (message deltas, session lifecycle, tool
    *  activity, …) by event type — `'*'` for everything. Returns a disposer.

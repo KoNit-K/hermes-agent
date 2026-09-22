@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { host } from '@/sdk'
+import { $previewTabs, closeRightRail } from '@/store/preview'
 import { setActiveSessionId, setAwaitingResponse, setBusy } from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 
@@ -233,6 +234,19 @@ describe('host.connections', () => {
     desktopWindow.hermesDesktop = undefined
 
     await expect(host.connections()).rejects.toThrow('This Desktop build has no connection registry')
+  })
+})
+
+describe('host.openBrowser', () => {
+  beforeEach(() => {
+    closeRightRail()
+  })
+
+  it('delegates to the in-app Browser surface', () => {
+    host.openBrowser()
+
+    expect($previewTabs.get()).toHaveLength(1)
+    expect($previewTabs.get()[0]?.target.url).toBe('about:blank')
   })
 })
 
