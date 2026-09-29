@@ -227,7 +227,7 @@ class TestSyncFailoverPreservesCacheDecoration:
             static=prefix,
             provider="anthropic",
         )
-        redecorated, _ = _redecorate_prompt_cache_for_provider(cache_agent, mismatched)
+        redecorated, _, _ = _redecorate_prompt_cache_for_provider(cache_agent, mismatched)
         redone = redecorated[0]["content"]
         assert [part.get("cache_control") for part in redone] == [
             {"type": "ephemeral"}, {"type": "ephemeral"}, None,
