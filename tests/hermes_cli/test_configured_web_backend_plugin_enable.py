@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import copy
 
-import yaml
-
+from hermes_cli import config as config_module
 from hermes_cli.config import migrate_config
 from hermes_constants import get_hermes_home
 
@@ -23,12 +22,12 @@ def _helper():
 
 def _write_config(cfg: dict) -> None:
     (get_hermes_home() / "config.yaml").write_text(
-        yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
+        config_module.yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
     )
 
 
 def _read_config() -> dict:
-    return yaml.safe_load((get_hermes_home() / "config.yaml").read_text(encoding="utf-8"))
+    return config_module.yaml.safe_load((get_hermes_home() / "config.yaml").read_text(encoding="utf-8"))
 
 
 class TestV42MigrateUnblocksConfiguredWebBackend:
