@@ -82,7 +82,7 @@ def test_run_http_accepts_the_arity_each_sdk_generation_yields(sdk, streams):
         with patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
              _patch_sdk_async_client(_DummyAsyncClient), \
-             patch("tools.mcp_tool.streamable_http_client",
+             patch("tools.mcp_tool.streamable_http_client", create=True,
                    return_value=_transport_yielding(*streams)), \
              patch("tools.mcp_tool.ClientSession", _DummySession), \
              patch.object(MCPServerTask, "_discover_tools", _discover_tools):
@@ -114,7 +114,7 @@ def test_the_session_streams_are_the_first_two_yielded():
         with patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
              _patch_sdk_async_client(_DummyAsyncClient), \
-             patch("tools.mcp_tool.streamable_http_client",
+             patch("tools.mcp_tool.streamable_http_client", create=True,
                    return_value=_transport_yielding(read, write, (lambda: None))), \
              patch("tools.mcp_tool.ClientSession", _CapturingSession), \
              patch.object(MCPServerTask, "_discover_tools", _discover_tools):
@@ -166,7 +166,7 @@ def test_the_seeded_header_is_the_handshake_version_on_the_wire():
         with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              _patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
              _patch_sdk_async_client(_CapturingAsyncClient), \
-             _patch("tools.mcp_tool.streamable_http_client",
+             _patch("tools.mcp_tool.streamable_http_client", create=True,
                     return_value=_transport_yielding(MagicMock(), MagicMock())), \
              _patch("tools.mcp_tool.ClientSession", _DummySession), \
              _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
@@ -199,7 +199,7 @@ def test_an_explicit_protocol_header_still_wins():
         with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              _patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
              _patch_sdk_async_client(_CapturingAsyncClient), \
-             _patch("tools.mcp_tool.streamable_http_client",
+             _patch("tools.mcp_tool.streamable_http_client", create=True,
                     return_value=_transport_yielding(MagicMock(), MagicMock())), \
              _patch("tools.mcp_tool.ClientSession", _DummySession), \
              _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
@@ -246,7 +246,7 @@ def test_streamable_http_seeds_accept_for_sessionful_servers():
         with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              _patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
              _patch_sdk_async_client(_CapturingAsyncClient), \
-             _patch("tools.mcp_tool.streamable_http_client",
+             _patch("tools.mcp_tool.streamable_http_client", create=True,
                     return_value=_transport_yielding(MagicMock(), MagicMock())), \
              _patch("tools.mcp_tool.ClientSession", _DummySession), \
              _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
@@ -282,7 +282,7 @@ def test_an_explicit_accept_header_still_wins():
         with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              _patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
              _patch_sdk_async_client(_CapturingAsyncClient), \
-             _patch("tools.mcp_tool.streamable_http_client",
+             _patch("tools.mcp_tool.streamable_http_client", create=True,
                     return_value=_transport_yielding(MagicMock(), MagicMock())), \
              _patch("tools.mcp_tool.ClientSession", _DummySession), \
              _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
@@ -321,7 +321,7 @@ def test_sse_transport_does_not_seed_streamable_accept():
 
     async def _drive():
         with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
-             _patch("tools.mcp_tool.sse_client", _sse_client), \
+             _patch("tools.mcp_tool.sse_client", _sse_client, create=True), \
              _patch("tools.mcp_tool.ClientSession", _DummySession), \
              _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
             await server._run_http({
