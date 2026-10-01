@@ -66,3 +66,14 @@ def test_pre_tool_call_invalid_halt_is_not_block(monkeypatch):
         lambda hook_name, **kwargs: [{"action": "halt_turn", "response": ""}],
     )
     assert get_pre_tool_call_directive("web_search", {}) == (None, None)
+
+
+def test_pre_tool_call_block_overrides_earlier_halt(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda hook_name, **kwargs: [
+            {"action": "halt_turn", "response": "halt now"},
+            {"action": "block", "message": "safety veto"},
+        ],
+    )
+    assert get_pre_tool_call_directive("web_search", {}) == ("block", "safety veto")

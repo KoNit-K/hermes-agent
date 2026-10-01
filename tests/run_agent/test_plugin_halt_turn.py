@@ -216,6 +216,6 @@ def test_fail_open_block_is_not_plugin_halt():
 
 def test_post_tool_call_string_return_does_not_replace_tool_result(monkeypatch):
     """Thin wrapper: observational ``post_tool_call`` must not rewrite the tool result."""
-    from tests.test_transform_tool_result_hook import test_post_tool_call_remains_observational
+    from tests.plugins.test_transform_tool_result_hook import test_post_tool_call_remains_observational
 
     test_post_tool_call_remains_observational(monkeypatch)
