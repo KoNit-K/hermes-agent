@@ -81,3 +81,45 @@ def test_cron_prompt_prose_still_blocked():
     ) is True
     with pytest.raises(GatewayLifecycleBlocked):
         check_gateway_lifecycle("then run hermes gateway restart", None)
+
+
+@pytest.mark.parametrize("invocation", ["bash", "direct"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "echo release\\ #1; hermes gateway restart\n",
+        "echo release\\;#1; hermes gateway restart\n",
+        "echo release\\\n#1; hermes gateway restart\n",
+    ],
+    ids=["escaped-space", "escaped-separator", "continued-word"],
+)
+def test_escaped_word_boundary_does_not_hide_lifecycle(tmp_path, invocation, body):
+    script = tmp_path / "restart.sh"
+    script.write_text("#!/bin/bash\n" + body, encoding="utf-8")
+    script.chmod(0o755)
+    command = f"bash {script}" if invocation == "bash" else str(script)
+    assert guard(command, cwd=str(tmp_path)) is True
+
+
+@pytest.mark.parametrize("invocation", ["bash", "direct"])
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ('echo "#1"; hermes gateway restart\n', True),
+        ("echo '#1'; hermes gateway restart\n", True),
+        ("echo \\#1; hermes gateway restart\n", True),
+        ("echo ${#HOME} $# foo#bar; hermes gateway restart\n", True),
+        ("echo \\\n# hint: hermes gateway restart\n", False),
+        ("echo ok;\\\n# hint: hermes gateway restart\n", False),
+        ('echo ""#1; hermes gateway restart\n', True),
+        ("# hint: hermes gateway restart\necho ok\n", False),
+    ],
+    ids=["double-quote", "single-quote", "escaped-hash", "parameters-and-word",
+         "continued-boundary", "continued-separator", "quoted-word", "hint"],
+)
+def test_referenced_script_hash_boundaries(tmp_path, invocation, body, expected):
+    script = tmp_path / "hash.sh"
+    script.write_text("#!/bin/bash\n" + body, encoding="utf-8")
+    script.chmod(0o755)
+    command = f"bash {script}" if invocation == "bash" else str(script)
+    assert guard(command, cwd=str(tmp_path)) is expected

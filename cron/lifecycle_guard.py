@@ -540,14 +540,15 @@ def _strip_inert_hash_comments(text: str) -> str:
     blocks.
 
     Word-start rule matches POSIX (and ``tools.shell_heredoc``): ``#`` begins a
-    comment at the start of a word — beginning of the text, after whitespace,
-    or after ``;&|()``. ``echo $#``, ``${#var}``, and ``foo#bar`` stay intact.
+    comment at the start of a word — beginning of the text, after unescaped whitespace,
+    or after unescaped ``;&|()``. ``echo $#``, ``${#var}``, and ``foo#bar`` stay intact.
     Fail-closed: an unclosed quote leaves the remainder visible.
     """
     if not text or "#" not in text:
         return text
     out: list[str] = []
     in_single = in_double = False
+    at_word_start = True
     i = 0
     n = len(text)
     while i < n:
@@ -571,26 +572,33 @@ def _strip_inert_hash_comments(text: str) -> str:
         if ch == "\\" and i + 1 < n:
             out.append(ch)
             out.append(text[i + 1])
+            # Line continuation preserves the boundary; other escapes form a word.
+            if text[i + 1] != "\n":
+                at_word_start = False
             i += 2
             continue
         if ch == "'":
             in_single = True
+            at_word_start = False
             out.append(ch)
             i += 1
             continue
         if ch == '"':
             in_double = True
+            at_word_start = False
             out.append(ch)
             i += 1
             continue
-        if ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|()"):
+        if ch == "#" and at_word_start:
             newline = text.find("\n", i)
             if newline == -1:
                 return "".join(out)
             out.append("\n")
+            at_word_start = True
             i = newline + 1
             continue
         out.append(ch)
+        at_word_start = ch.isspace() or ch in ";&|()"
         i += 1
     return "".join(out)
 
