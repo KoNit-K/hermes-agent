@@ -1,13 +1,9 @@
 import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
-import { $backgroundStatusBySession } from '@/store/composer-status'
-import { $activeSessionId } from '@/store/session'
-
-import { seedAgentTerminalCommand, syncAgentTerminalSnapshot } from './agent-terminal-stream'
 import { setActiveTerminalId } from './buffer'
 import { AgentTerminalInstance, TerminalInstance } from './instance'
-import { $activeTerminalId, $terminals, maybeAutoRevealAgentTerminal } from './terminals'
+import { $activeTerminalId, $terminals } from './terminals'
 
 interface TerminalWorkspaceProps {
   onAddSelectionToChat: (text: string, label?: string) => void
@@ -20,8 +16,6 @@ interface TerminalWorkspaceProps {
 export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspaceProps) {
   const terminals = useStore($terminals)
   const activeId = useStore($activeTerminalId)
-  const background = useStore($backgroundStatusBySession)
-  const activeSessionId = useStore($activeSessionId)
 
   // Mirror the tab selection into the agent reader (read_terminal reads it).
   useEffect(() => {
@@ -32,22 +26,6 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
       setActiveTerminalId(null)
     }
   }, [])
-
-  // Surface the agent's background processes as read-only tabs (once each).
-  // Live chunks stream via agent.terminal.output; the process-list snapshot also
-  // seeds/falls back so the tab never stays blank if the stream races startup.
-  // Auto-reveal (select + pane takeover) is gated to the active session and
-  // the `hermes.desktop.revealBackgroundTerminals === 'auto'` preference.
-  useEffect(() => {
-    for (const [sessionId, list] of Object.entries(background)) {
-      const allowAutoReveal = sessionId === activeSessionId
-      for (const item of list) {
-        maybeAutoRevealAgentTerminal(item.id, item.title, allowAutoReveal)
-        seedAgentTerminalCommand(item.id, item.title)
-        syncAgentTerminalSnapshot(item.id, item.output ?? '')
-      }
-    }
-  }, [activeSessionId, background])
 
   return (
     <>

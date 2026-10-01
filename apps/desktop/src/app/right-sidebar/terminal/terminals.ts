@@ -261,8 +261,13 @@ export function openAgentTerminal(procId: string, title: string): void {
  *  If a status-stack click already opened an agent tab, don't create a
  *  second, unrelated user shell just because the pane became visible. */
 export function ensureTerminal(): void {
-  if ($terminals.get().length === 0) {
+  const list = $terminals.get()
+
+  if (list.length === 0) {
     createTerminal()
+  } else if (!list.some(term => term.id === $activeTerminalId.get())) {
+    // Background tabs can be surfaced before the pane has ever been opened.
+    selectTerminal(list[0].id)
   }
 }
 
