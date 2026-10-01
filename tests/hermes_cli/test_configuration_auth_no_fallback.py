@@ -120,7 +120,7 @@ def test_tui_empty_codex_oauth_resolver_does_not_walk_fallback(monkeypatch):
     monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {"provider": "openai-codex"})
     monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
     monkeypatch.setattr(auth_codex, "_load_auth_store_maybe_locked", lambda _lock=True: {})
-    monkeypatch.setattr(auth_codex, "_pool_codex_access_token", lambda: "")
+    monkeypatch.setattr(auth_codex, "_pool_codex_credential", lambda: ("", ""))
     monkeypatch.setattr(auth_codex, "_codex_pool_rate_limit_status", lambda: None)
 
     def fake_resolve_provider(requested_provider, **_kwargs):
@@ -214,7 +214,7 @@ def test_codex_pool_cooldown_is_not_missing_credential(monkeypatch):
     from hermes_cli.auth import should_try_fallback_on_auth_error
 
     monkeypatch.setattr(auth_codex, "_load_auth_store_maybe_locked", lambda _lock=True: {})
-    monkeypatch.setattr(auth_codex, "_pool_codex_access_token", lambda: "")
+    monkeypatch.setattr(auth_codex, "_pool_codex_credential", lambda: ("", ""))
     monkeypatch.setattr(auth_codex, "_codex_pool_rate_limit_status", lambda: None)
     monkeypatch.setattr(auth_codex, "_read_codex_pool_entries", lambda: [{"access_token": "cooled-token"}])
 
@@ -243,7 +243,7 @@ def test_auto_codex_empty_store_does_not_spend_openrouter_fallback(monkeypatch):
     monkeypatch.setattr(runtime_provider, "resolve_provider", lambda *_args, **_kwargs: "openai-codex")
     monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
     monkeypatch.setattr(auth_codex, "_load_auth_store_maybe_locked", lambda _lock=True: {})
-    monkeypatch.setattr(auth_codex, "_pool_codex_access_token", lambda: "")
+    monkeypatch.setattr(auth_codex, "_pool_codex_credential", lambda: ("", ""))
     monkeypatch.setattr(auth_codex, "_codex_pool_rate_limit_status", lambda: None)
     monkeypatch.setattr(
         runtime_provider,
