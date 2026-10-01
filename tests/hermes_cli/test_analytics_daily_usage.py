@@ -9,7 +9,7 @@ shape, and absolute writes ledger only the increment.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 
@@ -32,7 +32,7 @@ def client(monkeypatch, _isolate_hermes_home):
 
 
 def _utc_day(ts: float | None = None) -> str:
-    return datetime.fromtimestamp(ts if ts is not None else time.time(), tz=timezone.utc).strftime(
+    return datetime.fromtimestamp(ts if ts is not None else time.time()).strftime(
         "%Y-%m-%d"
     )
 
