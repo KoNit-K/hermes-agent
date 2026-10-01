@@ -8,6 +8,8 @@ connection errors must not disable paid features.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from typing import Any, Dict, List
 from unittest.mock import Mock
 
@@ -170,9 +172,72 @@ class TestPaidFeatureCacheFailOpenControls:
         self, monkeypatch: pytest.MonkeyPatch, bb_env: None
     ) -> None:
         """First encounter must keep the existing keepAlive-then-proxies 402 loop."""
-        posts = _patch_post(monkeypatch, _402_keepalive_then_ok)
+        def handler(payload, *, wrap_errors=True):
+            if payload.get("keepAlive") or payload.get("proxies"):
+                return _http(402, "Payment Required")
+            return _ok()
 
-        BrowserbaseBrowserProvider().create_session("task-1")
-        assert posts[0].get("keepAlive") is True
-        assert posts[1].get("keepAlive") is None
-        assert len(posts) == 2
+        posts = _patch_post(monkeypatch, handler)
+        first = BrowserbaseBrowserProvider().create_session("task-1")
+        assert posts == [
+            {"projectId": "proj-a", "keepAlive": True, "proxies": True},
+            {"projectId": "proj-a", "proxies": True},
+            {"projectId": "proj-a"},
+        ]
+        second = BrowserbaseBrowserProvider().create_session("task-2")
+        assert posts[3:] == [{"projectId": "proj-a"}]
+        for result in (first, second):
+            assert result["features"]["keep_alive"] is False
+            assert result["features"]["proxies"] is False
+
+
+def test_cached_drops_remain_consistent_during_concurrent_growth(
+    monkeypatch: pytest.MonkeyPatch, bb_env: None
+) -> None:
+    from plugins.browser.browserbase import provider as bb
+
+    scope = ("https://bb.test", "proj-a")
+    bb._record_paid_drops(scope, {"keepAlive"})
+    reading = Event()
+    recorded = Event()
+    apply_cached = bb._apply_cached_paid_drops
+    observed_drops = []
+
+    class InterleavedPayload(dict):
+        def __contains__(self, key):
+            if key == "keepAlive":
+                # Pause with the old implementation's shared-set iterator live.
+                reading.set()
+                assert recorded.wait(5), "writer did not update the cache"
+            return super().__contains__(key)
+
+    def apply_with_interleaving(payload, account_scope):
+        controlled = InterleavedPayload(payload)
+        before = set(controlled)
+        dropped = apply_cached(controlled, account_scope)
+        assert dropped == before - set(controlled)
+        observed_drops.append(dropped)
+        payload.clear()
+        payload.update(controlled)
+        return dropped
+
+    def record_proxies():
+        assert reading.wait(5), "reader did not reach the cached key"
+        try:
+            bb._record_paid_drops(scope, {"proxies"})
+        finally:
+            recorded.set()
+
+    monkeypatch.setattr(bb, "_apply_cached_paid_drops", apply_with_interleaving)
+    posts = _patch_post(monkeypatch, lambda payload, **kwargs: _ok())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        writer = executor.submit(record_proxies)
+        result = BrowserbaseBrowserProvider().create_session("task-concurrent")
+        writer.result(timeout=5)
+
+    assert observed_drops == [{"keepAlive", "proxies"}]
+    assert len(posts) == 1
+    assert "keepAlive" not in posts[0]
+    assert "proxies" not in posts[0]
+    assert result["features"]["keep_alive"] is False
+    assert result["features"]["proxies"] is False

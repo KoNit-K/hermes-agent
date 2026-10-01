@@ -37,7 +37,9 @@ def _apply_cached_paid_drops(session_config: Dict[str, object], scope: Tuple[str
     cached = _PAID_FEATURE_DROP_CACHE.get(scope)
     if not cached:
         return set()
-    dropped = {key for key in cached if key in session_config}
+    # Another create may grow the shared cache while we read it.
+    dropped = {key for key, _ in _PAID_FEATURE_FALLBACKS
+               if key in cached and key in session_config}
     for key in dropped:
         session_config.pop(key, None)
     return dropped
