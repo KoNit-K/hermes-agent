@@ -80,6 +80,9 @@ def test_initial_connect_retries_through_cold_start_then_attaches(monkeypatch):
     async def _noop(*_a, **_k):
         pass
 
+    # The connection object is stored before these collaborators run; both are
+    # replaced below, so this lightweight mock covers the cold-start state transition
+    # without claiming WebSocket protocol coverage.
     async def _stop_after_attach():
         supervisor._stop_requested = True
 
