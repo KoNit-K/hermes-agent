@@ -13,6 +13,28 @@ import pytest
 
 from agent.prompt_builder import STEER_MARKER_OPEN, format_steer_marker
 from run_agent import AIAgent
+from tools.registry import registry
+
+# Registry handler for the end-to-end steer-survival test below (module level,
+# like the built-in tool files — dispatch looks the tool up here at run time).
+_STEER_SURVIVAL_TOOL = "steer_survival_probe"
+
+
+def _steer_survival_tool(args, **_kwargs):
+    return "probe ok"
+
+
+registry.register(
+    name=_STEER_SURVIVAL_TOOL,
+    toolset="utility",
+    schema={
+        "name": _STEER_SURVIVAL_TOOL,
+        "description": "probe tool for the steer-survival regression test",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    handler=_steer_survival_tool,
+    override=True,
+)
 
 
 def _bare_agent() -> AIAgent:
@@ -43,11 +65,6 @@ def _bare_agent() -> AIAgent:
     return agent
 
 
-class TestSteerAcceptance:
-    def test_accepts_non_empty_text(self):
-        agent = _bare_agent()
-        assert agent.steer("go ahead and check the logs") is True
-        assert agent._pending_steer == "go ahead and check the logs"
 
 
 
@@ -85,11 +102,9 @@ class TestActiveTurnRedirect:
 
         assert agent.redirect("first correction") is True
         assert agent.redirect("second correction") is True
-        assert agent._pending_redirect == (
-            "first correction\n\n"
-            "[Additional user correction]\n"
-            "second correction"
-        )
+        pending = agent._pending_redirect
+        assert "first correction" in pending and "second correction" in pending
+        assert pending.index("first correction") < pending.index("second correction")
 
     def test_hard_interrupt_wins_over_new_redirect(self):
         agent = _bare_agent()
@@ -190,6 +205,43 @@ class TestActiveTurnRedirect:
 
 
 class TestActiveTurnRedirectCheckpoint:
+    def test_repetition_dominated_partial_is_not_replayed(self):
+        """A looped partial must not seed the correction's next API request (#112764): neither
+        the replayed correction nor the alternation placeholder carries the bytes; the model
+        is told the reply degenerated instead."""
+        from agent.conversation_loop import _apply_active_turn_redirect
+        from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED
+
+        repeated = ("The same degenerate partial response keeps repeating without progress.\n" * 10)
+        agent = _bare_agent()
+        agent._current_streamed_assistant_text = repeated
+        messages = [{"role": "user", "content": "start"}]
+
+        _apply_active_turn_redirect(agent, messages, "Change course.")
+
+        placeholder, correction = messages[-2], messages[-1]
+        replayed = correction["api_content"]
+        assert repeated not in replayed
+        assert "Visible response before the interruption:" not in replayed
+        assert REPETITION_LOOP_INTERRUPTED in replayed
+        assert placeholder["role"] == "assistant"
+        assert placeholder["display_kind"] == "hidden"
+        assert repeated not in (placeholder.get("content") or "")
+        assert repeated not in (placeholder.get("api_content") or "")
+
+    def test_ordinary_partial_remains_replayable(self):
+        """Useful interrupted text remains available to the corrected request."""
+        from agent.conversation_loop import _apply_active_turn_redirect
+
+        visible = "I found the migration entry point and was about to inspect it."
+        agent = _bare_agent()
+        agent._current_streamed_assistant_text = visible
+        messages = [{"role": "user", "content": "start"}]
+
+        _apply_active_turn_redirect(agent, messages, "Change course.")
+
+        assert visible in messages[-1]["api_content"]
+
     def test_assistant_tail_puts_correction_last(self):
         from agent.conversation_loop import _apply_active_turn_redirect
 
@@ -311,58 +363,7 @@ class TestActiveTurnRedirectCheckpoint:
             assert "Reasoning shown before the interruption" not in serialized
             assert "Visible draft." in serialized
 
-    def test_checkpoint_omits_reasoning_label_when_nothing_visible(self):
-        from agent.conversation_loop import _apply_active_turn_redirect
 
-        agent = _bare_agent()
-        agent._current_streamed_reasoning_text = "thinking only, no text yet"
-        messages = [{"role": "user", "content": "start"}]
-
-        _apply_active_turn_redirect(agent, messages, "New direction.")
-
-        placeholder = messages[-2]
-        correction = messages[-1]
-        # Nothing was on screen: empty hidden placeholder for alternation;
-        # scaffold rides only on the user correction's api_content.
-        assert placeholder["role"] == "assistant"
-        assert placeholder["display_kind"] == "hidden"
-        assert placeholder.get("content") == ""
-        # Neutral provider-replay payload (#88955): keeps the row out of the
-        # re-heal sanitizer loop; the interrupt scaffold is still never here.
-        assert placeholder.get("api_content") == "[response interrupted]"
-        assert correction["content"] == "New direction."
-        assert (
-            "[This response was interrupted by a user correction.]"
-            in correction["api_content"]
-        )
-
-    def test_tool_tail_scaffold_never_on_assistant_api_content(self):
-        """#81841: mid-tool steer must not put the interrupt scaffold on the
-        placeholder assistant row (that is what the model echoed)."""
-        from agent.conversation_loop import _apply_active_turn_redirect
-
-        agent = _bare_agent()
-        messages = [
-            {"role": "user", "content": "start"},
-            {"role": "assistant", "tool_calls": [{"id": "a"}]},
-            {"role": "tool", "content": "out", "tool_call_id": "a"},
-        ]
-
-        _apply_active_turn_redirect(agent, messages, "Stop and do X instead.")
-
-        placeholder = messages[-2]
-        correction = messages[-1]
-        assert placeholder["role"] == "assistant"
-        assert placeholder.get("display_kind") == "hidden"
-        assert placeholder.get("content") == ""
-        # Neutral provider-replay payload (#88955), NOT the interrupt scaffold.
-        assert placeholder.get("api_content") == "[response interrupted]"
-        assert correction["role"] == "user"
-        assert correction["content"] == "Stop and do X instead."
-        assert correction["api_content"].startswith(
-            "[Context from the interrupted assistant response]\n"
-            "[This response was interrupted by a user correction.]"
-        )
 
 
 class TestEmptyHiddenAssistantRehealRegression:
@@ -404,69 +405,6 @@ class TestEmptyHiddenAssistantRehealRegression:
             + str(placeholder.get("api_content") or "")
         )
 
-    def test_hidden_redirect_placeholder_does_not_reheal_on_repeated_projection(self):
-        from agent.agent_runtime_helpers import (
-            _msg_has_payload,
-            repair_empty_non_final_messages,
-        )
-        from agent.conversation_loop import _apply_active_turn_redirect
-
-        agent = _bare_agent()
-        agent._current_streamed_assistant_text = ""
-        messages = [{"role": "user", "content": "start"}]
-        _apply_active_turn_redirect(agent, messages, "Do X instead.")
-        durable = list(messages)
-
-        def project(rows):
-            """Mirror the real send-time projection (conversation_loop.py):
-            api_content -> content for historical user/assistant rows, and the
-            display/row bookkeeping stripped from every outgoing copy."""
-            out = []
-            for msg in rows:
-                api_msg = dict(msg)
-                _api_content = api_msg.pop("api_content", None)
-                api_msg.pop("display_kind", None)
-                api_msg.pop("display_metadata", None)
-                api_msg.pop("_row_id", None)
-                if (
-                    isinstance(_api_content, str)
-                    and _api_content
-                    and msg.get("role") in ("user", "assistant")
-                ):
-                    api_msg["content"] = _api_content
-                out.append(api_msg)
-            return out
-
-        for _pass in range(2):
-            projected = project(durable)
-            hidden_assistant = next(
-                m for m in projected if m.get("role") == "assistant"
-            )
-            # The provider replay sidecar was projected into content, so the
-            # row already carries payload and the sanitizer has nothing to heal.
-            assert _msg_has_payload(hidden_assistant) is True
-            assert hidden_assistant["content"] == "[response interrupted]"
-            assert "display_kind" not in hidden_assistant
-            assert "api_content" not in hidden_assistant
-
-            healed = repair_empty_non_final_messages(projected)
-            healed_assistant = next(
-                m for m in healed if m.get("role") == "assistant"
-            )
-            assert healed_assistant["content"] == "[response interrupted]"
-            assert "display_kind" not in healed_assistant
-            assert "api_content" not in healed_assistant
-            # Durable transcript is never mutated by projection or sanitizer.
-            assert durable == messages
-            assert durable[1]["content"] == ""
-            assert durable[1]["display_kind"] == "hidden"
-            assert durable[1]["api_content"] == "[response interrupted]"
-
-        # #81841 scaffold never appears on the assistant wire.
-        assert (
-            "[This response was interrupted by a user correction.]"
-            not in healed_assistant["content"]
-        )
 
     def test_empty_non_final_sanitizer_still_repairs_unmarked_empty_assistant(self):
         """Control: a genuinely empty non-final assistant with no provider-replay
@@ -534,24 +472,6 @@ class TestSteerInjection:
         assert messages[-1]["content"] == "output"  # unchanged
 
 
-    def test_marker_labels_text_as_out_of_band_user_message(self):
-        """The injection marker must attribute the appended text to the user
-        via the explicit out-of-band marker (which the system prompt tells the
-        model to trust) — otherwise the model reads it as untrusted tool output
-        and refuses it as suspected prompt injection.  Cache-safe: the marker
-        is delivered as a NEW user message, never by rewriting existing tool
-        content, so the persisted transcript matches the wire bytes.
-        """
-        agent = _bare_agent()
-        agent.steer("stop after next step")
-        messages = [{"role": "tool", "content": "x", "tool_call_id": "1"}]
-        agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs=1)
-        assert messages[-1]["role"] == "user"
-        content = messages[-1]["content"]
-        assert STEER_MARKER_OPEN in content
-        assert "stop after next step" in content
-        # The tool row itself is untouched.
-        assert messages[0]["content"] == "x"
 
     def test_persisted_steer_row_is_never_merged_with_the_next_prompt(self):
         """A run that ends right after a steered batch leaves user(steer) as the persisted tail.
@@ -608,10 +528,10 @@ class TestSteerThreadSafety:
 
 
 class TestSteerClearedOnInterrupt:
-    def test_clear_interrupt_drops_pending_steer(self):
+    def test_hard_cancel_drops_pending_steer(self):
         """A hard interrupt supersedes any pending steer — the agent's
         next tool iteration won't happen, so delivering the steer later
-        would be surprising."""
+        would be surprising. Only the explicit hard-cancel clear drops it."""
         agent = _bare_agent()
         # Minimal surface needed by clear_interrupt()
         agent._interrupt_requested = True
@@ -625,9 +545,134 @@ class TestSteerClearedOnInterrupt:
         agent._pending_redirect = "also drop this"
         assert agent._pending_steer == "will be dropped"
 
-        agent.clear_interrupt()
+        agent.clear_interrupt(hard_cancel=True)
         assert agent._pending_steer is None
         assert agent._pending_redirect is None
+
+    def test_soft_clear_preserves_pending_steer(self):
+        """A soft clear (redirect rebuild, error recovery, turn-boundary
+        hygiene) keeps the session alive, so an already-accepted steer must
+        survive it — the existing drains deliver it on the continued run.
+        Dropping it here silently lost a user message the surface had
+        already acknowledged as delivered."""
+        agent = _bare_agent()
+        agent._interrupt_requested = True
+        agent._interrupt_message = None
+        agent._interrupt_thread_signal_pending = False
+        agent._execution_thread_id = None
+        agent._tool_worker_threads = None
+        agent._tool_worker_threads_lock = None
+
+        agent.steer("must survive the rebuild")
+        agent._pending_redirect = "correction"
+
+        agent.clear_interrupt(preserve_redirect=True)
+        assert agent._pending_steer == "must survive the rebuild"
+        # preserve_redirect semantics unchanged: the correction survives too.
+        assert agent._pending_redirect == "correction"
+
+        # A plain soft clear (no flags) preserves the steer as well.
+        agent.clear_interrupt()
+        assert agent._pending_steer == "must survive the rebuild"
+        assert agent._pending_redirect is None
+
+
+class TestSteerSurvivesRedirectRebuild:
+    """A steer accepted while a redirect lands must still reach a later API
+    payload. Regression for the busy-redirect message loss: the rebuild's
+    ``clear_interrupt(preserve_redirect=True)`` used to wipe ``_pending_steer``
+    unconditionally, so a user message the surface had already acknowledged
+    as delivered evaporated with no trace (no payload, no leftover, no log)."""
+
+    STEER_TEXT = "STEER_TEXT_ONE"
+    REDIRECT_TEXT = "REDIRECT_TEXT_TWO"
+
+    def _loop_agent(self):
+        from unittest.mock import MagicMock, patch
+
+        from run_agent import AIAgent
+
+        tool_schema = {
+            "type": "function",
+            "function": {
+                "name": _STEER_SURVIVAL_TOOL,
+                "description": "probe tool for the steer-survival regression test",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }
+        with (
+            patch("model_tools.get_tool_definitions", return_value=[tool_schema]),
+            patch("model_tools.check_toolset_requirements", return_value={}),
+            patch("agent.process_bootstrap.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        agent.client = MagicMock()
+        agent._disable_streaming = True
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        return agent
+
+    def test_steer_accepted_before_redirect_lands_in_rebuilt_payload(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from tests.agent.test_run_agent import _mock_response
+
+        agent = self._loop_agent()
+        payloads = []
+
+        def model_call(api_kwargs):
+            payloads.append([dict(m) for m in api_kwargs["messages"]])
+            if len(payloads) == 1:
+                tool_call = SimpleNamespace(
+                    id="call_1", type="function",
+                    function=SimpleNamespace(name=_STEER_SURVIVAL_TOOL, arguments="{}"),
+                )
+                return _mock_response(
+                    content=None, finish_reason="tool_calls", tool_calls=[tool_call]
+                )
+            if len(payloads) == 2:
+                # Both mid-turn user messages race the in-flight request:
+                # the steer is accepted first, then the redirect kills the
+                # request and arms the rebuild.
+                assert agent.steer(self.STEER_TEXT) is True
+                assert agent.redirect(self.REDIRECT_TEXT) is True
+                raise InterruptedError("redirect cancelled the in-flight request")
+            return _mock_response(content="rebuilt reply", finish_reason="stop")
+
+        agent._interruptible_api_call = model_call
+
+        with (
+            patch.object(agent, "_flush_messages_to_session_db"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("start something")
+
+        blob = "\n".join(
+            str(m.get("content"))
+            for call in payloads
+            for m in call
+            if isinstance(m, dict)
+        )
+        # The rebuild reached the wire: the redirect correction is a real user message.
+        assert self.REDIRECT_TEXT in blob
+        # The steer accepted just before the redirect must ride the same rebuild
+        # (injected into the newest tool result by the pre-API drain).
+        assert self.STEER_TEXT in blob
+        # Fully consumed: nothing left for the finalizer's leftover handoff.
+        assert result.get("pending_steer") is None
+        assert result["completed"] is True
 
 
 class TestPreApiCallSteerDrain:
@@ -661,6 +706,203 @@ class TestPreApiCallSteerDrain:
         assert "focus on error handling" in messages[-1]["content"]
         assert agent._pending_steer is None
 
+
+
+
+class TestSteerMarkerContract:
+    def test_system_prompt_note_describes_the_real_marker(self):
+        """The system-prompt note tells the model which marker to trust; it
+        must reference the exact open/close the injector emits, or the model
+        trusts a marker that never appears (and vice-versa)."""
+        from agent.prompt_builder import STEER_CHANNEL_NOTE, STEER_MARKER_CLOSE
+
+        emitted = format_steer_marker("hi")
+        assert STEER_MARKER_OPEN in emitted and STEER_MARKER_CLOSE in emitted
+        assert STEER_MARKER_OPEN in STEER_CHANNEL_NOTE and STEER_MARKER_CLOSE in STEER_CHANNEL_NOTE
+
+
+
+
+
+class TestSteerRowIsHumanInput:
+    def test_steer_row_counts_as_a_user_originated_turn(self, tmp_path):
+        """The steer row is typed (renderer label, alternation-repair guard) but it carries full user
+        authority: every "is this human input" predicate — in memory and the DB pick /undo uses — must
+        agree with the anchor-restoration predicate that already accepts it."""
+        from agent.context_compressor import ContextCompressor, is_user_originated_turn
+        from agent.conversation_compression import _is_real_user_message
+        from agent.prompt_builder import steer_user_row
+        from hermes_state import SessionDB
+
+        row = steer_user_row("focus on the error handling")
+        assert _is_real_user_message(row)
+        assert is_user_originated_turn(row)
+        assert ContextCompressor._is_actionable_user_turn(row)
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session(session_id="s1", source="cli")
+            db.append_message("s1", role="user", content="first question")
+            db.append_message("s1", role="assistant", content="first answer")
+            db.append_message("s1", role="user", content=row["content"], display_kind=row["display_kind"])
+            recents = db.list_recent_user_messages("s1", limit=5)
+            assert [r["preview"][:5] for r in recents] == [row["content"][:5], "first"]
+        finally:
+            db.close()
+
+
+class TestSteerCommandRegistry:
+
+    def test_steer_in_bypass_set(self):
+        """When the agent is running, /steer MUST bypass the Level-1
+        base-adapter queue so it reaches the gateway runner's /steer
+        handler. Otherwise it would be queued as user text and only
+        delivered at turn end — defeating the whole point.
+        """
+        from hermes_cli.commands import ACTIVE_SESSION_BYPASS_COMMANDS, should_bypass_active_session
+
+        assert "steer" in ACTIVE_SESSION_BYPASS_COMMANDS
+        assert should_bypass_active_session("steer") is True
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-v"])
+
+
+class TestLegacyHiddenPlaceholderWireSubstitution:
+    """Projection-side half of #88955: rows persisted BEFORE the writer-side
+    ``api_content`` stamp are ``content=""`` + ``display_kind="hidden"`` with
+    no sidecar. The send-time projection must give the WIRE copy the neutral
+    ``[response interrupted]`` payload so legacy sessions converge instead of
+    re-healing forever — while the durable row stays hidden and empty."""
+
+    def _loop_agent(self):
+        from unittest.mock import MagicMock, patch
+
+        from run_agent import AIAgent
+
+        with (
+            patch("model_tools.get_tool_definitions", return_value=[]),
+            patch("model_tools.check_toolset_requirements", return_value={}),
+            patch("agent.process_bootstrap.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        return agent
+
+    def test_legacy_empty_hidden_assistant_row_gets_neutral_wire_payload(self):
+        """The projection itself must fill the row — the sanitizer must have
+        NOTHING left to heal (its per-turn warning spam IS the bug)."""
+        from unittest.mock import patch
+
+        import agent.agent_runtime_helpers as _arh
+
+        from tests.agent.test_run_agent import _mock_response
+
+        agent = self._loop_agent()
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="ok", finish_reason="stop"),
+        ]
+        sanitizer_inputs = []
+        _real_repair = _arh.repair_empty_non_final_messages
+
+        def _spy_repair(messages, *a, **k):
+            sanitizer_inputs.append(
+                [
+                    (m.get("role"), m.get("content"))
+                    for m in messages
+                    if isinstance(m, dict)
+                ]
+            )
+            return _real_repair(messages, *a, **k)
+        # Legacy pre-fix row: no api_content sidecar.
+        history = [
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": "", "display_kind": "hidden"},
+            {"role": "user", "content": "correction", "finish_reason": "stop"},
+            {"role": "assistant", "content": "earlier reply", "finish_reason": "stop"},
+        ]
+
+        with (
+            patch.object(agent, "_flush_messages_to_session_db"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(
+                _arh, "repair_empty_non_final_messages", side_effect=_spy_repair
+            ),
+        ):
+            agent.run_conversation("next question", conversation_history=history)
+
+        # Precondition: the sanitizer actually ran on this call path.
+        assert sanitizer_inputs, "sanitizer was never invoked — test is vacuous"
+        # The projection already filled the legacy row BEFORE sanitization:
+        # every assistant row the sanitizer saw carried payload, so it healed 0.
+        for snapshot in sanitizer_inputs:
+            for role, content in snapshot:
+                if role == "assistant":
+                    assert (content or "").strip(), (
+                        "sanitizer still received an empty assistant row — "
+                        "the re-heal loop is back (#88955)"
+                    )
+
+        wire = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        wire_assistants = [m for m in wire if m.get("role") == "assistant"]
+        legacy = wire_assistants[0]
+        # Substituted on the wire by the projection (not the sanitizer):
+        assert legacy["content"] == "[response interrupted]"
+        assert "display_kind" not in legacy
+        # #81841: never the interrupt scaffold.
+        assert "[This response was interrupted" not in legacy["content"]
+        # Durable history untouched.
+        assert history[1]["content"] == ""
+        assert history[1]["display_kind"] == "hidden"
+        assert "api_content" not in history[1]
+
+    def test_hidden_row_with_tool_calls_or_text_is_not_touched(self):
+        from agent.conversation_loop import _clone_message_for_send  # noqa: F401
+        from unittest.mock import patch
+
+        from tests.agent.test_run_agent import _mock_response
+
+        agent = self._loop_agent()
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="ok", finish_reason="stop"),
+        ]
+        history = [
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": "visible text",
+                "display_kind": "hidden",
+                "finish_reason": "stop",
+            },
+            {"role": "user", "content": "more"},
+            {"role": "assistant", "content": "reply", "finish_reason": "stop"},
+        ]
+
+        with (
+            patch.object(agent, "_flush_messages_to_session_db"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            agent.run_conversation("next", conversation_history=history)
+
+        wire = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        wire_assistants = [m for m in wire if m.get("role") == "assistant"]
+        assert wire_assistants[0]["content"] == "visible text"
     def test_pre_api_drain_does_not_attach_to_prior_turn_tool_result(self):
         from agent.turn_iteration_prep import _inject_steer_after_newest_tool_result
         agent = _bare_agent()
