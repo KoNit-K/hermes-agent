@@ -14,7 +14,7 @@ import threading
 from typing import Any, Dict, Optional
 
 _LOCK = threading.Lock()
-_frozen_origin: Optional[str] = None
+_frozen_origins: Dict[str, str] = {}
 
 _RE_INPUT_VALUE = re.compile(
     r"input\.value|\.value\b|querySelector(?:All)?\s*\([^)]*\)\s*\.value",
@@ -22,16 +22,23 @@ _RE_INPUT_VALUE = re.compile(
 )
 
 
-def activate_identity_freeze(origin: str) -> None:
-    global _frozen_origin
-    with _LOCK:
-        _frozen_origin = origin
+def _freeze_key(task_id: Optional[str]) -> str:
+    return task_id or "default"
 
 
-def clear_identity_freeze() -> None:
-    global _frozen_origin
+def activate_identity_freeze(origin: str, task_id: Optional[str] = None) -> None:
+    """Freeze screenshot/value reads only for the browser task that filled identity data."""
     with _LOCK:
-        _frozen_origin = None
+        _frozen_origins[_freeze_key(task_id)] = origin
+
+
+def clear_identity_freeze(task_id: Optional[str] = None) -> None:
+    """Clear one task's freeze, or all freezes for test/session teardown."""
+    with _LOCK:
+        if task_id is None:
+            _frozen_origins.clear()
+        else:
+            _frozen_origins.pop(_freeze_key(task_id), None)
 
 
 def _probe_origin(task_id: Optional[str]) -> Optional[str]:
@@ -44,15 +51,16 @@ def _probe_origin(task_id: Optional[str]) -> Optional[str]:
 
 
 def _still_frozen(task_id: Optional[str]) -> bool:
+    key = _freeze_key(task_id)
     with _LOCK:
-        frozen = _frozen_origin
+        frozen = _frozen_origins.get(key)
     if not frozen:
         return False
     current = _probe_origin(task_id)
     if current is None:
         return True
     if current != frozen:
-        clear_identity_freeze()
+        clear_identity_freeze(task_id)
         return False
     return True
 
@@ -71,7 +79,7 @@ def refuse_if_identity_frozen(task_id: Optional[str] = None) -> Optional[str]:
     if not _still_frozen(task_id):
         return None
     with _LOCK:
-        origin = _frozen_origin
+        origin = _frozen_origins.get(_freeze_key(task_id))
     return _refusal(
         f"Identity fields were filled on {origin}; screenshots and vision are frozen "
         "until the page origin changes."

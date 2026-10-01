@@ -144,7 +144,7 @@ class TestIdentityClassifier:
 # 4–6, 10. Fill confirm / redaction / canary
 # ---------------------------------------------------------------------------
 
-def _fill(store, meta, *, consent="accept", eval_secret=None, origin=ORIGIN):
+def _fill(store, meta, *, consent="accept", eval_secret=None, origin=ORIGIN, task_id=None):
     from tools import browser_vault_tool
 
     secret_exprs = []
@@ -161,7 +161,7 @@ def _fill(store, meta, *, consent="accept", eval_secret=None, origin=ORIGIN):
          patch.object(browser_vault_tool, "_eval_js", side_effect=_page_eval(origin)), \
          patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_secret), \
          patch("tools.approval_prompt.request_elicitation_consent", return_value=consent) as consent_fn:
-        raw = browser_vault_tool.browser_vault_fill(meta.id)
+        raw = browser_vault_tool.browser_vault_fill(meta.id, task_id=task_id)
     return json.loads(raw), raw, secret_exprs, consent_fn
 
 
@@ -243,11 +243,11 @@ class TestIdentityFill:
 # ---------------------------------------------------------------------------
 
 class TestIdentityVisionFreeze:
-    def _successful_fill(self, store):
+    def _successful_fill(self, store, task_id="t"):
         from agent import redact
 
         meta = _add_identity(store)
-        out, _, _, _ = _fill(store, meta, consent="accept")
+        out, _, _, _ = _fill(store, meta, consent="accept", task_id=task_id)
         assert out["success"] is True
         return meta
 
@@ -283,6 +283,14 @@ class TestIdentityVisionFreeze:
         assert out["success"] is False
         assert out.get("error_type")
         run.assert_not_called()
+
+    def test_freeze_is_isolated_per_browser_task(self, store):
+        from agent.vault_identity_freeze import activate_identity_freeze, refuse_if_identity_frozen
+
+        activate_identity_freeze(ORIGIN, "identity-task")
+        with patch("tools.browser_vault_tool._current_page_origin", return_value=ORIGIN):
+            assert refuse_if_identity_frozen("identity-task") is not None
+            assert refuse_if_identity_frozen("other-task") is None
 
     def test_origin_change_clears_freeze(self, store):
         from tools import browser_cdp_tool, browser_tool
