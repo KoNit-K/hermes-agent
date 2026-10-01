@@ -1279,6 +1279,24 @@ def _relaunch_paused_gateways(token: dict, profiles: dict, unmapped: list) -> tu
     return relaunched, unmapped_relaunched
 
 
+_RELAUNCH_VERIFY_TIMEOUT_S = 30.0
+
+
+def _pending_relaunch_pids(profiles: dict, unmapped: list, pid_exists) -> list[int]:
+    """Return old gateway PIDs whose restart watchers are still waiting."""
+    candidates = [int(pid) for pid in profiles.values()]
+    candidates += [int(entry["pid"]) for entry in unmapped if entry.get("argv") and entry.get("pid")]
+    return sorted({pid for pid in candidates if pid > 0 and pid_exists(pid)})
+
+
+def _relaunch_verify_timeout_s(profiles: dict, unmapped: list, pid_exists) -> float:
+    """Allow a waiting restart watcher to reach its own deadline before verification fails."""
+    from hermes_cli.gateway import GATEWAY_RESTART_WATCHER_TIMEOUT_S
+    return (float(GATEWAY_RESTART_WATCHER_TIMEOUT_S) + _RELAUNCH_VERIFY_TIMEOUT_S
+            if _pending_relaunch_pids(profiles, unmapped, pid_exists)
+            else _RELAUNCH_VERIFY_TIMEOUT_S)
+
+
 def _wait_for_unmapped_replay_ready(
     pre_replay_pids: set[int], expected_argv: list[str], *, timeout_s: float = 30.0,
     interval_s: float = 0.4, confirm_s: float = 2.0, excluded_pids: set[int] | None = None,
@@ -1420,16 +1438,20 @@ def _verify_relaunched_gateways_alive(
     the original verification failure rather than reporting a false success.
     """
     with _abort_on_error("Could not load Windows gateway liveness helpers"):
+        from gateway.status import _pid_exists
         from hermes_cli import gateway_windows
+    relaunch_timeout_s = _relaunch_verify_timeout_s(
+        profiles, [entry for entry, _pids, _argv in unmapped_replays], _pid_exists
+    )
     ready_by_home: list[tuple[str, Path, list[int]]] = []
     missing_profiles: list[str] = []
     from hermes_cli.profiles import get_profile_dir
     for profile in sorted(map(str, profiles)):
         home = Path(get_profile_dir(profile))
-        ready_pids = gateway_windows._wait_for_gateway_ready(timeout_s=30.0, home=home)
+        ready_pids = gateway_windows._wait_for_gateway_ready(timeout_s=relaunch_timeout_s, home=home)
         if not ready_pids:
             ready_pids = _recover_windows_gateway_via_schtasks(
-                gateway_windows, timeout_s=30.0, home=home
+                gateway_windows, timeout_s=relaunch_timeout_s, home=home
             )
         if ready_pids:
             ready_by_home.append((profile, home, ready_pids))
@@ -1441,7 +1463,8 @@ def _verify_relaunched_gateways_alive(
     for entry, pre_replay_pids, expected_argv in unmapped_replays:
         replay_pid = _try_call(
             lambda: _wait_for_unmapped_replay_ready(
-                pre_replay_pids, expected_argv, excluded_pids=set(verified_unmapped_pids)
+                pre_replay_pids, expected_argv,
+                excluded_pids=set(verified_unmapped_pids)
             ),
             "Could not verify unmapped Windows gateway replay (pid %s) after update: %s",
             entry.get("pid"),
