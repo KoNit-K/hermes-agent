@@ -229,7 +229,7 @@ def test_exdev_on_staged_to_live_is_not_retried(tmp_path, monkeypatch):
 
 def test_promote_surfaces_winerror32_in_console(tmp_path, monkeypatch, capsys):
     desktop_dir, staging, _live_exe = _swap_trees(tmp_path)
-    monkeypatch.setattr(main_desktop, "_desktop_macos_relaunchable_fixup", lambda *a, **k: None)
+    monkeypatch.setattr(main_desktop, "_desktop_macos_relaunchable_fixup", lambda *a, **k: True)
     monkeypatch.setattr(main_desktop._time_mod, "sleep", lambda _s: None)
 
     def locked_rename(src, dst):
@@ -237,10 +237,9 @@ def test_promote_surfaces_winerror32_in_console(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(cli_main.os, "rename", locked_rename)
 
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(RuntimeError):
         main_desktop._promote_staged_desktop_app(desktop_dir, staging)
 
-    assert excinfo.value.code == 1
     out = capsys.readouterr().out
     assert "Could not install the rebuilt desktop app into" in out
     assert "previous desktop app was left untouched" in out
