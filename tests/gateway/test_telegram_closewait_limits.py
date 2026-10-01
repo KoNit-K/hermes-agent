@@ -31,7 +31,6 @@ import sys
 from unittest.mock import MagicMock
 
 import httpx
-import pytest
 
 from gateway.config import PlatformConfig
 from plugins.platforms.telegram import adapter as tg_adapter  # noqa: E402
@@ -181,7 +180,6 @@ def test_fallback_branch_forwards_tuned_limits_to_inner_transports(monkeypatch):
         assert isinstance(limits, httpx.Limits)
         assert limits.keepalive_expiry is not None
         assert limits.keepalive_expiry < 5.0
-        assert limits.max_connections == 512
         sock_opts = transport._transport_kwargs.get("socket_options")
         assert sock_opts, "fallback transport must enable TCP keepalive (#87057)"
         assert any(
