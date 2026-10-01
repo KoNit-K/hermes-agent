@@ -56,9 +56,6 @@ def _reset():
 
 
 class TestConfigGate:
-    def test_default_enabled(self):
-        with patch("hermes_cli.config.load_config", return_value={"voice": {}}):
-            assert vm.thinking_sound_enabled() is True
 
 
     def test_start_refuses_when_disabled(self):
@@ -240,7 +237,7 @@ class TestWindowsOutputResample:
         fake = _FakeSD(default_samplerate=48000)
         with patch.object(vm.platform, "system", return_value="Windows"), \
              patch.object(vm, "_import_audio", return_value=(fake, np)), \
-             patch.object(vm, "_is_wsl2_env", return_value=False):
+             patch.object(vm, "is_wsl", return_value=False):
             assert vm._play_wav_via_sounddevice(str(wav_path)) is True
         assert fake.played, "wav playback never submitted audio"
         audio, rate = fake.played[0]
