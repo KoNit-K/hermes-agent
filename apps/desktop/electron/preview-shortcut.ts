@@ -2,9 +2,9 @@
  * Pure helpers for the desktop preview/window reload + close-tab chords
  * (Ctrl/Cmd+R, Ctrl/Cmd+Shift+R, Ctrl/Cmd+W).
  *
- * Detection lives here so it can be unit-tested without booting a BrowserWindow.
- * `installPreviewShortcut` in main.ts owns the Electron listener and the
- * preview-aware reload IPC; force-reload is a main-process
+ * Detection and event dispatch live here so the production listener can be
+ * tested without booting a BrowserWindow. main.ts supplies preview/HUD IPC
+ * callbacks; force-reload is a main-process
  * `webContents.reloadIgnoringCache()` call (no renderer IPC / location.reload).
  *
  * Addresses #106662 as an escape hatch: this does not claim to fix GPU/hit-test
@@ -22,6 +22,8 @@ export type PreviewShortcutInput = {
   key?: string
   meta?: boolean
   shift?: boolean
+  type?: string
+  isAutoRepeat?: boolean
 }
 
 export type PreviewShortcutWindowLike = {
@@ -119,4 +121,63 @@ export function applyPreviewShortcut(
   } catch {
     // Fail-open: a raced destroy between the checks and the call must not throw.
   }
+}
+
+interface PreviewShortcutEvent {
+  preventDefault(): void
+}
+
+interface PreviewShortcutWindow {
+  isDestroyed?: () => boolean
+  webContents: NonNullable<NonNullable<PreviewShortcutWindowLike>['webContents']> & {
+    on(event: 'before-input-event', listener: (event: PreviewShortcutEvent, input: PreviewShortcutInput) => void): void
+  }
+}
+
+/** main.ts supplies the existing preview-aware IPC and HUD close paths. */
+export function installPreviewShortcut(
+  window: PreviewShortcutWindow,
+  {
+    isMac,
+    closePreview,
+    reloadPreview
+  }: {
+    isMac: boolean
+    closePreview: () => void
+    reloadPreview: () => void
+  }
+): void {
+  window.webContents.on('before-input-event', (event, input) => {
+    const action = previewShortcutAction(input, { isMac })
+
+    if (!action) {
+      return
+    }
+
+    event.preventDefault()
+
+    // Claim releases and repeats too, so menu accelerators cannot handle them.
+    if (input.type !== 'keyDown' || input.isAutoRepeat) {
+      return
+    }
+
+    // Always claim Ctrl/Cmd+W; the renderer decides tab-vs-window.
+    if (action === 'close-preview-tab') {
+      closePreview()
+
+      return
+    }
+
+    // Preview-aware reload also works without an application menu on Windows/Linux.
+    if (action === 'reload-preview-or-window') {
+      reloadPreview()
+
+      return
+    }
+
+    // Keep the macOS forceReload menu role; claiming this chord covers all platforms.
+    if (action === 'force-reload-window') {
+      applyPreviewShortcut(action, window)
+    }
+  })
 }
