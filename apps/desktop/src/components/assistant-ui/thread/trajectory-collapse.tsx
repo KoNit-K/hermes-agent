@@ -5,12 +5,15 @@ import { createContext, type FC, type ReactNode, useContext, useMemo, useState }
 import { formatElapsed } from '@/components/chat/activity-timer'
 import { SCAFFOLD_LABEL_CLASS, ScaffoldRow } from '@/components/chat/scaffold-row'
 import { useI18n } from '@/i18n'
+import { generatedImageFromResult } from '@/lib/generated-images'
 import { CheckIcon } from '@/lib/icons'
 import { $trajectoryCollapsedByDefault } from '@/store/trajectory-disclosure'
 
 export type TrajectoryPart = {
   completedAt?: unknown
+  result?: unknown
   text?: unknown
+  toolName?: string
   timestamp?: unknown
   type?: string
 }
@@ -61,7 +64,7 @@ function foldTime(
 }
 
 /**
- * Decide whether an assistant turn's preliminary work (reasoning + tool-calls)
+ * Decide whether a completed assistant turn's preliminary work (reasoning + tool-calls)
  * should fold into one summary. Step count is per reasoning-with-text part plus
  * per tool-call part (fail-open: tools that ChainToolFallback later hides still
  * count). Elapsed time is latest−earliest preliminary timestamp/completedAt,
@@ -69,9 +72,17 @@ function foldTime(
  */
 export function planTrajectoryCollapse(
   parts: readonly TrajectoryPart[],
-  options: { fallbackElapsedSeconds?: number; preferenceOn: boolean }
+  options: { fallbackElapsedSeconds?: number; messageComplete: boolean; preferenceOn: boolean }
 ): null | TrajectoryPlan {
-  if (!options.preferenceOn) {
+  if (!options.preferenceOn || !options.messageComplete) {
+    return null
+  }
+
+  // Successful image cards live inside tool groups. Keep these turns expanded
+  // rather than hide the deliverable along with the execution log.
+  if (
+    parts.some(part => isToolCall(part) && part.toolName === 'image_generate' && generatedImageFromResult(part.result))
+  ) {
     return null
   }
 
@@ -147,8 +158,8 @@ function parseSignature(signature: string): null | TrajectoryPlan {
 
 /**
  * Wraps `MessagePrimitive.Parts`. When the turn has preliminary work plus a
- * trailing deliverable, renders a single scaffold summary and hides thought /
- * tool groups until the header is expanded. Always mounts the same children
+ * trailing deliverable and is complete, renders a single scaffold summary and
+ * hides thought / tool groups until the header is expanded. Always mounts the same children
  * identity so streaming text does not remount the parts tree.
  */
 export const TrajectoryCollapse: FC<{ children: ReactNode }> = ({ children }) => {
@@ -161,6 +172,7 @@ export const TrajectoryCollapse: FC<{ children: ReactNode }> = ({ children }) =>
     const parts = (Array.isArray(rawParts) ? rawParts : s.message.content) as readonly TrajectoryPart[]
     const plan = planTrajectoryCollapse(parts, {
       fallbackElapsedSeconds: fallbackElapsedSeconds(s.message.metadata?.custom),
+      messageComplete: s.message.status?.type === 'complete',
       preferenceOn
     })
 

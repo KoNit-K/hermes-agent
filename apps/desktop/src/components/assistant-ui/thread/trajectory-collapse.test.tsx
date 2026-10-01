@@ -47,7 +47,7 @@ function trajectoryMessage({
   finalText?: string
   running?: boolean
   timestamps?: boolean
-} = {}): ThreadMessage {
+} = {}): Extract<ThreadMessage, { role: 'assistant' }> {
   const started = createdAt.getTime() / 1000
   const content: unknown[] = [
     {
@@ -81,7 +81,7 @@ function trajectoryMessage({
     status: running ? { type: 'running' } : { type: 'complete', reason: 'stop' },
     createdAt,
     metadata: assistantMetadata
-  } as unknown as ThreadMessage
+  } as unknown as Extract<ThreadMessage, { role: 'assistant' }>
 }
 
 function Harness({ assistant }: { assistant: ThreadMessage }) {
@@ -141,5 +141,79 @@ describe('execution trajectory collapse', () => {
     })
     expect(screen.queryByText(/Completed \d+ steps/i)).toBeNull()
     expect(container.querySelector('[data-tool-row]')).toBeTruthy()
+  })
+
+  it('waits for completion across intermediate text and later tools, preserving manual expansion', async () => {
+    const intermediate = trajectoryMessage({ finalText: 'checking another file', running: true })
+    const { container, rerender } = render(<Harness assistant={intermediate} />)
+
+    await screen.findByText('checking another file')
+    expect(screen.queryByText(/Completed \d+ steps/i)).toBeNull()
+    expect(container.querySelector('[data-slot="aui_thinking-disclosure"]')).toBeTruthy()
+    expect(container.querySelector('[data-tool-row]')).toBeTruthy()
+
+    const laterTool = {
+      ...intermediate.content[1],
+      toolCallId: 'read-2'
+    }
+
+    const withLaterTool = {
+      ...intermediate,
+      content: [...intermediate.content, laterTool]
+    } as Extract<ThreadMessage, { role: 'assistant' }>
+
+    rerender(<Harness assistant={withLaterTool} />)
+    await waitFor(() => expect(container.querySelectorAll('[data-tool-row]')).toHaveLength(2))
+    expect(screen.queryByText(/Completed \d+ steps/i)).toBeNull()
+
+    const complete = {
+      ...withLaterTool,
+      content: [...withLaterTool.content, { type: 'text', text: 'final answer here' }],
+      status: { type: 'complete', reason: 'stop' }
+    } as Extract<ThreadMessage, { role: 'assistant' }>
+
+    rerender(<Harness assistant={complete} />)
+    const summary = await screen.findByRole('button', { name: /Completed \d+ steps/i })
+    expect(container.querySelector('[data-tool-row]')).toBeNull()
+    fireEvent.click(summary)
+    expect(container.querySelectorAll('[data-tool-row]')).toHaveLength(2)
+
+    rerender(
+      <Harness assistant={{ ...complete, content: [...complete.content, { type: 'text', text: 'more detail' }] }} />
+    )
+    await screen.findByText('more detail')
+    expect(container.querySelectorAll('[data-tool-row]')).toHaveLength(2)
+  })
+
+  it('keeps a successful generated image directly visible alongside final text', async () => {
+    const assistant = trajectoryMessage()
+
+    const imageTool = {
+      type: 'tool-call',
+      toolCallId: 'image-1',
+      toolName: 'image_generate',
+      args: { prompt: 'draw a cat' },
+      argsText: JSON.stringify({ prompt: 'draw a cat' }),
+      result: { image: 'https://cdn.example/cat.png', success: true }
+    }
+
+    const { container } = render(
+      <Harness
+        assistant={
+          {
+            ...assistant,
+            content: [...assistant.content.slice(0, -1), imageTool, assistant.content.at(-1)!]
+          } as ThreadMessage
+        }
+      />
+    )
+
+    await screen.findByText('final answer here')
+    await waitFor(() => expect(container.querySelector('img[src="https://cdn.example/cat.png"]')).toBeTruthy())
+    const image = screen.getByRole('img', { name: 'Generated image' })
+    fireEvent.load(image)
+    expect(image.classList.contains('opacity-100')).toBe(true)
+    expect(container.querySelector('[data-slot="aui_generated-image"]')).toBeTruthy()
+    expect(screen.queryByText(/Completed \d+ steps/i)).toBeNull()
   })
 })
