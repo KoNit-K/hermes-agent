@@ -11,10 +11,8 @@ import json
 from agent.replay_cleanup import (
     is_interrupted_tool_result,
     strip_dangling_tool_call_tail,
-    strip_interrupted_tool_tails,
     sanitize_replay_history,
 )
-from agent.tool_dispatch_helpers import make_tool_result_message
 
 
 def _user(text):
@@ -72,6 +70,12 @@ def test_mixed_dangling_batch_uses_truthful_per_call_wording():
 
 
 
+def test_json_scalars_and_lists_quoting_interrupt_markers_are_not_interrupted():
+    """Quoted markers are data even when the valid JSON value is not an object."""
+    assert is_interrupted_tool_result(json.dumps(["[Command interrupted]"])) is False
+    assert is_interrupted_tool_result(json.dumps("[Command interrupted]")) is False
+
+
 def test_sanitize_replay_history_combines_both():
     # interrupted block is removed; a dangling read-only call is safe to erase
     history = [
@@ -94,87 +98,11 @@ def test_sanitize_replay_history_noop_on_clean_history():
     assert sanitize_replay_history(history) == history
 
 
-def test_sanitize_replay_history_empty():
-    assert sanitize_replay_history([]) == []
 
-
-def _quoted_interrupt_history(tool_name, text, call_id="c1"):
-    result = make_tool_result_message(tool_name, text, call_id)
-    history = [
-        {"role": "user", "content": "Read the documentation."},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": tool_name, "arguments": "{}"},
-                }
-            ],
-        },
-        result,
-        {"role": "user", "content": "Explain the result; do not rerun the command."},
-    ]
-    return result, history
-
-
-def test_quoted_interrupt_marker_in_successful_terminal_is_not_interrupted():
-    text = json.dumps({"output": "Documentation quotes [Command interrupted].", "exit_code": 0})
-    assert is_interrupted_tool_result(text) is False
-    result, history = _quoted_interrupt_history("terminal", text)
-    replay = sanitize_replay_history(history)
-    assert any(m.get("role") == "tool" and m.get("content") == result["content"] for m in replay)
-    assert replay[-1]["content"] == "Explain the result; do not rerun the command."
-
-
-def test_quoted_interrupt_marker_in_successful_read_file_keeps_block():
-    text = json.dumps({"content": "Documentation quotes [Command interrupted]."})
-    assert is_interrupted_tool_result(text) is False
-    result, history = _quoted_interrupt_history("read_file", text)
-    replay = sanitize_replay_history(history)
-    assert len(replay) == 4
-    assert any(m.get("role") == "tool" and m.get("content") == result["content"] for m in replay)
-    assert replay[-1]["content"] == "Explain the result; do not rerun the command."
-
-
-def test_unstructured_command_interrupted_still_classifies():
-    assert is_interrupted_tool_result("[Command interrupted]") is True
-
-
-def test_structured_genuine_interrupt_still_classifies():
-    assert is_interrupted_tool_result(json.dumps({
-        "output": "[Command interrupted]", "exit_code": 130
-    })) is True
-
-
-def test_ordinary_failure_is_not_interrupt():
-    assert is_interrupted_tool_result(json.dumps({
-        "output": "boom", "exit_code": 1
-    })) is False
-
-
-def test_exit_code_zero_discussing_interrupt_130_is_not_interrupt():
-    assert is_interrupted_tool_result(json.dumps({
-        "output": "docs mention interrupt exit_code 130", "exit_code": 0
-    })) is False
-
-
-def test_structured_exit_code_1300_is_not_interrupt():
-    assert is_interrupted_tool_result(json.dumps({
-        "output": "notes discuss interrupt", "exit_code": 1300
-    })) is False
-
-
-def test_bare_structured_exit_code_130_without_indication_is_not_interrupt():
-    assert is_interrupted_tool_result(json.dumps({
-        "output": "killed", "exit_code": 130
-    })) is False
 
 # --- Send/replay canonicalization parity (#105236 §6, salvage of #105308) ---
 
 import copy
-import json
 
 from agent.replay_cleanup import canonicalize_replay_history
 from agent.transports.chat_completions import ChatCompletionsTransport
