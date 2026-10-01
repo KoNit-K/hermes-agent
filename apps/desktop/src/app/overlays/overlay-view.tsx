@@ -126,7 +126,7 @@ export function OverlayView({
               </div>
             )}
 
-            <div className={cn(overlayTitlebarHitRowClass, 'absolute right-3 top-[0.1875rem] gap-1.5')}>
+            <div className={cn(overlayTitlebarHitRowClass, 'absolute right-[var(--titlebar-tools-right,0.75rem)] top-[0.1875rem] gap-1.5')}>
               {titlebarActions}
 
               <Button
