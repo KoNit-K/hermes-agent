@@ -47,7 +47,7 @@ def _packaged_setup(tmp_path, monkeypatch, *, stamp: dict | None, head: str = HE
     exe.parent.mkdir(parents=True)
     exe.write_text("fake-exe", encoding="utf-8")
     monkeypatch.setattr(main_desktop, "_desktop_packaged_executable", lambda _d: exe)
-    monkeypatch.setattr(main_desktop, "_stamp_is_current", lambda *_a, **_k: True)
+    monkeypatch.setattr("hermes_cli.source_build.source_product_current", lambda *_a, **_k: True)
     _mock_git_head(monkeypatch, head)
 
     resources = _resources_dir_for_exe(exe)
