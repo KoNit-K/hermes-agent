@@ -25,7 +25,7 @@ from agent.secret_sources.base import (
     reset_source_environment, set_source_environment,
 )
 from agent.secret_sources.tool_credentials import should_apply_to_environ
-from hermes_constants import hermes_home_key
+from hermes_constants import hermes_home_key, normalize_scope
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,9 @@ class AppliedVar:
     source: str          # SecretSource.name
     shape: str           # "mapped" | "bulk"
     overrode_env: bool   # replaced a pre-existing .env/shell value
+    # The source may beat .env/shell for this var (``override_existing`` and not ``preserve_existing``), so a
+    # dotenv reload may re-assert it; a gap-fill or preserved name must keep following .env edits (#74265).
+    authoritative: bool = False
 
 
 @dataclass
@@ -122,6 +125,7 @@ def register_source(source: SecretSource, *, replace: bool = False, builtin: boo
     if problem:
         logger.warning(problem)
         return False
+    scope = normalize_scope(scope)
     name = source.name
     with _REGISTRY_LOCK:
         effective = dict(_SOURCES)
@@ -146,7 +150,7 @@ def register_source(source: SecretSource, *, replace: bool = False, builtin: boo
 def _merged(scope: Optional[str]) -> Dict[str, SecretSource]:
     """Global sources overlaid with the scope's (default: current home) registrations."""
     merged = dict(_SOURCES)
-    merged.update(_SCOPED_SOURCES.get(scope or hermes_home_key(), {}))
+    merged.update(_SCOPED_SOURCES.get(hermes_home_key(scope), {}))
     return merged
 
 
@@ -159,6 +163,7 @@ def get_source(name: str, *, scope: Optional[str] = None) -> Optional[SecretSour
 def snapshot_registration(name: str, *, scope: Optional[str] = None) -> Optional[SecretSource]:
     """Return the registration owned by exactly one registry layer."""
     _ensure_builtin_sources()
+    scope = normalize_scope(scope)
     with _REGISTRY_LOCK:
         return (_SOURCES if scope is None else _SCOPED_SOURCES.get(scope, {})).get(name)
 
@@ -167,6 +172,7 @@ def restore_registration(name: str, current: SecretSource, previous: Optional[Se
                          scope: Optional[str] = None) -> bool:
     """Restore a host-owned source registration if it is still current."""
     _ensure_builtin_sources()
+    scope = normalize_scope(scope)
     with _REGISTRY_LOCK:
         target = _SOURCES if scope is None else _SCOPED_SOURCES.setdefault(scope, {})
         if target.get(name) is not current:
@@ -295,6 +301,14 @@ def _ordered_enabled_sources(secrets_cfg: dict, *, scope: Optional[str] = None) 
     return enabled
 
 
+def enabled_source_names(secrets_cfg: dict, home_path: Path) -> frozenset:
+    """Names of the sources :func:`apply_all` would fetch for *home_path* right now (registered
+    and enabled). A source missing here was removed or disabled, so a value it injected earlier
+    is no longer backed by anything and must be revoked, not kept as process residue."""
+    secrets_cfg = secrets_cfg if isinstance(secrets_cfg, dict) else {}
+    return frozenset(s.name for s in _ordered_enabled_sources(secrets_cfg, scope=hermes_home_key(home_path)))
+
+
 def _active_profile_name(home_path: Optional[Path]) -> str:
     """Active profile name (``~/.hermes/profiles/<name>``); "" for the default profile."""
     if home_path is not None:
@@ -380,7 +394,8 @@ class _Applier:
         self.env[var] = value
         self.claimed[var] = source.name
         sr.applied.append(var)
-        self.report.provenance[var] = AppliedVar(var, source.name, source.shape, overrode_env=existed)
+        self.report.provenance[var] = AppliedVar(var, source.name, source.shape, overrode_env=existed,
+                                                 authoritative=override and var not in self.preserve)
         return True
 
 
