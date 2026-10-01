@@ -186,9 +186,6 @@ export function assertLocalProfileCanStart(
   gate: ProfileDeletionGate,
   profileDirectoryExists: (profile: string) => boolean
 ): void {
-  // A leaked pool scope key (`conn:<id>::<profile>`) is not a profile name.
-  // Denormalize before the directory check / "no longer exists" throw so
-  // `conn:local::default` resolves to the real `default` profile (exempt).
   const key = profileNameFromScopeKey(profile).toLowerCase()
 
   gate.assertCanStart(key)
@@ -198,17 +195,11 @@ export function assertLocalProfileCanStart(
   }
 }
 
-/** Same composite form as parseBackendScopeKey — kept local so this module
- * does not import the registry. Bare names and empty stay fail-open. */
 function profileNameFromScopeKey(profile: unknown): string {
   const value = String(profile ?? '').trim()
   const match = /^conn:(.+?)::(.+)$/.exec(value)
 
-  if (!match) {
-    return value || 'default'
-  }
-
-  return match[2]
+  return match ? match[2] : (value || 'default')
 }
 
 /**

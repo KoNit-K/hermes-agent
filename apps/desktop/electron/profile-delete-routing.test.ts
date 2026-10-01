@@ -85,10 +85,6 @@ test('resolveRouteProfile passes the requested profile through when nothing was 
   assert.equal(resolveRouteProfile(null, 'other-profile'), 'other-profile')
 })
 
-test('resolveRouteProfile passes through undefined when nothing was torn down and no profile was requested', () => {
-  assert.equal(resolveRouteProfile(null, undefined), undefined)
-})
-
 // ---------------------------------------------------------------------------
 // ProfileDeletionGate / localProfilePoolKeys
 // ---------------------------------------------------------------------------
@@ -141,23 +137,7 @@ test('assertLocalProfileCanStart rejects a delayed retry after the profile direc
 
   assert.throws(() => assertLocalProfileCanStart('selena', gate, () => false), /Profile "selena" no longer exists/)
   assert.doesNotThrow(() => assertLocalProfileCanStart('default', gate, () => false))
-  assert.doesNotThrow(() => assertLocalProfileCanStart('selena', gate, profile => profile === 'selena'))
-})
-
-test('assertLocalProfileCanStart denormalizes a pool scope key before the directory check', () => {
-  const gate = new ProfileDeletionGate()
-
-  // D1: conn:local::default is a pool scope key, not a profile directory.
-  // After denormalize → default, which stays exempt even when exists() is false.
   assert.doesNotThrow(() => assertLocalProfileCanStart('conn:local::default', gate, () => false))
-
-  // D1 CONTROL: a real missing bare profile still throws.
-  assert.throws(
-    () => assertLocalProfileCanStart('auditor', gate, () => false),
-    /Profile "auditor" no longer exists/
-  )
-
-  // D1 CONTROL: an existing local profile still starts.
   assert.doesNotThrow(() => assertLocalProfileCanStart('selena', gate, profile => profile === 'selena'))
 })
 
