@@ -566,7 +566,7 @@ class TestPlannedManualProfileRecovery:
             update_cmd._resume_windows_gateways_after_update(token)
 
         assert run_homes == [beta_home]
-        assert readiness_attempts == 3
+        assert readiness_attempts == 4  # initial, registration, XML-race recheck, post-trigger
         assert token["resume_needed"] is False
 
 
@@ -602,7 +602,7 @@ class TestRegisteredTaskRecoveryFollowups:
         scripts = list((beta_home / "gateway-service").glob("*.cmd"))
         assert len(scripts) == 1
         beta_script = scripts[0]
-        rendered = beta_script.read_text(encoding="utf-8")
+        rendered = beta_script.read_text(encoding="utf-8-sig")
         assert f'HERMES_HOME={beta_home}' in rendered
         assert "--profile beta gateway run" in rendered
         assert not (default_home / "gateway-service" / "Hermes_Gateway.cmd").exists()
@@ -761,7 +761,8 @@ class TestRegisteredTaskRecoveryFollowups:
             "beta-cold-start",
         ]
 
-    def test_partial_relaunch_attests_alpha_and_keeps_only_beta_pending(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("failure", ["empty", "raises"])
+    def test_partial_relaunch_attests_alpha_and_keeps_only_beta_pending(self, monkeypatch, tmp_path, failure):
         """R2: a created watcher is not a recovered profile.  Alpha may be
         attested and reconciled even while beta remains retryable."""
         homes = {"alpha": tmp_path / "alpha", "beta": tmp_path / "beta"}
@@ -777,11 +778,14 @@ class TestRegisteredTaskRecoveryFollowups:
             "_write_start_attestation",
             lambda pids, _via, home=None: attestations.append((list(pids), home)),
         )
-        monkeypatch.setattr(
-            gateway_windows,
-            "_wait_for_gateway_ready",
-            lambda *, home=None, **_kw: [101] if home == homes["alpha"] else [],
-        )
+        def readiness(*, home=None, **_kw):
+            if home == homes["alpha"]:
+                return [101]
+            if failure == "raises":
+                raise OSError("readiness unavailable")
+            return []
+
+        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", readiness)
 
         token = _token({"alpha": 11, "beta": 22})
         with pytest.raises(RuntimeError, match="not verified alive"):
@@ -965,7 +969,8 @@ class TestRegisteredTaskRecoveryFollowups:
         second = {"pid": 88, "argv": ["python", "-m", "hermes_cli.main", "gateway", "run", "--profile", "beta"]}
         claimed: list[set[int]] = []
 
-        def ready(_before, argv, *, excluded_pids=None):
+        def ready(_before, argv, *, timeout_s, excluded_pids=None):
+            assert timeout_s >= 30.0
             claimed.append(set(excluded_pids or set()))
             return 202 if argv == first["argv"] else None
 
@@ -986,7 +991,7 @@ class TestRegisteredTaskRecoveryFollowups:
         assert token["unmapped"] == [second]
         assert token["resume_needed"] is True
         assert claimed == [set(), {202}]
-        payload = (tmp_path / "state" / "gateway.unmapped-start-attestation.json").read_text(encoding="utf-8")
+        payload = (tmp_path / "state" / "gateway.unmapped-start-attestation.json").read_text(encoding="utf-8-sig")
         assert '"pids": [202]' in payload
 
     def test_partial_retry_does_not_drop_or_restart_verified_alpha(self, monkeypatch, tmp_path):
@@ -1060,12 +1065,22 @@ class TestRegisteredTaskRecoveryFollowups:
         assert "query failed" in out
         assert "No registered" not in out
 
-    def test_rechecks_target_before_run_when_task_query_races_recovery(self, monkeypatch):
+    @pytest.mark.parametrize("query", ["registration", "xml"])
+    def test_rechecks_target_before_run_when_task_query_races_recovery(self, monkeypatch, query):
         """R5: a target that becomes stable during task lookup must be
         returned directly; a second competing /Run is unnecessary."""
         runs: list[object] = []
+        _install_managed_task_action(monkeypatch)
+        recovered = {"ready": query == "registration"}
+        managed_xml = gateway_windows._query_scheduled_task_xml(_TASK)
+
+        def lookup(_task):
+            recovered["ready"] = True
+            return managed_xml
+
+        monkeypatch.setattr(gateway_windows, "_query_scheduled_task_xml", lookup)
         monkeypatch.setattr(gateway_windows, "_task_registration_state", lambda **_kw: "registered")
-        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", lambda **_kw: [777])
+        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", lambda **_kw: [777] if recovered["ready"] else [])
         monkeypatch.setattr(
             gateway_windows,
             "_run_scheduled_task_once",
@@ -1262,3 +1277,25 @@ class TestUnmappedStartAttestation:
 
         assert warning is not None
         assert "PID 777" in warning
+
+
+def test_surviving_old_mapped_pid_cannot_discharge_relaunch(monkeypatch, tmp_path):
+    from gateway import status
+    from itertools import count
+
+    home = tmp_path / "beta"
+    old_pid = 14980
+    monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda _profile: home)
+    monkeypatch.setattr(status, "_pid_exists", lambda pid: pid == old_pid)
+    monkeypatch.setattr(status, "get_running_pid", lambda *_a, **_kw: old_pid)
+    ticks = count()
+    monkeypatch.setattr(gateway_windows.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(gateway_windows.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(gateway_windows, "_task_registration_state", lambda **_kw: "query-failed")
+    token = _token({"beta": old_pid})
+    with pytest.raises(RuntimeError, match="not verified alive"):
+        _verify_relaunched_gateways_alive(token, {"beta": old_pid}, [])
+    assert token["profiles"] == {"beta": old_pid}
+    assert token["resume_needed"] is True
+    assert token.get("relaunched_profiles", []) == []
+    assert not gateway_windows._start_attestation_path(home).exists()

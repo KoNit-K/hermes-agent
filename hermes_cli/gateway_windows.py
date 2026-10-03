@@ -328,9 +328,10 @@ def _legacy_startup_entry_path(home: Path | None = None) -> Path:
     return _startup_dir() / f"{_sanitize_filename(task_name)}.cmd"
 
 
-def _startup_staging_path() -> Path:
+def _startup_staging_path(*, home: Path | None = None) -> Path:
     """The Startup-folder staging file; also the debris a pre-fix failed swap left behind (#114093)."""
-    return get_startup_entry_path().with_suffix(".tmp")
+    target = {"home": home} if home is not None else {}
+    return get_startup_entry_path(**target).with_suffix(".tmp")
 
 
 def _stable_gateway_working_dir(project_root: Path) -> str:
@@ -598,18 +599,71 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     return (False, f"schtasks /Create failed (code {last_code}): {last_err.strip()}")
 
 
-def _install_startup_entry(script_path: Path) -> Path:
+def _install_startup_entry(script_path: Path, *, home: Path | None = None) -> Path:
     """Write the Startup-folder fallback launcher. Returns its path."""
-    entry = get_startup_entry_path()
+    target = {"home": home} if home is not None else {}
+    entry = get_startup_entry_path(**target)
     entry.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(entry, _build_startup_launcher(script_path), _startup_staging_path())
-    legacy_entry = _legacy_startup_entry_path()
+    _atomic_write(entry, _build_startup_launcher(script_path), _startup_staging_path(**target))
+    legacy_entry = _legacy_startup_entry_path(**target)
     try:
         if legacy_entry.exists():
             legacy_entry.unlink()
     except OSError:
         pass
     return entry
+
+
+def _remove_startup_entries(*, home: Path | None = None) -> tuple[list[str], list[str]]:
+    """Unlink the Startup-folder entries (``.vbs`` fallback + legacy ``.cmd``); ``(done, warnings)``.
+
+    A failure (file locked, access denied) is reported rather than swallowed so callers warn
+    instead of claiming a single autostart mechanism.
+    """
+    target = {"home": home} if home is not None else {}
+    done: list[str] = []
+    warnings: list[str] = []
+    for path in (get_startup_entry_path(**target), _legacy_startup_entry_path(**target)):
+        try:
+            path.unlink()
+            done.append(f"Removed redundant Windows login item: {path}")
+        except FileNotFoundError:
+            pass
+        except OSError:
+            warnings.append(f"Could not remove redundant Windows login item: {path} (locked or access denied; it still fires at logon)")
+    return done, warnings
+
+
+def redundant_autostart_entries(*, home: Path | None = None) -> list[Path]:
+    """Startup-folder entries that fire the gateway a second time at logon: every entry beside a
+    registered Scheduled Task, or a legacy ``.cmd`` beside the ``.vbs`` fallback."""
+    target = {"home": home} if home is not None else {}
+    paths = (get_startup_entry_path(**target), _legacy_startup_entry_path(**target))
+    entries = [p for p in paths if p.exists()]
+    if is_task_registered(**target):
+        return entries
+    return entries[1:]
+
+
+def reconcile_autostart_launchers(*, home: Path | None = None) -> tuple[list[str], list[str]]:
+    """Converge gateway logon persistence to ONE mechanism; returns ``(done, warnings)`` messages.
+
+    The Scheduled Task and the Startup-folder entry are alternatives, but a successful task install
+    never removed an earlier fallback and pre-#45610 installs left a ``cmd.exe`` launcher behind, so
+    logon could fire the launcher twice (#80569). Task registered: remove the Startup entries. No
+    task but a legacy ``.cmd``: rewrite it as the console-less ``.vbs`` fallback. File operations
+    only (no schtasks mutation, no elevation), so install, update and doctor can all run it.
+    """
+    target = {"home": home} if home is not None else {}
+    if is_task_registered(**target):
+        return _remove_startup_entries(**target)
+    legacy = _legacy_startup_entry_path(**target)
+    if legacy.exists():
+        entry = _install_startup_entry(_write_task_script(**target), **target)
+        if legacy.exists():  # _install_startup_entry swallows the unlink failure; both would fire at logon
+            return [], [f"Could not remove legacy Windows login item: {legacy} (locked or access denied; it still fires at logon beside {entry})"]
+        return [f"Migrated legacy Windows login item to: {entry}"], []
+    return [], []
 
 
 def _resolve_detached_python(python_exe: str) -> tuple[str, Path, list[str]]:
@@ -826,8 +880,14 @@ def _start_or_report_running(running_pids: list[int] | None = None) -> None:
 def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -> None:
     """Install the Startup-folder fallback and optionally start once."""
     print(f"↻ Scheduled Task install blocked ({detail.splitlines()[0]}) — using Startup folder fallback")
-    entry = _install_startup_entry(script_path)
-    print(f"✓ Installed Windows login item: {entry}")
+    if is_task_registered():
+        # An earlier task survives (UAC declined, access denied on re-create) and still fires at
+        # logon; adding the fallback beside it would start the gateway twice (#80569).
+        print("⚠ Scheduled Task is still registered — skipped the Startup fallback to avoid a duplicate autostart.")
+        print("  If that task is disabled or broken, run 'hermes gateway uninstall', then install again.")
+    else:
+        entry = _install_startup_entry(script_path)
+        print(f"✓ Installed Windows login item: {entry}")
     print(f"  Task script: {script_path}")
 
     # Re-running install must be safe: the fallback only installs login persistence; starting is
@@ -913,6 +973,12 @@ def install(
         print(f"✓ {detail}")
         print(f"  Task script: {script_path}")
         print("ℹ Gateway auto-start installed for Windows login.")
+        # A Startup-folder entry from an earlier fallback install would fire alongside the task (#80569).
+        done, warnings = _remove_startup_entries()
+        for message in done:
+            print(f"✓ {message}")
+        for message in warnings:
+            print(f"⚠ {message}")
         if start_now:
             _start_or_report_running()
         else:
@@ -935,7 +1001,9 @@ def install(
     raise RuntimeError(f"Windows gateway install failed: {detail}")
 
 
-def _live_gateway_pids(all_profiles: bool = False, home: Path | None = None) -> list[int]:
+def _live_gateway_pids(
+    all_profiles: bool = False, home: Path | None = None, pid_filter=None
+) -> list[int]:
     """Live gateway PIDs for the readiness poll. ``home`` scopes the probe to ONE profile's identity
     files (a still-running sibling must not vouch for a per-profile spawn, #110959); otherwise the
     process-table discovery for the active profile or the whole fleet."""
@@ -943,14 +1011,16 @@ def _live_gateway_pids(all_profiles: bool = False, home: Path | None = None) -> 
         from gateway.status import get_running_pid
 
         pid = get_running_pid(home / "gateway.pid", cleanup_stale=False)
-        return [pid] if pid else []
-    from hermes_cli.gateway import find_gateway_pids
-
-    return list(find_gateway_pids(all_profiles=all_profiles))
+        pids = [pid] if pid else []
+    else:
+        from hermes_cli.gateway import find_gateway_pids
+        pids = list(find_gateway_pids(all_profiles=all_profiles))
+    return list(pid_filter(pids)) if pid_filter is not None else pids
 
 
 def _confirm_gateway_stable(
-    initial_pids: list[int], confirm_s: float, interval_s: float, all_profiles: bool = False, home: Path | None = None,
+    initial_pids: list[int], confirm_s: float, interval_s: float, all_profiles: bool = False,
+    home: Path | None = None, pid_filter=None,
 ) -> list[int]:
     """Re-check a freshly detected gateway for ``confirm_s`` seconds: one process-table hit proves
     the child was *created*, not that it survived startup (or a parent Job Object teardown).
@@ -967,7 +1037,7 @@ def _confirm_gateway_stable(
     confirm_deadline = time.monotonic() + confirm_s
     while time.monotonic() < confirm_deadline:
         time.sleep(interval_s)
-        pids = _live_gateway_pids(all_profiles, home)
+        pids = _live_gateway_pids(all_profiles, home, pid_filter)
         if not pids:
             return []
     return pids
@@ -975,15 +1045,17 @@ def _confirm_gateway_stable(
 
 def _wait_for_gateway_ready(
     timeout_s: float = 6.0, interval_s: float = 0.4, confirm_s: float = 2.0, all_profiles: bool = False,
-    home: Path | None = None,
+    home: Path | None = None, pid_filter=None,
 ) -> list[int]:
     """Poll for a live gateway for up to ``timeout_s``; a first hit is provisional until the gateway
     stays visible for ``confirm_s`` more seconds (a child that dies right after spawn earns no ✓)."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        pids = _live_gateway_pids(all_profiles, home)
+        pids = _live_gateway_pids(all_profiles, home, pid_filter)
         if pids:
-            confirmed = _confirm_gateway_stable(pids, confirm_s, interval_s, all_profiles=all_profiles, home=home)
+            confirmed = _confirm_gateway_stable(
+                pids, confirm_s, interval_s, all_profiles=all_profiles, home=home, pid_filter=pid_filter
+            )
             if confirmed:
                 return confirmed
             continue  # died during confirmation — keep polling until deadline
@@ -1059,7 +1131,7 @@ def _unmapped_start_attestation_path() -> Path:
 
 def _read_unmapped_start_attestation() -> object | None:
     try:
-        return json.loads(_unmapped_start_attestation_path().read_text(encoding="utf-8"))
+        return json.loads(_unmapped_start_attestation_path().read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
 
