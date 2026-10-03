@@ -2575,34 +2575,30 @@ class CLICommandsMixin:
                        _accent_line(_t("reasoning.display_line", display=display_state, full=full_state)),
                        _dim_line(_t("reasoning.usage")))
         arg, explicit_global = _split_scope_flags(raw)
-        toggle = _REASONING_TOGGLES.get(arg)
-        if toggle is not None:  # display show/hide or full/clamp recap toggle
+        tokens = arg.split()
+        toggles = [_REASONING_TOGGLES.get(token) for token in tokens]
+        effort_tokens = [token for token, toggle in zip(tokens, toggles) if toggle is None]
+        parsed = _parse_reasoning_config(effort_tokens[0]) if len(effort_tokens) == 1 else None
+        if not tokens or len(effort_tokens) > 1 or (effort_tokens and parsed is None):
+            return _cp(_dim_line(_t("shared.unknown_argument", arg=arg)), _dim_line(_t("reasoning.valid_levels")), _dim_line(_t("reasoning.valid_display")), _dim_line(_t("reasoning.valid_scope")))
+        for toggle in toggles:
+            if toggle is None: continue
             attr, value, headline_key, note_key = toggle
             setattr(self, attr, value)
-            if attr == "show_reasoning" and self.agent:
-                self.agent.reasoning_callback = self._current_reasoning_callback()
+            if attr == "show_reasoning" and self.agent: self.agent.reasoning_callback = self._current_reasoning_callback()
             _save(f"display.{attr}", value)
             _cp(_accent_line(_t("reasoning.display_saved", headline=_t(f"reasoning.{headline_key}"))))
-            if note_key:
-                _cp(_dim_line(f"  {_t(f'reasoning.{note_key}')}"))
-            if attr == "reasoning_full" and value and not self.show_reasoning:
-                _cp(_dim_line(f"  {_t('reasoning.display_off_note')}"))
-            return
-        # Effort level change
-        parsed = _parse_reasoning_config(arg)
-        if parsed is None:
-            return _cp(_dim_line(_t("shared.unknown_argument", arg=arg)),
-                       _dim_line(_t("reasoning.valid_levels")), _dim_line(_t("reasoning.valid_display")),
-                       _dim_line(_t("reasoning.valid_scope")))
-        self.reasoning_config = parsed
-        _retire_agent(self)  # Force agent re-init with new reasoning config
-        saved = explicit_global and _save("agent.reasoning_effort", arg)
-        if saved:
-            if not isinstance(CLI_CONFIG.get("agent"), dict):
-                CLI_CONFIG["agent"] = {}
-            CLI_CONFIG["agent"]["reasoning_effort"] = arg
-        _cp(_accent_line(_t("reasoning.effort_set", effort=effort_display_label(arg, *_route),
-                            scope=_scope_outcome(explicit_global, saved))))
+            if note_key: _cp(_dim_line(f"  {_t(f'reasoning.{note_key}')}"))
+            if attr == "reasoning_full" and value and not self.show_reasoning: _cp(_dim_line(f"  {_t('reasoning.display_off_note')}"))
+        if parsed is not None:
+            effort = effort_tokens[0]
+            self.reasoning_config = parsed
+            _retire_agent(self)
+            saved = explicit_global and _save("agent.reasoning_effort", effort)
+            if saved:
+                if not isinstance(CLI_CONFIG.get("agent"), dict): CLI_CONFIG["agent"] = {}
+                CLI_CONFIG["agent"]["reasoning_effort"] = effort
+            _cp(_accent_line(_t("reasoning.effort_set", effort=effort_display_label(effort, *_route), scope=_scope_outcome(explicit_global, saved))))
 
     def _handle_busy_command(self, cmd: str):
         """Handle /busy [status|queue|steer|interrupt] — what Enter does while Hermes is working."""

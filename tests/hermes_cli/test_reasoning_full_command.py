@@ -42,3 +42,13 @@ def test_reasoning_full_sets_and_persists(tmp_path, monkeypatch):
     assert s.reasoning_full is True
     saved = yaml.safe_load((hh / "config.yaml").read_text())
     assert saved["display"]["reasoning_full"] is True
+
+
+def test_reasoning_hide_and_full_are_applied_together(tmp_path, monkeypatch):
+    hh = _seed_config(tmp_path, monkeypatch)
+    s = _Stub()
+    s._handle_reasoning_command("/reasoning hide full")
+    assert s.show_reasoning is False
+    assert s.reasoning_full is True
+    saved = yaml.safe_load((hh / "config.yaml").read_text())
+    assert saved["display"] == {"show_reasoning": False, "reasoning_full": True}
