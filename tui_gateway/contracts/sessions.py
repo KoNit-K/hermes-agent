@@ -419,6 +419,9 @@ method("session.branch", params=SessionBranchParams, result=SessionBranchResult,
 
 class SessionBranchWholeParams(SessionParams):
     name: str | None = None
+    # Keep whole-history Desktop branches on the same full/spine contract as
+    # session.branch; the renderer sends this when the user selected full mode.
+    branch_mode: str | None = None
     # #65410: same retry contract as session.branch.
     idempotency_key: str | None = None
 

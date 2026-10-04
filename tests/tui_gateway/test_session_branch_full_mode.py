@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 
 from tui_gateway import server
+from tui_gateway.contracts.sessions import SessionBranchWholeParams
 
 
 TOOL_HISTORY = [
@@ -40,6 +41,15 @@ def _assistant_tool_calls(messages):
         for message in messages
         if message.get("role") == "assistant" and message.get("tool_calls")
     ]
+
+
+def test_whole_branch_contract_accepts_full_mode():
+    params = SessionBranchWholeParams.model_validate(
+        {"session_id": "parent", "branch_mode": "full", "idempotency_key": "retry-1"}
+    )
+
+    assert params.branch_mode == "full"
+    assert params.idempotency_key == "retry-1"
 
 
 def _branch(monkeypatch, tmp_path, *, params, history=None):
