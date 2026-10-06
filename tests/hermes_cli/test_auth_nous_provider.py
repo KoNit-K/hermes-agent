@@ -1137,3 +1137,52 @@ def test_nous_device_code_login_displays_and_passes_server_poll_interval(monkeyp
 
     assert seen_intervals == [5]
     assert "Waiting for approval (polling every 5s)..." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("server_interval", [5, 60])
+def test_nous_slow_down_increases_interval_for_subsequent_polls(monkeypatch, server_interval):
+    """A slow-down response must never shorten the server's polling minimum."""
+    import hermes_cli.auth as auth_mod
+
+    responses = iter([
+        {"error": "slow_down"}, {"error": "authorization_pending"}, {"access_token": "token"},
+    ])
+
+    class Client:
+        def post(self, url, data=None):
+            payload = next(responses)
+            return httpx.Response(200 if "access_token" in payload else 400, json=payload,
+                                  request=httpx.Request("POST", url))
+
+    sleeps = []
+    monkeypatch.setattr(auth_mod.time, "sleep", sleeps.append)
+    assert auth_mod._poll_for_token(
+        client=Client(), portal_base_url="https://portal.example", client_id="hermes-cli",
+        device_code="device", expires_in=300, poll_interval=server_interval,
+    ) == {"access_token": "token"}
+    assert sleeps == [server_interval + 5, server_interval + 5]
+
+
+@pytest.mark.parametrize("retry_after", [None, "2"])
+def test_nous_edge_retry_preserves_long_server_poll_interval(monkeypatch, retry_after):
+    """The local edge-backoff cap must not override the server's minimum."""
+    import hermes_cli.auth as auth_mod
+
+    class Client:
+        calls = 0
+
+        def post(self, url, data=None):
+            self.calls += 1
+            request = httpx.Request("POST", url)
+            if self.calls == 1:
+                headers = {} if retry_after is None else {"Retry-After": retry_after}
+                return httpx.Response(503, text="temporarily unavailable", headers=headers, request=request)
+            return httpx.Response(200, json={"access_token": "token"}, request=request)
+
+    sleeps = []
+    monkeypatch.setattr(auth_mod.time, "sleep", sleeps.append)
+    assert auth_mod._poll_for_token(
+        client=Client(), portal_base_url="https://portal.example", client_id="hermes-cli",
+        device_code="device", expires_in=300, poll_interval=90,
+    ) == {"access_token": "token"}
+    assert sleeps == [90]
