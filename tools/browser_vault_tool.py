@@ -39,16 +39,16 @@ logger = logging.getLogger(__name__)
 # Trusted SMS/email retrieval code is held only in this process. The model sees
 # the random handle, never the code, and the browser boundary atomically removes
 # the code before injecting it. Task IDs are Hermes session-scoped for browser
-# tools, so binding the handle to one prevents cross-task use in multiplexed runs.
+# tools; the active profile is also bound so explicit task-ID reuse cannot cross owners.
 _CODE_HANDOFF_TTL_SECONDS = 300
-_CODE_HANDOFFS: Dict[str, tuple[str, str, Optional[str], float]] = {}
+_CODE_HANDOFFS: Dict[str, tuple[str, str, Optional[str], str, float]] = {}
 _USED_CODE_HANDOFFS: Dict[str, float] = {}
 _CODE_HANDOFF_LOCK = threading.Lock()
 
 
 def _prune_code_handoffs(now: float) -> None:
     """Remove expired secrets and replay markers while holding the handoff lock."""
-    for handle, (_, _, _, expires_at) in list(_CODE_HANDOFFS.items()):
+    for handle, (_, _, _, _, expires_at) in list(_CODE_HANDOFFS.items()):
         if expires_at <= now:
             del _CODE_HANDOFFS[handle]
     for handle, expires_at in list(_USED_CODE_HANDOFFS.items()):
@@ -62,12 +62,13 @@ def register_browser_vault_code(
     """Register a trusted SMS/email code and return its opaque browser-vault handle.
 
     This is an internal bridge for trusted retrieval tools, not a model-facing
-    tool. Callers must pass the current browser task ID; optional origins are
+    tool. Callers must pass the current browser task ID; the current profile owns the handle. Optional origins are
     normalized and matched exactly at injection. The code is never persisted,
     logged, or returned by this function.
     """
     from agent.redact import register_vault_redaction_value
     from agent.vault_store import normalize_origin
+    from hermes_constants import get_hermes_home
 
     normalized_code = str(code).strip().replace(" ", "").replace("-", "")
     if not normalized_code:
@@ -85,25 +86,29 @@ def register_browser_vault_code(
     handle = f"otp_{secrets.token_urlsafe(24)}"
     with _CODE_HANDOFF_LOCK:
         _prune_code_handoffs(now)
-        _CODE_HANDOFFS[handle] = (normalized_code, effective_task_id, bound_origin, now + ttl_seconds)
+        _CODE_HANDOFFS[handle] = (normalized_code, effective_task_id, bound_origin, str(get_hermes_home()), now + ttl_seconds)
     return handle
 
 
 def _consume_browser_vault_code(handle: str, *, task_id: str, origin: str) -> tuple[Optional[str], Optional[str]]:
     """Atomically resolve a valid handoff, returning only a safe failure category."""
+    from hermes_constants import get_hermes_home
+
     now = time.monotonic()
     with _CODE_HANDOFF_LOCK:
         entry = _CODE_HANDOFFS.get(handle)
         # Check this handle before global expiry cleanup so callers receive a
         # deterministic expiry refusal rather than an indistinguishable miss.
-        if entry is not None and entry[3] <= now:
+        if entry is not None and entry[4] <= now:
             del _CODE_HANDOFFS[handle]
             _prune_code_handoffs(now)
             return None, "handoff_expired"
         _prune_code_handoffs(now)
         if entry is None:
             return None, "handoff_replayed" if handle in _USED_CODE_HANDOFFS else "handoff_invalid"
-        code, bound_task_id, bound_origin, expires_at = entry
+        code, bound_task_id, bound_origin, owner_home, expires_at = entry
+        if owner_home != str(get_hermes_home()):
+            return None, "handoff_owner_mismatch"
         if bound_task_id != task_id:
             return None, "handoff_task_mismatch"
         if bound_origin is not None and bound_origin != origin:
@@ -224,6 +229,17 @@ def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
                 "session and retry."
             ),
         }
+
+    # Re-admit at the WRITE. The handler-level fence (_fenced_page_op) admitted before a possibly
+    # human-length prompt (enter_code waits for the user's code); a takeover during that wait must
+    # refuse here, before the credential lands in a page the human is now typing into. The outer
+    # epoch check only discards the result, and a fill is a side effect, not a result.
+    if _bot_desktop_browser_session(task_id):
+        from tools.bot_desktop import lease as _bd_lease
+        try:
+            _bd_lease.assert_agent_may_act()
+        except _bd_lease.HumanHasControl as exc:
+            return {"success": False, "error_type": "human_has_control", "error": str(exc)}
 
     sup = supervisor.evaluate_runtime(expression)
     if sup.get("ok"):
@@ -407,7 +423,7 @@ def browser_vault_enter_code(handle: str = "", code_handle: str = "", task_id: O
     authenticator seed, the code is minted server-side and nobody is asked; otherwise the user is prompted on
     their surface for the code their phone/email/app shows. The code goes into the page over the supervisor
     socket and never enters the conversation."""
-    from agent.redact import register_vault_redaction_value
+    from agent.redact import redact_registered_vault_values, register_vault_redaction_value
     from agent.vault_backends import backend_for_handle
     from agent.vault_backends.unlock import can_prompt_here, get_code_prompt_callback
     from agent.vault_login_classifier import LoginControl, build_fill_js, build_inspection_js, build_otp_fills, classify_otp_controls
@@ -463,7 +479,7 @@ def browser_vault_enter_code(handle: str = "", code_handle: str = "", task_id: O
     result = _eval_js_secret(effective_task_id, build_fill_js(fills, expected_origin=origin, nonce=nonce))
     del code
     if not result.get("success"):
-        return json.dumps({"success": False, "error": str(result.get("error") or "fill failed")[:200]})
+        return json.dumps({"success": False, "error": redact_registered_vault_values(str(result.get("error") or "fill failed"))[:200]})
     parsed = _parse_json_result(result.get("result"))
     if isinstance(parsed, str):
         parsed = _parse_json_result(parsed)
@@ -760,13 +776,33 @@ BROWSER_VAULT_ENTER_CODE_SCHEMA = {
 }
 
 
+def _bot_desktop_browser_session(task_id: Optional[str]) -> bool:
+    from tools.browser_tool import _active_sessions, _last_session_key
+    from tools.browser_tool_session import _shares_bot_desktop_browser
+    return _shares_bot_desktop_browser(_active_sessions.get(_last_session_key(task_id or "default")) or {})
+
+
+def _fenced_page_op(task_id: Optional[str], fn) -> str:
+    """Vault operations focus, inspect and fill the page over the supervisor socket, bypassing
+    ``_run_browser_command``; they must honour the Bot Desktop lease like every other page access,
+    or a human typing a credential on the taken-over screen could be read or written to."""
+    from tools.browser_tool import _active_sessions, _last_session_key
+    from tools.browser_tool_session import run_fenced
+
+    session = _active_sessions.get(_last_session_key(task_id or "default")) or {}
+    res = run_fenced(session, lambda: {"raw": fn()})
+    return res["raw"] if "raw" in res else json.dumps(res)
+
+
 def _handle_vault_enter_code(args: Dict[str, Any], **kwargs) -> str:
-    return browser_vault_enter_code(handle=str(args.get("handle") or ""), code_handle=str(args.get("code_handle") or ""),
-                                   task_id=kwargs.get("task_id"))
+    tid = kwargs.get("task_id")
+    return _fenced_page_op(tid, lambda: browser_vault_enter_code(
+        handle=str(args.get("handle") or ""), code_handle=str(args.get("code_handle") or ""), task_id=tid))
 
 
 def _handle_vault_save_login(args: Dict[str, Any], **kwargs) -> str:
-    return browser_vault_save_login(label=str(args.get("label") or ""), task_id=kwargs.get("task_id"))
+    tid = kwargs.get("task_id")
+    return _fenced_page_op(tid, lambda: browser_vault_save_login(label=str(args.get("label") or ""), task_id=tid))
 
 
 def _handle_vault_list(args: Dict[str, Any], **kwargs) -> str:
@@ -778,9 +814,8 @@ def _handle_vault_unlock(args: Dict[str, Any], **kwargs) -> str:
 
 
 def _handle_vault_fill(args: Dict[str, Any], **kwargs) -> str:
-    return browser_vault_fill(
-        handle=str(args.get("handle") or ""), task_id=kwargs.get("task_id")
-    )
+    tid = kwargs.get("task_id")
+    return _fenced_page_op(tid, lambda: browser_vault_fill(handle=str(args.get("handle") or ""), task_id=tid))
 
 
 from tools.registry import no_cache_check_fn, registry  # noqa: E402

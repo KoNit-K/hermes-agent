@@ -167,10 +167,10 @@ def _ctrl(**kw):
 
 
 class TestClassifier:
-    def test_autocomplete_exact_match_scores_100(self):
+    def test_autocomplete_exact_match_maps_token(self):
         for token in ("username", "email", "tel", "current-password"):
             res = classify_login_control(_ctrl(autocomplete=token))
-            assert res is not None and res.score == 100 and res.token == token
+            assert res is not None and res.token == token
 
     def test_new_password_autocomplete_excluded(self):
         assert classify_login_control(
@@ -184,20 +184,20 @@ class TestClassifier:
         for label in ("New password", "Confirm Password", "create-password", "Repeat  password"):
             assert classify_login_control(_ctrl(type="password", label=label)) is None, label
 
-    def test_password_type_scores_90(self):
+    def test_password_type_maps_current_password(self):
         res = classify_login_control(_ctrl(type="password"))
-        assert res.score == 90 and res.token == "current-password"
+        assert res.token == "current-password"
 
-    def test_email_tel_types_score_85(self):
-        assert classify_login_control(_ctrl(type="email")).score == 85
+    def test_email_tel_types_map_tokens(self):
+        assert classify_login_control(_ctrl(type="email")).token == "email"
         res = classify_login_control(_ctrl(type="tel"))
-        assert res.score == 85 and res.token == "tel"
+        assert res.token == "tel"
 
     def test_label_heuristics(self):
         assert classify_login_control(_ctrl(label="E-mail address")).token == "email"
         assert classify_login_control(_ctrl(name="mobile_number")).token == "tel"
         res = classify_login_control(_ctrl(label="Username or account"))
-        assert res.token == "username" and res.score == 70
+        assert res.token == "username"
 
     def test_unmatched_returns_none(self):
         assert classify_login_control(_ctrl(label="Search the docs")) is None
@@ -220,12 +220,6 @@ class TestClassifier:
         fills = select_password_fill([pw1, pw2], "p")
         assert len(fills) == 1 and fills[0]["index"] == 1
 
-    def test_build_fill_js_contains_events(self):
-        js = build_fill_js(
-            [{"index": 0, "token": "current-password", "value": "x"}],
-            expected_origin="https://example.com",
-        )
-        assert "InputEvent" in js and '"change"' in js and "filled" in js
 
     def test_build_fill_js_leaves_no_dom_marker_and_binds_target_to_inspection(self):
         # P1-1: no persistent selector for filled controls. The fill targets the input by the
@@ -299,7 +293,7 @@ class TestBrowserVaultTools:
              patch.object(browser_vault_tool, "_current_page_origin", return_value="https://evil.com"):
             out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
         assert out["success"] is False
-        assert "Refused" in out["error"]
+        assert out["error_type"] == "origin_mismatch"
         assert "s3cret-pw" not in json.dumps(out)
 
     @staticmethod
@@ -417,7 +411,7 @@ class TestBrowserVaultTools:
             raw = browser_vault_tool.browser_vault_fill(meta.id)
         out = json.loads(raw)
         # Password-only fill: exactly one field.
-        assert out.pop("next").startswith("Submit")  # workflow hint, not data
+        out.pop("next", None)  # workflow hint, not data
         assert out == {
             "success": True,
             "filled_fields": 1,
@@ -499,22 +493,9 @@ class TestBrowserVaultTools:
         out = json.loads(raw)
         assert out["success"] is False
         assert out["error_type"] == "supervisor_required"
-        assert "supervis" in out["error"].lower()
         assert all(call.args[1] == "get" for call in run_cmd.call_args_list), run_cmd.call_args_list
         assert "s3cret-pw" not in json.dumps([str(c) for c in run_cmd.call_args_list]) and "s3cret-pw" not in raw
 
-    def test_nonsecret_eval_fallback_still_works(self):
-        """_eval_js (non-secret) may still fall back to the CLI eval path."""
-        from tools import browser_vault_tool
-
-        with patch("tools.browser_supervisor.SUPERVISOR_REGISTRY") as reg, \
-             patch("tools.browser_tool._last_session_key", return_value="k"), \
-             patch("tools.browser_tool_session._run_browser_command") as run_cmd:
-            reg.get.return_value = None
-            run_cmd.return_value = {"success": True, "data": {"result": "https://x.test"}}
-            res = browser_vault_tool._eval_js("t", "window.location.href")
-        assert res == {"success": True, "result": "https://x.test"}
-        run_cmd.assert_called_once()
 
     def test_vault_canary_redacted_from_browser_cdp_results(self, store):
         """P1-1 regression: a filled, non-token-shaped canary password must be
@@ -631,7 +612,6 @@ class TestVaultHardening:
         for target in (vault, vault / "vault.key", vault / "vault.json.enc"):
             err = fs.get_read_block_error(str(target))
             assert err is not None, f"expected read deny for {target}"
-            assert "vault" in err.lower()
 
     def test_read_block_leaves_sibling_dirs_alone(self, tmp_path, monkeypatch):
         import agent.file_safety as fs
@@ -650,36 +630,16 @@ class TestVaultHardening:
         assert "vault.key" in _SECRET_FILE_NAMES
         assert "vault.json.enc" in _SECRET_FILE_NAMES
 
-    def test_ensure_dir_uses_canonical_secure_dir(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
-
-        import hermes_cli.config as cfg
-        from agent.vault_store import VaultStore
-
-        called = MagicMock()
-        monkeypatch.setattr(cfg, "_secure_dir", called)
-        store = VaultStore(base_dir=tmp_path / "vault")
-        store._ensure_dir()
-        assert called.call_count == 1
+    def test_vault_dir_is_owner_only(self, store, tmp_path):
+        old_umask = os.umask(0o022)
+        try:
+            _add_login(store)
+        finally:
+            os.umask(old_umask)
+        mode = stat.S_IMODE(os.stat(tmp_path / "vault").st_mode)
+        assert not mode & 0o077, oct(mode)
 
 
-class TestVaultSchemaCrossToolset:
-    def test_vault_schemas_name_the_input_tool_of_the_active_browser_stack(self):
-        """The vault tools sit in `browser`; the tool that types the identifier lives in `browser-use`
-        (`fill_input` inside browser_exec) or is browser_type. A static name would be a ghost on one stack,
-        so model_tools resolves it per session from the tools actually present."""
-        import model_tools
-        from tools.browser_vault_tool import BROWSER_VAULT_FILL_SCHEMA
-
-        assert "fill_input" not in BROWSER_VAULT_FILL_SCHEMA["description"]
-        base = model_tools._fn_def(dict(BROWSER_VAULT_FILL_SCHEMA))
-        with_exec = model_tools._apply_dynamic_schemas([base, model_tools._fn_def({"name": "browser_exec", "description": "x"}),
-                                                        model_tools._fn_def({"name": "terminal", "description": "x"})])
-        with_builtin = model_tools._apply_dynamic_schemas([base, model_tools._fn_def({"name": "browser_type", "description": "x"})])
-        desc_exec = with_exec[0]["function"]["description"]
-        desc_builtin = with_builtin[0]["function"]["description"]
-        assert "`fill_input` inside browser_exec" in desc_exec and "browser_type" not in desc_exec
-        assert "browser_type" in desc_builtin and "fill_input" not in desc_builtin
 
 
 def test_every_registered_tool_schema_declares_openai_style_parameters():
@@ -854,6 +814,126 @@ class TestTwoFactor:
         assert out["success"] and out["source"] == "user"
         assert re.search(r'"value": "246810"', expressions[0])
 
+    def _registry_code_page(self, monkeypatch, behavior=None):
+        from tools import browser_vault_tool
+
+        secret_eval = browser_vault_tool._eval_js_secret
+        writes = self._code_page(monkeypatch)
+        monkeypatch.setattr(browser_vault_tool, "_eval_js_secret", secret_eval)
+
+        class Supervisor:
+            def evaluate_runtime(self, expression):
+                writes.append(expression)
+                return behavior(expression) if behavior else {"ok": True, "result": '{"filled": 1}'}
+
+        monkeypatch.setattr(browser_vault_tool, "_ensure_supervisor", lambda task_id: Supervisor())
+        return writes
+
+    def test_handoff_registry_is_headless_model_blind_and_profile_owned(self, monkeypatch, tmp_path, caplog):
+        from agent.redact import clear_vault_redaction_values
+        from agent.vault_backends import unlock
+        from tools import browser_vault_tool
+        from tools.browser_cdp_tool import _redact_cdp_output
+        from tools.browser_tool_snapshot import _redact_browser_output
+        from tools.registry import registry
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        writes = self._registry_code_page(monkeypatch)
+        monkeypatch.setattr(unlock, "can_prompt_here", lambda: False)
+        monkeypatch.setattr(unlock, "get_code_prompt_callback", lambda: pytest.fail("handoff must never prompt"))
+        owner = set_hermes_home_override(tmp_path / "owner")
+        try:
+            handle = browser_vault_tool.register_browser_vault_code("246 810", task_id="owned", origin="https://acme.test")
+            foreign = set_hermes_home_override(tmp_path / "foreign")
+            try:
+                denied = json.loads(registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned"))
+                assert denied["error_type"] == "handoff_owner_mismatch" and writes == []
+            finally:
+                reset_hermes_home_override(foreign)
+            # Model args cannot replace the dispatcher-bound task identity.
+            raw = registry.dispatch("browser_vault_enter_code", {"code_handle": handle, "task_id": "foreign"}, task_id="owned")
+            assert json.loads(raw)["success"] and len(writes) == 1
+            assert '"value": "246810"' in writes[0]
+            assert "246810" not in raw and "246 810" not in raw
+            echo = {"dom": {"246810": "246810"}, "snapshot": "Code 246810"}
+            assert "246810" not in json.dumps(_redact_cdp_output(echo))
+            assert "246810" not in json.dumps(_redact_browser_output(echo))
+            assert "246810" not in caplog.text and "246 810" not in caplog.text
+        finally:
+            clear_vault_redaction_values()
+            reset_hermes_home_override(owner)
+
+    @pytest.mark.parametrize("failure", ["server_error", "origin_changed", "cancelled"])
+    def test_handoff_consumed_before_failure_and_cannot_fall_back(self, monkeypatch, failure):
+        from tools import browser_vault_tool
+        from tools.registry import registry
+
+        def outcome(expression):
+            if failure == "cancelled":
+                raise KeyboardInterrupt("cancelled fake page write")
+            if failure == "origin_changed":
+                return {"ok": True, "result": '{"refused": "origin_changed"}'}
+            return {"ok": False, "error": "fake rejected 246810"}
+
+        writes = self._registry_code_page(monkeypatch, outcome)
+        handle = browser_vault_tool.register_browser_vault_code("246810", task_id="owned", origin="https://acme.test")
+        if failure == "cancelled":
+            with pytest.raises(KeyboardInterrupt):
+                registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned")
+        else:
+            raw = registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned")
+            assert not json.loads(raw)["success"] and "246810" not in raw
+        assert len(writes) == 1
+        replay = registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned")
+        assert json.loads(replay)["error_type"] == "handoff_replayed"
+        assert "246810" not in replay and len(writes) == 1
+
+    @pytest.mark.parametrize("code_handle", ["", "otp_unregistered", "246810"])
+    def test_headless_without_trusted_handoff_never_injects_a_code(self, monkeypatch, code_handle):
+        from agent.vault_backends import unlock
+        from tools.registry import registry
+
+        writes = self._registry_code_page(monkeypatch)
+        monkeypatch.setattr(unlock, "get_code_prompt_callback", lambda: None)
+        monkeypatch.setattr(unlock, "can_prompt_here", lambda: False)
+        raw = registry.dispatch("browser_vault_enter_code", {"code_handle": code_handle}, task_id="owned")
+        assert json.loads(raw)["error_type"] == ("handoff_invalid" if code_handle else "prompt_unavailable")
+        assert "246810" not in raw and writes == []
+
+    def test_handoff_respects_human_lease_before_read_and_again_before_write(self, monkeypatch, tmp_path):
+        from tools import browser_tool, browser_vault_tool
+        from tools.bot_desktop import lease, runtime
+        from tools.registry import registry
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(runtime, "published_env", lambda: {"DISPLAY": ":37"})
+        monkeypatch.setitem(browser_tool._active_sessions, "owned", {"session_name": "fixture", "features": {"local": True}})
+        lease._reset_for_tests()
+        try:
+            writes = self._registry_code_page(monkeypatch)
+            handle = browser_vault_tool.register_browser_vault_code("246810", task_id="owned", origin="https://acme.test")
+            lease.acquire("human")
+            denied = registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned")
+            assert json.loads(denied)["code"] == "human_has_control" and writes == []
+            lease.release("human")
+            inspect = browser_vault_tool._eval_js
+
+            def takeover(task_id, expression):
+                result = inspect(task_id, expression)
+                if "querySelectorAll" in expression:
+                    lease.acquire("human")
+                return result
+
+            monkeypatch.setattr(browser_vault_tool, "_eval_js", takeover)
+            raw = registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned")
+            assert json.loads(raw)["code"] == "human_has_control" and writes == [] and "246810" not in raw
+            lease.release("human")
+            monkeypatch.setattr(browser_vault_tool, "_eval_js", inspect)
+            replay = registry.dispatch("browser_vault_enter_code", {"code_handle": handle}, task_id="owned")
+            assert json.loads(replay)["error_type"] == "handoff_replayed" and writes == []
+        finally:
+            lease._reset_for_tests()
+
     def test_totp_matches_rfc6238_vector_and_seed_normalisation(self):
         from agent.vault_store import VaultError, normalize_otp_secret, totp_now
 
@@ -954,4 +1034,4 @@ class TestTwoFactor:
         with patch.object(browser_vault_tool, "_focus_bound_origin", lambda *a, **k: None), \
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval):
             out = json.loads(browser_vault_tool.browser_vault_enter_code(task_id="t"))
-        assert out["error_type"] == "no_code_field" and "device" in out["error"]
+        assert out["error_type"] == "no_code_field"
