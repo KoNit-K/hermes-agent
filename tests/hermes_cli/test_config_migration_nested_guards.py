@@ -11,7 +11,7 @@ import os
 from unittest.mock import patch
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 
 def _write_config(tmp_path, config):
@@ -89,3 +89,22 @@ def test_failing_step_is_not_stamped_past_and_is_retried(tmp_path, caplog):
 
     assert not retry_results["warnings"]
     assert _read_config(tmp_path)["_config_version"] == config_migrations.MIGRATIONS[-1][0]
+
+
+def test_successful_migration_warning_still_stamps_latest_version(tmp_path):
+    """Informational migration warnings must not turn successful steps into failures."""
+    from hermes_cli import config_migrations
+    from hermes_cli.config import migrate_config
+
+    _write_config(tmp_path, {
+        "_config_version": 37,
+        "model": {"default": "x/y"},
+        "plugins": {"enabled": ["observability/nemo_relay"]},
+    })
+    with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        results = migrate_config(interactive=False, quiet=True)
+
+    assert any("Removed legacy Relay plugin" in warning for warning in results["warnings"])
+    migrated = _read_config(tmp_path)
+    assert "observability/nemo_relay" not in migrated.get("plugins", {}).get("enabled", [])
+    assert migrated["_config_version"] == config_migrations.MIGRATIONS[-1][0]
