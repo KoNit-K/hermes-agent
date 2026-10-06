@@ -20,6 +20,7 @@ def test_bootstrap_context_window_cap_is_bounded_and_fail_open(
     """A positive configured cap wins; absent/invalid values retain automatic policy."""
     from hermes_cli.local_runtime import bootstrap, hardware, presets
     from hermes_cli.local_runtime.estimator import HardwareBudget, LayerKind, ModelProfile
+    from hermes_cli.local_runtime.growth import save_window_override
 
     model = tmp_path / "models" / "configured-window.gguf"
     model.parent.mkdir()
@@ -44,5 +45,8 @@ def test_bootstrap_context_window_cap_is_bounded_and_fail_open(
     section = {} if configured is None else {"context_window": configured}
 
     preset_path = tmp_path / "presets.ini"
+    # A persisted request from an earlier, uncapped session cannot override the
+    # configured launch cap on a later startup.
+    save_window_override("configured-window", 1_000_000)
     assert bootstrap._generate_presets(model.parent, preset_path, section) == preset_path
     assert presets.read_preset_decisions(preset_path)["configured-window"].window == expected
