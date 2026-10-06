@@ -244,12 +244,14 @@ def _load_output_schema(path: Optional[str]) -> tuple[dict | None, str | None]:
     schema_path = Path(path).expanduser()
     try:
         raw = schema_path.read_text(encoding="utf-8-sig")
-    except OSError as exc:
-        return None, f"cannot read --output-schema {schema_path}: {exc.strerror or exc}"
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"cannot read --output-schema {schema_path}: {getattr(exc, 'strerror', None) or exc}"
     try:
         candidate = json.loads(raw)
     except (TypeError, ValueError) as exc:
         return None, f"--output-schema is not valid JSON: {exc}"
+    if not isinstance(candidate, dict):
+        return None, "--output-schema must be a JSON object"
 
     try:
         import jsonschema  # noqa: F401
@@ -295,17 +297,8 @@ def _run_conversation_with_output_schema(
         build_retry_message(errors),
         conversation_history=result.get("messages") or None,
     )
-    # Preserve the corrective turn's outcome while keeping --usage-file honest about both turns.
-    for key in (
-        "estimated_cost_usd", "input_tokens", "output_tokens", "cache_read_tokens",
-        "cache_write_tokens", "reasoning_tokens", "total_tokens", "api_calls",
-    ):
-        first = result.get(key)
-        second = retry_result.get(key)
-        if isinstance(first, (int, float)) or isinstance(second, (int, float)):
-            retry_result[key] = (first if isinstance(first, (int, float)) else 0) + (
-                second if isinstance(second, (int, float)) else 0
-            )
+    # The same agent serves the correction, so its result already carries the session-cumulative
+    # token, cost, and API-call counters for both turns. Do not add the first result again.
     return retry_result
 
 

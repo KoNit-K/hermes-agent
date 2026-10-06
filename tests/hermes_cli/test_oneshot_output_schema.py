@@ -27,6 +27,7 @@ def _schema_file(tmp_path, schema=SCHEMA):
     [
         ("missing.json", None, "cannot read --output-schema"),
         ("schema.json", "{", "not valid JSON"),
+        ("schema.json", "null", "must be a JSON object"),
         ("schema.json", '{"type": 7}', "not a valid JSON Schema"),
     ],
 )
@@ -54,6 +55,18 @@ def test_schema_file_errors_happen_before_agent(
     assert error_fragment in captured.err
 
 
+def test_schema_decode_error_happens_before_agent(tmp_path, monkeypatch, capsys):
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_bytes(b'\xff')
+    monkeypatch.setattr(
+        "hermes_cli.oneshot._run_agent",
+        lambda *_args, **_kwargs: pytest.fail("agent must not run for undecodable schema"),
+    )
+
+    assert run_oneshot("summarize", output_schema=str(schema_path)) == 2
+    assert "cannot read --output-schema" in capsys.readouterr().err
+
+
 def test_invalid_output_retries_exactly_once_then_prints_valid_payload(
     tmp_path, monkeypatch, capsys,
 ):
@@ -70,7 +83,8 @@ def test_invalid_output_retries_exactly_once_then_prints_valid_payload(
                 "api_calls": 1,
                 "total_tokens": 10,
             },
-            {"final_response": '{"answer":"fixed"}', "api_calls": 1, "total_tokens": 20},
+            {"final_response": '{"answer":"fixed"}', "api_calls": 2, "total_tokens": 20,
+             "input_tokens": 200, "output_tokens": 20},
         ])
 
         def run_conversation(self, prompt, conversation_history=None):
@@ -110,7 +124,9 @@ def test_invalid_output_retries_exactly_once_then_prints_valid_payload(
         {"role": "assistant", "content": '{"wrong":1}'},
     ]
     assert result["api_calls"] == 2
-    assert result["total_tokens"] == 30
+    assert result["input_tokens"] == 200
+    assert result["output_tokens"] == 20
+    assert result["total_tokens"] == 20
 
 
 def test_second_invalid_output_is_not_printed_or_written(tmp_path, monkeypatch, capsys):
