@@ -117,9 +117,12 @@ class HostInstaller:
         if before is not None and not force:
             return {"name": str(before["name"]), "already_installed": True}
         out = io.StringIO()
-        do_install(identifier, force=force, skip_confirm=True,
-                   console=Console(file=out, width=200, no_color=True, highlight=False))
+        verdict = do_install(identifier, force=force, skip_confirm=True,
+                             console=Console(file=out, width=200, no_color=True, highlight=False))
         after = entry()
+        from tools.skills_sync_bundled_ops import bundled_skill_for_install
+        if after is None and verdict is not False and (builtin := bundled_skill_for_install(identifier)):
+            return {"name": builtin, "already_installed": verdict is None}  # shipped skill, no hub lock entry
         if after is None or (before is not None and after.get("updated_at") == before.get("updated_at")):
             lines = [line.strip() for line in out.getvalue().splitlines() if line.strip()]
             raise RuntimeError(lines[-1] if lines else "the skill was not installed")
@@ -277,8 +280,10 @@ def target_declared_env(fact: Any) -> List[str]:
 def _plugin_row(entry: Any) -> Dict[str, Any]:
     requirements = [f"Hermes {entry.requires_hermes}"] if entry.requires_hermes else []
     requirements += [f"{name} environment variable" for name in entry.capabilities.requires_env]
+    from hermes_cli.plugin_catalog_presence import presence
+
     row: Dict[str, Any] = {
-        "display": _display(entry.name),
+        "display": getattr(entry, "title", "") or _display(entry.name),
         "description": _first_sentence(entry.description),
         "tier": entry.tier if entry.tier in _TIERS else "community",
         "repo": entry.repo,
@@ -286,6 +291,7 @@ def _plugin_row(entry: Any) -> Dict[str, Any]:
         "requirements": requirements,
         "has_desktop_half": False,
         "target_profile": DEFAULT_PROFILE,
+        "app_state": presence(entry).state,
     }
     if entry.platforms:
         row["platforms"] = list(entry.platforms)
