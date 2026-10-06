@@ -44,6 +44,15 @@ class _FastWS:
         self.sent.append(line)
 
 
+class _FailingWS:
+    async def send_text(self, line: str) -> None:
+        raise RuntimeError("socket write failed")
+
+
+def _stream_token() -> dict:
+    return {"method": "event", "params": {"type": "message.delta", "text": "x"}}
+
+
 def test_stalled_send_closes_socket_and_releases_queued_reply(monkeypatch):
     # raising=False: on a base without the deadline the test must fail on the SYMPTOM (sends never terminate).
     monkeypatch.setattr("tui_gateway.ws._WS_SEND_DEADLINE_S", 0.05, raising=False)
@@ -112,5 +121,44 @@ def test_progress_then_final_ordering_preserved_on_healthy_socket():
         ]
         assert transport._pending_frame_count == 0
         assert transport._pending_byte_count == 0
+
+    asyncio.run(_run())
+
+
+def test_send_error_and_cancellation_release_pending_reservations():
+    async def _run() -> None:
+        failed = WSTransport(_FailingWS(), asyncio.get_running_loop())
+        assert not await failed.write_async({"id": "failure", "result": "x"})
+        assert (failed._pending_frame_count, failed._pending_byte_count) == (0, 0)
+
+        stalled_ws = _StalledWS()
+        cancelled = WSTransport(stalled_ws, asyncio.get_running_loop())
+        task = asyncio.create_task(cancelled.write_async({"id": "cancel", "result": "x"}))
+        await stalled_ws.send_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert (cancelled._pending_frame_count, cancelled._pending_byte_count) == (0, 0)
+
+    asyncio.run(_run())
+
+
+def test_close_and_abort_release_buffered_reservations_once():
+    async def _run() -> None:
+        ws = _FastWS()
+        transport = WSTransport(ws, asyncio.get_running_loop())
+        assert transport.write(_stream_token())
+        transport.close()
+        transport.close()
+        assert (transport._pending_frame_count, transport._pending_byte_count) == (0, 0)
+
+        abort_ws = _FastWS()
+        aborting = WSTransport(abort_ws, asyncio.get_running_loop())
+        assert aborting.write(_stream_token())
+        aborting.abort()
+        aborting.abort()
+        await asyncio.sleep(0)
+        assert (aborting._pending_frame_count, aborting._pending_byte_count) == (0, 0)
+        assert abort_ws.sent == []
 
     asyncio.run(_run())
