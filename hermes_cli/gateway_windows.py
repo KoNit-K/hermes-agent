@@ -709,17 +709,24 @@ def reconcile_autostart_launchers() -> tuple[list[str], list[str]]:
     The Scheduled Task and the Startup-folder entry are alternatives, but a successful task install
     never removed an earlier fallback and pre-#45610 installs left a ``cmd.exe`` launcher behind, so
     logon could fire the launcher twice (#80569). Task registered: remove the Startup entries. No
-    task but a legacy ``.cmd``: rewrite it as the console-less ``.vbs`` fallback. File operations
-    only (no schtasks mutation, no elevation), so install, update and doctor can all run it.
+    task but an obsolete Startup entry: rewrite it as the current console-less fallback. This also
+    migrates an existing ``.vbs`` entry to ``.js`` when Windows no longer provides VBScript. File
+    operations only (no schtasks mutation, no elevation), so install, update and doctor can all run it.
     """
     if is_task_registered():
         return _remove_startup_entries()
-    legacy = _legacy_startup_entry_path()
-    if legacy.exists():
+    entry = get_startup_entry_path()
+    obsolete = [
+        path for path in (_legacy_startup_entry_path(), *_startup_entry_candidates())
+        if path != entry and path.exists()
+    ]
+    if obsolete:
         entry = _install_startup_entry(_write_task_script())
-        if legacy.exists():  # _install_startup_entry swallows the unlink failure; both would fire at logon
-            return [], [f"Could not remove legacy Windows login item: {legacy} (locked or access denied; it still fires at logon beside {entry})"]
-        return [f"Migrated legacy Windows login item to: {entry}"], []
+        survivors = [path for path in obsolete if path.exists()]
+        if survivors:  # _install_startup_entry swallows unlink failures; both would fire at logon
+            names = ", ".join(str(path) for path in survivors)
+            return [], [f"Could not remove obsolete Windows login item(s): {names} (locked or access denied; they still fire at logon beside {entry})"]
+        return [f"Migrated obsolete Windows login item(s) to: {entry}"], []
     return [], []
 
 
