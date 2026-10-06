@@ -173,7 +173,10 @@ export function useComposerDraft({
         // native selection to the start in that shape. DOM focus, rather than
         // routing ownership, decides whether this editor owns its selection.
         const caretOffset =
-          visibleRef.current && document.activeElement === editor && !isElementInHiddenPane(editor)
+          visibleRef.current &&
+          document.activeElement === editor &&
+          !isElementInHiddenPane(editor) &&
+          composerPlainText(editor) === next
             ? caretOffsetInEditor(editor)
             : null
 

@@ -22,7 +22,7 @@ import { $connection } from '@/store/session'
 import { useComposerActions } from '../../hooks/use-composer-actions'
 import type { QueueEditState } from '../composer-utils'
 import { type ComposerTarget, getActiveComposer, markActiveComposer } from '../focus'
-import { composerPlainText } from '../rich-editor'
+import { caretOffsetInEditor, composerPlainText } from '../rich-editor'
 import { type ComposerScope, ComposerScopeProvider, MAIN_COMPOSER_SCOPE } from '../scope'
 
 import { useComposerDraft } from './use-composer-draft'
@@ -491,6 +491,37 @@ describe('useComposerDraft — focused selection survives a same-draft scope rep
     clearSessionDraft('lineage-root')
     clearSessionDraft('runtime-tip')
     markActiveComposer('main')
+  })
+
+  it('moves the focused caret to the end when inserting new text', () => {
+    stashSessionDraft('lineage-root', 'alpha beta', [])
+    let draft!: ReturnType<typeof useComposerDraft>
+
+    function DraftHarness() {
+      draft = useComposerDraft({
+        activeQueueSessionKey: 'lineage-root',
+        focusKey: null,
+        inputDisabled: false,
+        queueEditRef: { current: null },
+        sessionId: 'lineage-root'
+      })
+
+      return <div contentEditable data-slot="composer-rich-input" ref={draft.editorRef} tabIndex={0} />
+    }
+
+    render(<DraftHarness />)
+    const editor = draft.editorRef.current!
+    editor.focus()
+    const range = globalThis.document.createRange()
+    range.setStart(editor.firstChild!, 6)
+    range.collapse(true)
+    window.getSelection()?.removeAllRanges()
+    window.getSelection()?.addRange(range)
+
+    act(() => draft.insertText('new'))
+
+    expect(composerPlainText(editor)).toBe('alpha beta\nnew')
+    expect(caretOffsetInEditor(editor)).toBe(composerPlainText(editor).length)
   })
 
   it('restores the focused caret even when another composer owns focus routing during the rekey', () => {
