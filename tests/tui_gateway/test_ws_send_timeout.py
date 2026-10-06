@@ -53,6 +53,14 @@ def _stream_token() -> dict:
     return {"method": "event", "params": {"type": "message.delta", "text": "x"}}
 
 
+async def _wait_for_empty_reservation(transport: WSTransport) -> None:
+    for _ in range(10):
+        if (transport._pending_frame_count, transport._pending_byte_count) == (0, 0):
+            return
+        await asyncio.sleep(0)
+    assert (transport._pending_frame_count, transport._pending_byte_count) == (0, 0)
+
+
 def test_stalled_send_closes_socket_and_releases_queued_reply(monkeypatch):
     # raising=False: on a base without the deadline the test must fail on the SYMPTOM (sends never terminate).
     monkeypatch.setattr("tui_gateway.ws._WS_SEND_DEADLINE_S", 0.05, raising=False)
@@ -100,6 +108,24 @@ def test_stalled_send_backlog_is_bounded_across_all_buffers(monkeypatch, streami
         finally:
             ws.release()
             await asyncio.wait_for(first, timeout=1.0)
+
+    asyncio.run(_run())
+
+
+def test_write_backlog_limits_write_async(monkeypatch):
+    monkeypatch.setattr(ws_mod, "_WS_MAX_PENDING_FRAMES", 100, raising=False)
+    monkeypatch.setattr(ws_mod, "_WS_MAX_PENDING_BYTES", 256, raising=False)
+    monkeypatch.setattr(ws_mod, "_WS_SEND_DEADLINE_S", 60)
+
+    async def _run() -> None:
+        ws = _StalledWS()
+        transport = WSTransport(ws, asyncio.get_running_loop(), peer="127.0.0.1:1")
+        assert transport.write({"id": "queued", "result": "x" * 100})
+        await ws.send_started.wait()
+        assert not await transport.write_async({"id": "overflow", "result": "y" * 100})
+        await asyncio.sleep(0)
+        assert ws.closed_with == [1011]
+        await _wait_for_empty_reservation(transport)
 
     asyncio.run(_run())
 
@@ -160,5 +186,24 @@ def test_close_and_abort_release_buffered_reservations_once():
         await asyncio.sleep(0)
         assert (aborting._pending_frame_count, aborting._pending_byte_count) == (0, 0)
         assert abort_ws.sent == []
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("shutdown", ["close", "abort"])
+def test_close_and_abort_release_inflight_reservations(shutdown):
+    async def _run() -> None:
+        ws = _StalledWS()
+        transport = WSTransport(ws, asyncio.get_running_loop())
+        send = asyncio.create_task(transport.write_async({"id": "inflight", "result": "x"}))
+        await ws.send_started.wait()
+        getattr(transport, shutdown)()
+        if shutdown == "close":
+            ws.release()
+        await asyncio.wait_for(send, timeout=1.0)
+        await asyncio.sleep(0)
+        assert (transport._pending_frame_count, transport._pending_byte_count) == (0, 0)
+        if shutdown == "abort":
+            assert ws.closed_with == [1011]
 
     asyncio.run(_run())
