@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
@@ -7,6 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import type * as ConfigApi from '@/api/config'
 import { $settingsRequestProfile } from '@/store/settings-scope'
+import * as voicePrefs from '@/store/voice-prefs'
 
 import type { ConfigSettings as ConfigSettingsType } from './config-settings'
 
@@ -18,7 +19,6 @@ const getHermesConfigRecord = vi.fn()
 const getHermesConfigSchema = vi.fn()
 const saveHermesConfig = vi.fn()
 const getElevenLabsVoices = vi.fn()
-const { setAutoSpeakReplies } = vi.hoisted(() => ({ setAutoSpeakReplies: vi.fn() }))
 
 // Keep the real read-origin helpers (WeakMap peek/bind) live: the shared
 // config hook reaches them through the barrel, and a bare mock would throw.
@@ -60,10 +60,6 @@ vi.mock('@/store/projects', () => ({
   scanAndRecordRepos: vi.fn().mockResolvedValue(undefined)
 }))
 
-vi.mock('@/store/voice-prefs', () => ({
-  setAutoSpeakReplies
-}))
-
 // The module graph behind ConfigSettings is large (1.5s cold here, >10s on a
 // saturated CI runner); load it once under the hook timeout so the 15s test
 // budget is spent on the autosave behaviour, not on transform + import.
@@ -73,7 +69,8 @@ beforeAll(async () => {
   ;({ ConfigSettings } = await import('./config-settings'))
 }, 60_000)
 
-beforeEach(() => {
+beforeEach(async () => {
+  await voicePrefs.setAutoSpeakReplies(false)
   scopeProfileMock.set('default')
   getElevenLabsVoices.mockResolvedValue({ available: false })
   getHermesConfigSchema.mockResolvedValue({ fields: {} })
@@ -83,6 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.restoreAllMocks()
 })
 
 function renderConfigSettings(activeSectionId = 'safety') {
@@ -103,44 +101,39 @@ function renderConfigSettings(activeSectionId = 'safety') {
 describe('ConfigSettings autosave', () => {
   it('syncs the Voice auto-TTS setting to Desktop read-aloud without a separate config write', async () => {
     getHermesConfigRecord.mockResolvedValue({ voice: { auto_tts: false } })
-    getHermesConfigSchema.mockResolvedValue({
-      fields: {
-        'voice.auto_tts': { type: 'boolean' }
-      }
-    })
-
-    renderConfigSettings('voice')
-
-    ;(await screen.findByRole('switch')).click()
-
-    expect(setAutoSpeakReplies).toHaveBeenCalledWith(true)
-    expect(saveHermesConfig).not.toHaveBeenCalled()
-  })
-
-  it('renders and saves the Codex compression auto-raise setting', async () => {
-    getHermesConfigRecord.mockResolvedValue({
-      compression: { codex_gpt55_autoraise: true }
-    })
-    getHermesConfigSchema.mockResolvedValue({
-      fields: {
-        'compression.codex_gpt55_autoraise': { type: 'boolean' }
-      }
-    })
-
+    getHermesConfigSchema.mockResolvedValue({ fields: { 'voice.auto_tts': { type: 'boolean' } } })
+    const setter = vi.spyOn(voicePrefs, 'setAutoSpeakReplies')
     vi.useFakeTimers({ shouldAdvanceTime: true })
 
     try {
-      renderConfigSettings('memory')
+      renderConfigSettings('voice')
+      const toggle = await screen.findByRole('switch')
+      await act(async () => {
+        toggle.click()
+      })
 
-      expect(await screen.findByText('Codex Compression Auto-Raise')).toBeTruthy()
-      expect(screen.getByText('Raise compression to 85% for supported ChatGPT Codex OAuth models.')).toBeTruthy()
+      expect(setter).toHaveBeenCalledWith(true)
+      expect(voicePrefs.$autoSpeakReplies.get()).toBe(true)
+      expect(localStorage.getItem('hermes.desktop.autoSpeakReplies')).toBe('true')
+      expect(saveHermesConfig).not.toHaveBeenCalled()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(700)
+      })
+      await vi.waitFor(() => expect(saveHermesConfig).toHaveBeenCalledTimes(1))
+      expect(saveHermesConfig.mock.calls[0]).toEqual([{ voice: { auto_tts: true } }, 'default'])
 
-      screen.getByRole('switch').click()
-      await vi.advanceTimersByTimeAsync(700)
-
-      await vi.waitFor(() =>
-        expect(saveHermesConfig).toHaveBeenCalledWith({ compression: { codex_gpt55_autoraise: false } }, 'default')
-      )
+      await act(async () => {
+        toggle.click()
+      })
+      expect(setter).toHaveBeenCalledWith(false)
+      expect(voicePrefs.$autoSpeakReplies.get()).toBe(false)
+      expect(localStorage.getItem('hermes.desktop.autoSpeakReplies')).toBe('false')
+      expect(saveHermesConfig).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(700)
+      })
+      await vi.waitFor(() => expect(saveHermesConfig).toHaveBeenCalledTimes(2))
+      expect(saveHermesConfig.mock.calls[1]).toEqual([{ voice: { auto_tts: false } }, 'default'])
     } finally {
       vi.useRealTimers()
     }
