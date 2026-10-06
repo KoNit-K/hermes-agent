@@ -3,7 +3,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { $changeEventsAvailable, $pairingChangeTick, $platformsChangeTick } from '@/store/live-sync'
+import { $settingsScopeOverride } from '@/store/settings-scope'
+import { $gatewayRestarting } from '@/store/system-actions'
 import type { MessagingPlatformInfo } from '@/types/hermes'
+
+import { MessagingView } from './index'
+
+// Imports are static on purpose: `await import(...)` inside test bodies ran
+// against the test timer, and a cold evaluate of the MessagingView graph blew
+// the 15s timeout — the timed-out first test then left the DOM empty for
+// every later test. vi.mock calls below are hoisted above these imports, so
+// the mocks still apply.
 
 const getMessagingPlatforms = vi.fn()
 const updateMessagingPlatform = vi.fn()
@@ -12,10 +23,12 @@ const approvePairing = vi.fn()
 const revokePairing = vi.fn()
 const openExternalLink = vi.fn()
 const runGatewayRestart = vi.fn()
+const runGatewayStart = vi.fn()
 const watchGatewayRestartOutcome = vi.fn()
 const startTelegramOnboarding = vi.fn()
 const getTelegramOnboardingStatus = vi.fn()
 const applyTelegramOnboarding = vi.fn()
+const notify = vi.fn()
 
 vi.mock('@/hermes', () => ({
   approvePairing: (platformId: string, requestId: string, profile?: null | string) =>
@@ -26,6 +39,7 @@ vi.mock('@/hermes', () => ({
   revokePairing: (platformId: string, userId: string, profile?: null | string) =>
     revokePairing(platformId, userId, profile),
   setApiRequestProfile: vi.fn(),
+  resolveOwnerNow: (owner: unknown) => owner,
   applyTelegramOnboarding: (pairingId: string, ids: string[], profile?: null | string) =>
     applyTelegramOnboarding(pairingId, ids, profile),
   cancelTelegramOnboarding: vi.fn(async () => ({ ok: true })),
@@ -54,7 +68,7 @@ vi.mock('@/lib/external-link', () => ({
 }))
 
 vi.mock('@/store/notifications', () => ({
-  notify: vi.fn(),
+  notify: (notification: unknown) => notify(notification),
   notifyError: vi.fn()
 }))
 
@@ -64,6 +78,7 @@ vi.mock('@/store/system-actions', async () => {
   return {
     $gatewayRestarting: atom(false),
     runGatewayRestart: () => runGatewayRestart(),
+    runGatewayStart: () => runGatewayStart(),
     watchGatewayRestartOutcome: () => watchGatewayRestartOutcome()
   }
 })
@@ -84,23 +99,27 @@ function platform(patch: Partial<MessagingPlatformInfo> = {}): MessagingPlatform
 }
 
 beforeEach(() => {
+  $gatewayRestarting.set(false)
   updateMessagingPlatform.mockResolvedValue({ ok: true, platform: 'teams' })
   getPairing.mockResolvedValue({ approved: [], pending: [] })
   runGatewayRestart.mockResolvedValue(true)
+  runGatewayStart.mockResolvedValue(true)
   watchGatewayRestartOutcome.mockResolvedValue(true)
 })
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
+  $settingsScopeOverride.set(null)
   vi.clearAllMocks()
 })
 
-// Import at module scope (after the hoisted vi.mock calls) so the heavy
-// component-tree transform is paid during collection, not billed against the
-// first test's testTimeout — inside a test body it exceeded the budget on
+// Static import at module scope (after the hoisted vi.mock calls) so the
+// heavy component-tree transform is paid during collection, not billed against
+// the first test's testTimeout — inside a test body it exceeded the budget on
 // loaded CI runners and cascaded the whole file (main runs 34599517793,
 // 34600757569, 34601269252). Same pattern as chat/index.test.tsx.
-const { MessagingView } = await import('./index')
+void import('./index')
 
 async function renderMessaging() {
   let result: ReturnType<typeof render>
@@ -117,8 +136,6 @@ async function renderMessaging() {
 
 describe('MessagingView profile scope', () => {
   it('names the active profile explicitly instead of sending an unscoped request', async () => {
-    const { $settingsScopeOverride } = await import('@/store/settings-scope')
-
     $settingsScopeOverride.set(null)
     getMessagingPlatforms.mockResolvedValue({ platforms: [platform()] })
 
@@ -129,6 +146,161 @@ describe('MessagingView profile scope', () => {
     // rather than left to the ambient fallback.
     await waitFor(() => expect(getMessagingPlatforms).toHaveBeenCalledWith('default'))
     expect(getPairing).toHaveBeenCalledWith('default')
+  })
+})
+
+describe('MessagingView status filter', () => {
+  const rowNames = (container: HTMLElement) =>
+    [...container.querySelectorAll('ul > li > button')].map(row => row.querySelector('.truncate')?.textContent)
+
+  it('offers a tab only for tones some platform is in, and narrows the list to that tone', async () => {
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [
+        platform({ enabled: true, id: 'discord', name: 'Discord', state: 'connected' }),
+        platform({ enabled: true, id: 'slack', name: 'Slack', state: 'retrying' }),
+        platform({ id: 'teams', name: 'Microsoft Teams' })
+      ]
+    })
+
+    const { container } = await renderMessaging()
+
+    await waitFor(() => expect(rowNames(container)).toHaveLength(3))
+    expect(screen.queryByRole('button', { name: 'Errors' })).toBeNull()
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Needs attention' })[0])
+
+    expect(rowNames(container)).toEqual(['Slack'])
+  })
+})
+
+describe('MessagingView enable switch', () => {
+  it('labels the enable switch with the platform state', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [platform({ enabled: true })] })
+
+    await renderMessaging()
+
+    const toggle = await screen.findByRole('switch', { name: 'Disable Microsoft Teams' })
+    expect(toggle.closest('label')?.textContent).toBe('Enabled')
+  })
+
+  it("drops the previous profile's credential placeholders on the very first post-switch render", async () => {
+    // #96542: blanking the stale platforms state in a passive effect lets the
+    // "new scope + old data" frame paint first, so the new profile briefly
+    // showed the PREVIOUS profile's redacted Telegram token as the field
+    // placeholder. The reset must happen during render — after the scope
+    // switch returns from act(), the old value is already gone from the DOM
+    // with no waitFor() in between.
+    const { $settingsScopeOverride } = await import('@/store/settings-scope')
+    const oldToken = '123456:AAE-previous-profile-token'
+
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [
+        platform({
+          env_vars: [
+            {
+              advanced: false,
+              description: 'Telegram bot token from @BotFather.',
+              is_password: true,
+              is_set: true,
+              key: 'TELEGRAM_TOKEN',
+              prompt: 'Token',
+              redacted_value: oldToken,
+              required: true,
+              url: null
+            }
+          ],
+          id: 'telegram',
+          name: 'Telegram'
+        })
+      ]
+    })
+
+    $settingsScopeOverride.set(null)
+    await renderMessaging()
+
+    // The previous profile's redacted token is visible as the placeholder.
+    expect(await screen.findByPlaceholderText(oldToken)).not.toBeNull()
+
+    // Switch the scope while B's fetch stays pending, so any stale rendering
+    // would still be showing A's data.
+    //
+    // Note on coverage: jsdom cannot observe the paint-order race itself
+    // (act() flushes passive effects synchronously, so an effect-based reset
+    // also clears before the assertion; outside act() the commit itself is
+    // deferred). This test therefore pins the reset *semantics* — after a
+    // scope switch the previous profile's credential placeholder must be gone
+    // from the DOM even while the new profile's fetch is still pending. The
+    // paint-order guarantee ("the stale frame never reaches the screen") is
+    // carried by resetting during render per the React docs pattern instead
+    // of in a passive effect, which fires after paint.
+    getMessagingPlatforms.mockReturnValue(new Promise(() => {}))
+
+    await act(async () => {
+      $settingsScopeOverride.set('profile-b')
+    })
+
+    // Synchronous assertion — no waitFor: the reset must have discarded the
+    // stale platforms state before the new profile's fetch resolves.
+    expect(screen.queryByPlaceholderText(oldToken)).toBeNull()
+
+    // Let pending work settle and restore the shared store.
+    await act(async () => {
+      $settingsScopeOverride.set(null)
+    })
+  })
+
+  it("drops profile A's late response after the scope switched to B", async () => {
+    // #96542 (second mechanism): A's in-flight getMessagingPlatforms resolves
+    // AFTER the switch to B and must not repaint A's redacted token under B.
+    const tokenA = '123456:AAE-profile-a-token'
+
+    let resolveA: (value: unknown) => void = () => {}
+
+    getMessagingPlatforms.mockImplementation((profile?: null | string) =>
+      profile === 'profile-b'
+        ? new Promise(() => {})
+        : new Promise(resolve => {
+            resolveA = resolve
+          })
+    )
+
+    $settingsScopeOverride.set(null)
+    await renderMessaging()
+
+    await act(async () => {
+      $settingsScopeOverride.set('profile-b')
+    })
+
+    await act(async () => {
+      resolveA({
+        platforms: [
+          platform({
+            env_vars: [
+              {
+                advanced: false,
+                description: 'Telegram bot token from @BotFather.',
+                is_password: true,
+                is_set: true,
+                key: 'TELEGRAM_TOKEN',
+                prompt: 'Token',
+                redacted_value: tokenA,
+                required: true,
+                url: null
+              }
+            ],
+            id: 'telegram',
+            name: 'Telegram'
+          })
+        ]
+      })
+    })
+
+    expect(screen.queryByPlaceholderText(tokenA)).toBeNull()
+
+    getMessagingPlatforms.mockReset()
+    await act(async () => {
+      $settingsScopeOverride.set(null)
+    })
   })
 })
 
@@ -221,8 +393,6 @@ describe('MessagingView pairing', () => {
     // connect/disconnect health via gateway_state.json, which a new pairing
     // request never moves. Riding it would leave someone invisible in the
     // pending list until an unrelated reconnect happened to fire.
-    const { $changeEventsAvailable, $pairingChangeTick, $platformsChangeTick } = await import('@/store/live-sync')
-
     getMessagingPlatforms.mockResolvedValue({ platforms: [platform()] })
     getPairing.mockResolvedValue({ approved: [], pending: [] })
 
@@ -293,6 +463,178 @@ describe('MessagingView restart banner', () => {
     expect(runGatewayRestart).toHaveBeenCalledTimes(2)
   })
 
+  it.each(['start', 'restart'] as const)(
+    'does not let a late %s completion clear another profile’s saved banner',
+    async action => {
+      let finish!: (ok: boolean) => void
+
+      const pending = new Promise<boolean>(resolve => {
+        finish = resolve
+      })
+
+      const runner = action === 'start' ? runGatewayStart : runGatewayRestart
+      runner.mockReturnValueOnce(pending)
+      $settingsScopeOverride.set('profile-a')
+      getMessagingPlatforms.mockImplementation(async (profileName: string) => ({
+        platforms: [
+          platform({
+            configured: true,
+            enabled: true,
+            gateway_running: profileName !== 'profile-a' || action === 'restart',
+            env_vars: [tokenField]
+          })
+        ]
+      }))
+
+      await renderMessaging()
+
+      if (action === 'restart') {
+        fireEvent.change(await screen.findByLabelText('Token'), { target: { value: 'a-token' } })
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+        })
+      }
+
+      fireEvent.click(
+        await screen.findByRole('button', {
+          name: action === 'start' ? 'Start messaging gateway' : 'Restart now'
+        })
+      )
+      await waitFor(() => expect(runner).toHaveBeenCalledOnce())
+
+      await act(async () => {
+        $settingsScopeOverride.set('profile-b')
+      })
+      await waitFor(() => expect(getMessagingPlatforms).toHaveBeenCalledWith('profile-b'))
+      fireEvent.change(await screen.findByLabelText('Token'), { target: { value: 'b-token' } })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+      })
+      expect(await screen.findByRole('button', { name: 'Restart now' })).toBeTruthy()
+
+      const fetched = getMessagingPlatforms.mock.calls.length
+      vi.useFakeTimers()
+      await act(async () => {
+        finish(true)
+        await pending
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000)
+      })
+
+      expect(getMessagingPlatforms).toHaveBeenCalledTimes(fetched)
+      expect(screen.getByRole('button', { name: 'Restart now' })).toBeTruthy()
+      $settingsScopeOverride.set(null)
+    }
+  )
+
+  it.each([
+    ['start', true],
+    ['restart', true],
+    ['start', false],
+    ['restart', false]
+  ] as const)('does not let an old %s completion clear a later save (A→B→A: %s)', async (action, switchAway) => {
+    let finish!: (ok: boolean) => void
+
+    const pending = new Promise<boolean>(resolve => {
+      finish = resolve
+    })
+
+    const runner = action === 'start' ? runGatewayStart : runGatewayRestart
+    runner.mockReturnValueOnce(pending)
+    $settingsScopeOverride.set('profile-a')
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [
+        platform({ configured: true, enabled: true, gateway_running: action === 'restart', env_vars: [tokenField] })
+      ]
+    })
+    await renderMessaging()
+
+    if (action === 'restart') {
+      fireEvent.change(await screen.findByLabelText('Token'), { target: { value: 'initial-token' } })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+      })
+    }
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: action === 'start' ? 'Start messaging gateway' : 'Restart now' })
+    )
+    await waitFor(() => expect(runner).toHaveBeenCalledOnce())
+    getMessagingPlatforms.mockResolvedValue({ platforms: [platform({ env_vars: [tokenField] })] })
+
+    if (switchAway) {
+      await act(async () => {
+        $settingsScopeOverride.set('profile-b')
+      })
+      await waitFor(() => expect(getMessagingPlatforms).toHaveBeenCalledWith('profile-b'))
+      await act(async () => {
+        $settingsScopeOverride.set('profile-a')
+      })
+    }
+
+    fireEvent.change(await screen.findByLabelText('Token'), { target: { value: 'new-token' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+    })
+    expect(await screen.findByRole('button', { name: 'Restart now' })).toBeTruthy()
+    const fetched = getMessagingPlatforms.mock.calls.length
+    vi.useFakeTimers()
+    await act(async () => {
+      finish(true)
+      await pending
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000)
+    })
+    expect(screen.getByRole('button', { name: 'Restart now' })).toBeTruthy()
+    expect(getMessagingPlatforms).toHaveBeenCalledTimes(fetched)
+  })
+
+  it('keeps saved-banner priority while a busy stopped gateway still means Start', async () => {
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [platform({ configured: true, enabled: true, gateway_running: false, env_vars: [tokenField] })]
+    })
+    await renderMessaging()
+    fireEvent.change(await screen.findByLabelText('Token'), { target: { value: 'saved-token' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+    })
+    expect(
+      await screen.findByText('Saved. Restart the messaging gateway so the new settings take effect.')
+    ).toBeTruthy()
+
+    await act(async () => {
+      $gatewayRestarting.set(true)
+    })
+    expect((screen.getByRole('button', { name: 'Starting messaging gateway…' }) as HTMLButtonElement).disabled).toBe(
+      true
+    )
+    await act(async () => {
+      $gatewayRestarting.set(false)
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Start messaging gateway' }))
+    })
+    expect(runGatewayStart).toHaveBeenCalledOnce()
+    expect(runGatewayRestart).not.toHaveBeenCalled()
+  })
+
+  it('disables Restart with the Restart progress copy while a running gateway is busy', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [platform({ env_vars: [tokenField] })] })
+    await renderMessaging()
+    fireEvent.change(await screen.findByLabelText('Token'), { target: { value: 'saved-token' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+    })
+    await screen.findByRole('button', { name: 'Restart now' })
+
+    await act(async () => {
+      $gatewayRestarting.set(true)
+    })
+    expect((screen.getByRole('button', { name: 'Restarting…' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('starts a stopped messaging gateway from the Messaging page', async () => {
     getMessagingPlatforms.mockResolvedValue({
       platforms: [platform({ configured: true, enabled: true, gateway_running: false, state: 'gateway_stopped' })]
@@ -305,7 +647,99 @@ describe('MessagingView restart banner', () => {
       fireEvent.click(start)
     })
 
-    expect(runGatewayRestart).toHaveBeenCalledOnce()
+    expect(runGatewayStart).toHaveBeenCalledOnce()
+    expect(runGatewayRestart).not.toHaveBeenCalled()
+  })
+
+  it('keeps the stopped gateway Start control available after a declined start', async () => {
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [platform({ configured: true, enabled: true, gateway_running: false, state: 'gateway_stopped' })]
+    })
+    runGatewayStart.mockResolvedValueOnce(false)
+
+    await renderMessaging()
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'Start messaging gateway' }))
+    })
+
+    expect(await screen.findByRole('button', { name: 'Start messaging gateway' })).toBeTruthy()
+    expect(runGatewayRestart).not.toHaveBeenCalled()
+  })
+
+  it('does not offer Start for a disabled platform', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [platform({ gateway_running: false })] })
+
+    await renderMessaging()
+    await screen.findAllByText('Microsoft Teams')
+
+    expect(screen.queryByRole('button', { name: 'Start messaging gateway' })).toBeNull()
+    expect(runGatewayStart).not.toHaveBeenCalled()
+  })
+})
+
+describe('MessagingView allowlist editor', () => {
+  const allowlist = (patch: Record<string, unknown> = {}) => ({
+    advanced: false,
+    description: 'Allowed users',
+    is_list: true,
+    is_password: false,
+    is_set: true,
+    key: 'TEAMS_ALLOWED_USERS',
+    prompt: 'Allowed users',
+    redacted_value: '«redacted:111...222»',
+    required: false,
+    url: null,
+    value: '111,222',
+    ...patch
+  })
+
+  const entries = () =>
+    screen.getAllByRole('textbox').filter(el => /^Allowed users \d+$/.test(el.getAttribute('aria-label') || ''))
+
+  async function save() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
+    })
+  }
+
+  it('shows each saved ID in its own visible box and saves add/remove edits as one list', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [platform({ env_vars: [allowlist()] })] })
+    await renderMessaging()
+
+    await screen.findByLabelText('Allowed users 1')
+    expect(entries().map(el => [(el as HTMLInputElement).type, (el as HTMLInputElement).value])).toEqual([
+      ['text', '111'],
+      ['text', '222']
+    ])
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0])
+    fireEvent.click(screen.getByRole('button', { name: /Add another/ }))
+    // A pasted comma list splits into one box per entry.
+    fireEvent.change(entries()[1], { target: { value: '333, 444' } })
+    expect(entries().map(el => (el as HTMLInputElement).value)).toEqual(['222', '333', '444'])
+
+    await save()
+    expect(updateMessagingPlatform).toHaveBeenCalledWith(
+      'teams',
+      { env: { TEAMS_ALLOWED_USERS: '222,333,444' } },
+      'default'
+    )
+  })
+
+  it('clears a saved allowlist when every entry is removed', async () => {
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [platform({ env_vars: [allowlist({ redacted_value: '«redacted:111»', value: '111' })] })]
+    })
+    await renderMessaging()
+
+    await screen.findByLabelText('Allowed users 1')
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    await save()
+    expect(updateMessagingPlatform).toHaveBeenCalledWith(
+      'teams',
+      { clear_env: ['TEAMS_ALLOWED_USERS'], env: {} },
+      'default'
+    )
   })
 })
 
@@ -333,6 +767,7 @@ describe('MessagingView Telegram quick setup', () => {
       status: 'ready'
     })
     applyTelegramOnboarding.mockResolvedValue({
+      bot_username: 'hermes_bot',
       needs_restart: false,
       ok: true,
       platform: 'telegram',
@@ -357,6 +792,15 @@ describe('MessagingView Telegram quick setup', () => {
 
       await waitFor(() => expect(applyTelegramOnboarding).toHaveBeenCalledWith('pair-1', ['8792111505'], 'worker'))
       await waitFor(() => expect(watchGatewayRestartOutcome).toHaveBeenCalled())
+      expect(notify).toHaveBeenCalledWith({
+        kind: 'success',
+        message: 'Connected: @hermes_bot · Telegram saved; gateway restarting…',
+        title: 'Telegram setup saved'
+      })
+      // The pairing UI is gone, but the card still names the bot that was just connected.
+      expect(screen.queryByRole('button', { name: /Save and restart/ })).toBeNull()
+      expect(screen.getByText('Connected')).toBeTruthy()
+      expect(screen.getByText('@hermes_bot')).toBeTruthy()
     } finally {
       $settingsScopeOverride.set(null)
     }
