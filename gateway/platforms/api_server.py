@@ -660,21 +660,6 @@ def _clear_turn_process_ownership(agent: Any) -> None:
     agent._gateway_turn_process_epoch = None
 
 
-def _session_chat_user_message(body: Dict[str, Any], *, param: str = "message") -> tuple[Any, Optional["web.Response"]]:
-    """Parse and normalize session chat ``message`` / ``input`` like chat completions."""
-    user_message = body.get("message") or body.get("input")
-    if not _content_has_visible_payload(user_message):
-        return None, _error_response("Missing 'message' field", 400, code="missing_message")
-    # Session chat accepts a plain text turn directly.  Its request size is not
-    # constrained by the defensive cap used while flattening structured parts.
-    if isinstance(user_message, str):
-        return user_message, None
-    try:
-        return _normalize_multimodal_content(user_message), None
-    except ValueError as exc:
-        return None, _multimodal_validation_error(exc, param=param)
-
-
 def _request_turn_author(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Normalized body ``author``, None when absent or null, ValueError when not an object. It only labels memory."""
     raw = body.get("author")
@@ -3198,11 +3183,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if title is not None:
                 clean_title = db.sanitize_title(str(title))
                 if clean_title:
-                    conflict = conn.execute(
-                        "SELECT id FROM sessions WHERE title = ? AND id != ?", (clean_title, session_id)).fetchone()
-                    if conflict:
+                    try:
+                        db._resolve_title_conflict(conn, session_id, clean_title)
+                    except ValueError as exc:  # the DB's uniqueness rule; undo the INSERT
                         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-                        return None, f"title:Title already in use by session {conflict['id']}"
+                        return None, f"title:{exc}"
                 conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (clean_title, session_id))
             session_row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
             return (dict(session_row) if session_row else {
@@ -3389,7 +3374,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         body, err = await self._read_json_body(request)
         if err:
             return None, err
-        user_message, err = _session_chat_user_message(body)
+        from gateway.platforms.api_server_session_content import session_chat_user_message
+        user_message, err = session_chat_user_message(body)
         if err is not None:
             return None, err
         try:
