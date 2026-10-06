@@ -854,3 +854,15 @@ def run_migrations(
                 if not quiet:
                     print(f"  ⚠ {warning}")
     return migration_failed
+
+
+def stamp_migration_version(
+    current_ver: int, latest_ver: int, floor_refused: bool, migration_failed: bool,
+) -> None:
+    """Retain the source version for refused or failed ladders so later runs can retry."""
+    if current_ver < latest_ver and not floor_refused and not migration_failed:
+        from hermes_cli.config import _persist_migration, read_raw_config
+
+        config = read_raw_config()
+        config["_config_version"] = latest_ver
+        _persist_migration(config)

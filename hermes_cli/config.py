@@ -1365,7 +1365,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # Missing/unparseable files never trip the floor gate.
     # Imported lazily because the steps call back into this module.
     from hermes_cli.config_migrations import (
-        SUPPORT_FLOOR_VERSION, run_migrations, support_floor_message)
+        SUPPORT_FLOOR_VERSION, run_migrations, stamp_migration_version, support_floor_message)
 
     has_explicit_version = stamp is not None
     floor_refused = (
@@ -1409,10 +1409,8 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # read time); this list only feeds the "N new config option(s)" display.
     results["config_added"].extend(field["key"] for field in get_missing_config_fields())
 
-    if current_ver < latest_ver and not floor_refused and not migration_failed:
-        config = read_raw_config()
-        config["_config_version"] = latest_ver
-        _persist_migration(config)
+    stamp_migration_version(
+        current_ver, latest_ver, floor_refused, migration_failed)
 
     missing_skill_config = get_missing_skill_config_vars()
     if missing_skill_config and interactive and not quiet:
