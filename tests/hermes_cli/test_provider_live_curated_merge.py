@@ -14,11 +14,12 @@ Guards two contracts:
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from hermes_cli.models import (
     _LIVE_FIRST_PICKER_PROVIDERS,
     provider_model_ids,
 )
-
 
 class TestGenericProviderLiveCuratedMerge:
     """provider_model_ids merges live + curated for generic api_key providers."""
@@ -58,7 +59,6 @@ class TestGenericProviderLiveCuratedMerge:
         # No duplicates for models present in both.
         assert result.count("glm-5") == 1
 
-
     def test_no_models_dropped_either_direction(self):
         """Every live AND curated model survives the merge for both modes."""
         live = ["a", "b"]
@@ -88,11 +88,11 @@ class TestGenericProviderLiveCuratedMerge:
 
     def test_opencode_go_merge_does_not_resurrect_delisted_model(self):
         """#95914 bug class, end-to-end through provider_model_ids with the REAL curated floor:
-        the Go relay (GET /zen/go/v1/models) delisted ox-alpha-free 2026-09-09. The live-first
-        merge must not resurrect it from the curated floor, or the picker keeps offering a model
-        that now 401s (REVERT-PROOF: a stale floor re-adds it and this fails)."""
+        the Go relay (GET /zen/go/v1/models) delisted ox-alpha-free 2026-09-09 but may keep LISTING
+        it (#111749). Neither the live listing nor the curated floor may resurrect it, or the picker
+        keeps offering a model that now 401s."""
         assert "opencode-go" in _LIVE_FIRST_PICKER_PROVIDERS
-        live = ["deepseek-v4-flash", "kimi-k3", "omen-alpha"]  # current Go relay (no ox-alpha-free)
+        live = ["deepseek-v4-flash", "kimi-k3", "omen-alpha", "ox-alpha-free"]
 
         with (
             patch("providers.get_provider_profile", return_value=self._make_profile(live)),
@@ -127,14 +127,14 @@ class TestGenericProviderLiveCuratedMerge:
         assert "x-preview-f-free" not in result
         assert {"kimi-k3", "gpt-5.6-sol", "claude-opus-5"} <= set(result)
 
-    def test_alibaba_token_plan_merge_does_not_resurrect_delisted_model(self):
-        """#119481: the live Token Plan catalog is authoritative for retired ids.
+    @pytest.mark.parametrize("provider", ["alibaba-token-plan", "alibaba-token-plan-cn"])
+    def test_alibaba_token_plan_merge_does_not_resurrect_delisted_model(self, provider):
+        """#119481: the known dated ID must not reappear from the shared curated floor.
 
-        ``qwen3.8-max-0902`` was once curated, but the endpoint no longer
-        serves it.  A live refresh must retain every currently listed model
-        without merging that retired id back into the picker.
+        This protects the specific catalog correction, preserving the existing
+        merge policy and every currently listed live model.
         """
-        live = ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"]
+        live = ["qwen3.8-max", "qwen3.8-flash", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"]
 
         with (
             patch("providers.get_provider_profile", return_value=self._make_profile(live)),
@@ -143,7 +143,7 @@ class TestGenericProviderLiveCuratedMerge:
                 return_value={"api_key": "k", "base_url": ""},
             ),
         ):
-            result = provider_model_ids("alibaba-token-plan")
+            result = provider_model_ids(provider)
 
         assert "qwen3.8-max-0902" not in result
         assert set(live) <= set(result)
