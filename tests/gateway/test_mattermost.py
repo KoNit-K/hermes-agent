@@ -538,6 +538,46 @@ class TestMattermostFileUpload:
         assert process.terminated is True
         assert not output.exists()
 
+    @pytest.mark.asyncio
+    async def test_voice_transcode_timeout_terminates_child_and_cleans_temp(self, tmp_path, monkeypatch):
+        source = tmp_path / "voice.ogg"
+        output = tmp_path / "voice.mp3"
+        source.write_bytes(b"ogg")
+        from plugins.platforms.mattermost import adapter as mattermost
+
+        class Process:
+            def __init__(self):
+                self.returncode = None
+                self.finished = asyncio.Event()
+                self.terminated = False
+
+            async def communicate(self):
+                await self.finished.wait()
+                return b"", b""
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+                self.finished.set()
+
+            async def wait(self):
+                await self.finished.wait()
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+                self.finished.set()
+
+        process = Process()
+        fd = os.open(output, os.O_CREAT | os.O_WRONLY)
+        monkeypatch.setattr(mattermost.tempfile, "mkstemp", lambda **_kwargs: (fd, str(output)))
+        monkeypatch.setattr(mattermost.asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+        monkeypatch.setattr(mattermost, "_VOICE_TRANSCODE_TIMEOUT_SECONDS", 0)
+
+        assert await mattermost._transcode_voice_to_mp3(str(source)) is None
+        assert process.terminated is True
+        assert not output.exists()
+
 
 # ---------------------------------------------------------------------------
 # Dedup cache
