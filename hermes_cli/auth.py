@@ -2140,8 +2140,7 @@ def _external_process_spec(
     pconfig: ProviderConfig) -> tuple[str, List[str], str, Optional[str], tuple[str, ...]]:
     """``(command, args, base_url, resolved_command, command_env_vars)`` for an ACP provider.
 
-    Launch details come from the provider's own profile (copilot-acp: HERMES_COPILOT_ACP_COMMAND /
-    COPILOT_CLI_PATH / HERMES_COPILOT_ACP_ARGS), so out-of-tree providers describe their binary."""
+    Profile-owned launch details resolve explicit paths/PATH before user-local and Claude prefixes."""
     base_url = _provider_env_base_url(pconfig) or pconfig.inference_base_url
     try:
         from providers import get_provider_profile as _get_provider_profile
@@ -2154,15 +2153,14 @@ def _external_process_spec(
                or str(getattr(profile, "process_command", "") or ""))
     raw_args = os.getenv(args_env_var, "").strip() if args_env_var else ""
     args = shlex.split(raw_args) if raw_args else list(getattr(profile, "process_args", ()) or [])
-    if command:
-        from hermes_platform.resolver import locate_command
-        from hermes_platform.resolver.known_dirs import user_local_bin
-
-        resolution = locate_command(command, known_dirs=user_local_bin())
-        resolved_command = resolution.command[0] if resolution.command else None
-    else:
-        resolved_command = None
-    return command, args, base_url, resolved_command, command_env_vars
+    from hermes_platform.resolver import locate_command
+    from hermes_platform.resolver.known_dirs import user_local_bin
+    found = locate_command(command, known_dirs=user_local_bin()).command if command else ()
+    resolved = found[0] if found else None
+    if command and not resolved:
+        from agent.anthropic_adapter import find_claude_code_cli
+        resolved = find_claude_code_cli(command)
+    return command, args, base_url, resolved, command_env_vars
 
 
 def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
