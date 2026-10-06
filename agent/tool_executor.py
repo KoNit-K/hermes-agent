@@ -211,22 +211,23 @@ def _resolve_concurrent_batch_timeout(parsed_calls) -> float | None:
         return timeout_s
 
     peer_timeouts = []
-    target_keys = {"agent", "agent_name", "name"}
-    argument_aliases = {"agent_name", "name", "text", "task", "contextId"}
     for call in parsed_calls:
         if (
             call.parse_error is not None
             or call.name != "a2a_call"
             or getattr(getattr(call.tool_call, "function", None), "name", None) != "a2a_call"
-            or target_keys.intersection(call.args) != {"agent"}
-            or argument_aliases.intersection(call.args)
         ):
             continue
-        target = call.args.get("agent")
-        message = call.args.get("message")
-        if not isinstance(target, str) or not isinstance(message, str) or not message.strip():
+        # Keep this precedence aligned with plugins.platforms.a2a.tools.a2a_call:
+        # model output regularly uses its documented aliases and may include contextId.
+        target = str(
+            call.args.get("agent") or call.args.get("agent_name") or call.args.get("name") or ""
+        ).strip()
+        message = str(
+            call.args.get("message") or call.args.get("text") or call.args.get("task") or ""
+        ).strip()
+        if not target or not message:
             continue
-        target = target.strip()
         if not target or target.startswith(("http://", "https://")):
             continue
         peer = peers.get(target)

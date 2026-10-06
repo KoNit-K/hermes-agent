@@ -129,7 +129,13 @@ a2a_agents:
     ) == 420.0
     assert _resolve_concurrent_batch_timeout(
         _parsed_calls(("a2a_call", {"agent_name": "long", "message": "work"}))
-    ) == 420.0
+    ) == 900.0
+    assert _resolve_concurrent_batch_timeout(
+        _parsed_calls(("a2a_call", {"name": "long", "text": "work", "contextId": "prior"}))
+    ) == 900.0
+    assert _resolve_concurrent_batch_timeout(
+        _parsed_calls(("a2a_call", {"agent": "long", "task": "work", "contextId": "prior"}))
+    ) == 900.0
     assert _resolve_concurrent_batch_timeout(
         _parsed_calls(("a2a_call", {"agent": "long"}))
     ) == 420.0
@@ -138,6 +144,11 @@ a2a_agents:
     ) == 420.0
     assert _resolve_concurrent_batch_timeout(
         _parsed_calls(("a2a_call", {"agent": "long", "name": "other", "message": "work"}))
+    ) == 900.0
+    # The executor chooses ``agent`` before its aliases, so the deadline must
+    # follow that same selected peer rather than the alias with a longer timeout.
+    assert _resolve_concurrent_batch_timeout(
+        _parsed_calls(("a2a_call", {"agent": "unknown", "agent_name": "long", "message": "work"}))
     ) == 420.0
 
     monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "300")
