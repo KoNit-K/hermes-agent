@@ -613,6 +613,7 @@ class TestDisplayDedupe:
             {"role": "assistant", "content": "a2"},
         ])
         original_ids = _row_ids(db, sid)
+        ensure = db._ensure_display_order
         self._copy_tail_as_new_generation(db, sid, [original_ids[0]])
         db._execute_write(lambda conn: conn.execute(
             "UPDATE messages SET display_order = NULL WHERE session_id = ? AND content IN (?, ?)",
@@ -623,6 +624,37 @@ class TestDisplayDedupe:
         assert _row_ids(db, sid, include_compacted=True) == original_ids
         assert _row_ids(db, sid, include_compacted=True, limit=2, offset=0) == original_ids[:2]
         assert _row_ids(db, sid, include_compacted=True, latest=True, limit=2, offset=2) == original_ids[:2]
+
+        # A writer can clear both columns after the NULL probe. The canonical indexed
+        # query must still see the probed snapshot, and the next read uses dynamic identities.
+        sid = "snapshot-content-rewrite"
+        db.create_session(sid, source="cli")
+        db.append_messages_batch(sid, [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2"},
+        ])
+        original_ids = _row_ids(db, sid)
+        assert ensure(sid)
+        indexed_page = db._display_rows_from_conn
+        rewritten = False
+
+        def rewrite_after_probe(conn, session_id, **paging):
+            nonlocal rewritten
+            if not rewritten:
+                rewritten = True
+                assert db.set_user_message_content(sid, original_ids[0], "expanded q1") == 1
+                assert db.set_user_message_content(sid, original_ids[2], "expanded q2") == 1
+            return indexed_page(conn, session_id, **paging)
+
+        monkeypatch.setattr(db, "_display_rows_from_conn", rewrite_after_probe)
+        snapshot = db.get_messages(sid, include_compacted=True)
+        assert [row["id"] for row in snapshot] == original_ids
+        assert [row["content"] for row in snapshot] == ["q1", "a1", "q2", "a2"]
+        updated = db.get_messages(sid, include_compacted=True)
+        assert [row["id"] for row in updated] == original_ids
+        assert [row["content"] for row in updated] == ["expanded q1", "a1", "expanded q2", "a2"]
 
     def test_user_content_rewrite_nulls_distinct_identities_without_collapsing_pages(self, db, monkeypatch):
         """The real user-content trigger clears both display columns.
