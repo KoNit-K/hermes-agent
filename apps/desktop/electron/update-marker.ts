@@ -38,6 +38,11 @@ export function markerPath(hermesHome) {
 // not deliver a signal — it just probes existence/permission. ESRCH => dead;
 // EPERM => alive but owned by another user (still "alive" for our purposes).
 // Injectable `kill` keeps it unit-testable.
+//
+// NOT zombie-aware on its own: signal 0 also succeeds for a process that
+// exited but whose parent has not reaped it. Callers deciding whether an
+// update marker's owner is still running must layer `posixProcessState` on
+// top (see `readLiveUpdateMarker`).
 export function isPidAlive(pid, kill: typeof process.kill = process.kill.bind(process)) {
   if (!Number.isInteger(pid) || pid <= 0) {
     return false
@@ -52,29 +57,189 @@ export function isPidAlive(pid, kill: typeof process.kill = process.kill.bind(pr
   }
 }
 
-/**
- * Whether a live macOS PID still belongs to an update hand-off. PID liveness
- * alone is insufficient after a crashed hand-off because macOS can reuse it
- * for an unrelated process. Inspection failures remain fail-closed so they
- * can never interrupt a healthy update.
- */
+// ps flattens argv into a display string, losing boundaries for paths with
+// spaces. Darwin's read-only KERN_PROCARGS2 preserves those boundaries.
+const MAC_PROCESS_ARGV = `
+import ctypes, json, struct, sys
+lib = ctypes.CDLL(None)
+mib = (ctypes.c_int * 3)(1, 49, int(sys.argv[1]))
+size = ctypes.c_size_t()
+if lib.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+    raise OSError("process arguments unavailable")
+buf = ctypes.create_string_buffer(size.value)
+if lib.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+    raise OSError("process arguments unavailable")
+raw = buf.raw[:size.value]
+argc = struct.unpack("i", raw[:4])[0]
+start = raw.index(b"\\0", 4) + 1
+while raw[start] == 0:
+    start += 1
+argv = [part.decode("utf-8") for part in raw[start:].split(b"\\0")[:argc]]
+if argc < 1 or len(argv) != argc:
+    raise ValueError("incomplete process arguments")
+print(json.dumps(argv))
+`
+
+// Inline code is not an identity credential. Prove only the smallest harmless
+// program; every other -c owner is unknown, including formal managed launchers.
+const INLINE_PROCESS_IDENTITY = `
+import ast, sys
+try:
+    body = ast.parse(sys.stdin.read()).body
+    expr = body[0].value if len(body) == 1 and isinstance(body[0], ast.Expr) else None
+    harmless = (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
+        and expr.func.id == "print" and len(expr.args) > 0 and not expr.keywords
+        and all(isinstance(arg, ast.Constant) and isinstance(arg.value, str) for arg in expr.args))
+    print("non-update" if harmless else "unknown")
+except Exception:
+    print("unknown")
+`
+
+function isUpdateSubcommand(argv: string[], index: number): boolean {
+  while (index < argv.length) {
+    const argument = argv[index]
+
+    if (argument === '--profile' || argument === '-p') {
+      index += 2
+    } else if (argument.startsWith('--profile=')) {
+      index += 1
+    } else {
+      return argument === 'update'
+    }
+  }
+
+  return false
+}
+
+function isUpdateCommand(argv: string[], inspectInline: (source: string) => boolean | null): boolean | null {
+  const executable = path.basename(argv[0])
+
+  if (executable === 'bash' || executable === 'sh') {
+    // The stable owner execs /bin/bash with the script as argv[1], never -c.
+    return Boolean(
+      argv[1] &&
+        path.isAbsolute(argv[1]) &&
+        path.normalize(argv[1]).endsWith('/scripts/desktop-update/posix.sh')
+    )
+  }
+
+  let entry = 0
+
+  if (/^python(?:3(?:\.\d+)?)?$/i.test(executable)) {
+    entry = 1
+
+    while (['-I', '-S', '-E', '-s', '-u', '-B', '-O', '-OO'].includes(argv[entry])) {
+      entry += 1
+    }
+
+    if (argv[entry] === '-c') {
+      return argv[entry + 1] === undefined ? null : inspectInline(argv[entry + 1])
+    }
+
+    if (argv[entry] === '-m' && argv[entry + 1] === 'hermes_cli.main') {
+      return isUpdateSubcommand(argv, entry + 2)
+    }
+
+    if (argv[entry]?.startsWith('-') && argv[entry] !== '-m') {
+      return null
+    }
+  }
+
+  if (path.basename(argv[entry] || '') !== 'hermes') {
+    return false
+  }
+
+  return isUpdateSubcommand(argv, entry + 1)
+}
+
+/** Positive non-update identity clears a reused PID; unreadable argv retains the gate. */
 export function isMacUpdateProcess(
   pid: number,
   inspectProcess: (command: string, args: string[], options: object) => string | Buffer = execFileSync
 ) {
-  try {
-    const command = String(
-      inspectProcess('/bin/ps', ['-o', 'command=', '-p', String(pid)], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 1000
-      })
-    ).trim()
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return true
+  }
 
-    return /(?:scripts\/desktop-update\/posix\.sh|(?:^|\s)hermes\s+update\b|hermes_cli\.main\s+update\b)/.test(command)
+  try {
+    const argv: unknown = JSON.parse(
+      String(
+        inspectProcess('/usr/bin/python3', ['-I', '-S', '-c', MAC_PROCESS_ARGV, String(pid)], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 1500
+        })
+      )
+    )
+
+    if (!Array.isArray(argv) || argv.length === 0 || !argv[0] || !argv.every(arg => typeof arg === 'string')) {
+      return true
+    }
+
+    return (
+      isUpdateCommand(argv, source => {
+        const verdict = String(
+          inspectProcess('/usr/bin/python3', ['-I', '-S', '-c', INLINE_PROCESS_IDENTITY], {
+            encoding: 'utf8',
+            input: source,
+            stdio: ['pipe', 'pipe', 'ignore'],
+            timeout: 1500
+          })
+        ).trim()
+
+        return verdict === 'non-update' ? false : null
+      }) !== false
+    )
   } catch {
     return true
   }
+}
+
+/**
+ * Single-letter process state (`ps` style) for a kill(0)-alive pid, or null
+ * when it cannot be determined.
+ *
+ * A ZOMBIE — exited, still in the table because its parent has not reaped
+ * it — answers signal 0 like a live process. A crashed updater lingering
+ * that way would keep its update marker "live" and park the desktop boot
+ * gate for the whole 20-minute ceiling (#77259, #120635, #125932). Linux
+ * exposes the state via /proc; on macOS `ps -o stat=` does. Failures return
+ * null so callers keep their signal-0 verdict (fail-open to alive, matching
+ * the EPERM behavior above).
+ */
+export function posixProcessState(pid: number): string | null {
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const commEnd = stat.lastIndexOf(')')
+      const state = commEnd >= 0 ? stat.slice(commEnd + 2, commEnd + 3) : ''
+
+      return state || null
+    } catch {
+      return null
+    }
+  }
+
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 5000
+      })
+
+      return out.trim().charAt(0) || null
+    } catch {
+      return null
+    }
+  }
+
+  return null
+}
+
+// A state of 'Z'/'Z+' (and friends) means the process exited and only its
+// unreaped table entry remains — dead for every liveness decision here.
+function isZombieState(state: string | null | undefined): boolean {
+  return Boolean(state && state.toUpperCase().startsWith('Z'))
 }
 
 /**
@@ -95,7 +260,8 @@ export function readLiveUpdateMarker(
     kill,
     now = Date.now,
     maxAgeMs = UPDATE_MARKER_MAX_AGE_MS,
-    isExpectedUpdateProcess
+    isExpectedUpdateProcess,
+    processState = posixProcessState
   }: {
     now?: () => number
     maxAgeMs?: number
@@ -106,6 +272,8 @@ export function readLiveUpdateMarker(
      * errors should return true so a healthy update is never interrupted.
      */
     isExpectedUpdateProcess?: (pid: number) => boolean
+    /** Injectable override of the zombie/state probe (see posixProcessState). */
+    processState?: (pid: number) => string | null
   } = {}
 ) {
   const file = markerPath(hermesHome)
@@ -123,9 +291,10 @@ export function readLiveUpdateMarker(
   const ageMs = Number.isFinite(startedAt) ? now() - startedAt * 1000 : Infinity
   const alive = Number.isInteger(pid) && isPidAlive(pid, kill)
 
+  const zombie = alive && isZombieState(processState(pid))
   let expected = true
 
-  if (alive && isExpectedUpdateProcess) {
+  if (alive && !zombie && isExpectedUpdateProcess) {
     try {
       expected = isExpectedUpdateProcess(pid)
     } catch {
@@ -135,7 +304,7 @@ export function readLiveUpdateMarker(
     }
   }
 
-  if (!alive || !expected || ageMs > maxAgeMs) {
+  if (!alive || zombie || !expected || ageMs > maxAgeMs) {
     try {
       fs.unlinkSync(file)
     } catch {
@@ -146,6 +315,15 @@ export function readLiveUpdateMarker(
   }
 
   return { pid, ageMs }
+}
+
+/** Host-aware boot gate: only macOS needs the additional PID identity probe. */
+export function hasLiveUpdateMarker(hermesHome) {
+  return Boolean(
+    readLiveUpdateMarker(hermesHome, {
+      isExpectedUpdateProcess: process.platform === 'darwin' ? isMacUpdateProcess : undefined
+    })
+  )
 }
 
 /**
