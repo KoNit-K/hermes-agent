@@ -56,6 +56,27 @@ class TestTTYPromptFlow:
         assert asyncio.run(register_on_event_loop()) == []
         assert shell_hooks.allowlist_entry_for("on_session_start", str(script)) is None
 
+    def test_running_event_loop_skips_prompt_when_reregistering_config_hooks(self, tmp_path, monkeypatch):
+        """A force-reload must not block the gateway loop while re-registering config hooks."""
+        from hermes_cli import plugins
+
+        script = _write_hook_script(tmp_path)
+        plugins._plugin_manager = plugins.PluginManager()
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"hooks": {"on_session_start": [{"command": str(script)}]}},
+        )
+
+        async def reregister_on_event_loop():
+            with patch("sys.stdin") as mock_stdin, patch(
+                "builtins.input", side_effect=AssertionError("must not block the event loop"),
+            ):
+                mock_stdin.isatty.return_value = True
+                shell_hooks.re_register_config_hooks()
+
+        asyncio.run(reregister_on_event_loop())
+        assert shell_hooks.allowlist_entry_for("on_session_start", str(script)) is None
+
     def test_first_use_prompts_and_approves(self, tmp_path):
         from hermes_cli import plugins
 
@@ -241,4 +262,3 @@ class TestHooksAutoAcceptParsing:
         assert shell_hooks._resolve_effective_accept(
             {"hooks_auto_accept": 1}, accept_hooks_arg=False,
         ) is False
-
