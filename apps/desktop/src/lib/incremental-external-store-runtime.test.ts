@@ -112,6 +112,20 @@ describe('syncRepositoryIncrementally', () => {
     expect(result.map(item => item.id)).toEqual(['user-1', 'assistant-stream-1'])
   })
 
+  it('removes a settled stream row when an authoritative rewrite omits it', () => {
+    const prompt = message('user-1', 'question')
+    const settled = fromThreadMessageLike(
+      { role: 'assistant', content: [{ type: 'text', text: 'Finished answer' }] },
+      'assistant-stream-1',
+      STATUS
+    )
+    const runtime = runtimeWith(chain([prompt, settled]))
+
+    const result = syncRepositoryIncrementally(runtime, exported(chain([prompt])))
+
+    expect(result.map(item => item.id)).toEqual(['user-1'])
+  })
+
   it('shows an authoritative completed replacement instead of a missing live stream tail', () => {
     const prompt = message('user-1', 'question')
     const live = fromThreadMessageLike(
