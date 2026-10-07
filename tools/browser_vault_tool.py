@@ -212,7 +212,14 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[tuple[
         supervisor = None
     if supervisor is None:
         return None
-    focused = supervisor.focus_page(origin, accept=_TAB_PROBES.get(kind))
+    # Only login fills have a narrowly-authorized cross-origin use case.
+    # Checkout discovery must remain in the top-level document: a matching
+    # card or address field in an embedded origin is never transfer authority.
+    focus_top_level = getattr(supervisor, "focus_top_level_page", None)
+    if kind != "login" and callable(focus_top_level):
+        focused = focus_top_level(origin, accept=_TAB_PROBES.get(kind))
+    else:
+        focused = supervisor.focus_page(origin, accept=_TAB_PROBES.get(kind))
     if not focused.get("ok"):
         return None
     top_level_origin = origin
@@ -510,6 +517,16 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
                 ),
             }
         )
+
+    # Defense in depth for alternate supervisors and future discovery paths:
+    # non-login values must not cross into an embedded origin, even if a
+    # caller accidentally hands us a routed child document.
+    if meta.kind != "login" and (frame_route is not None or fill_origin != page_origin):
+        return json.dumps({
+            "success": False,
+            "error_type": "cross_origin_non_login_refused",
+            "error": "Refused: payment and address fills are limited to the bound top-level page.",
+        })
 
     # OOPIF membership is only a discovery constraint.  A login password is
     # resolved only after the user approves this exact relying-party → child

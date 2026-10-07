@@ -257,6 +257,65 @@ class TestClassifier:
 # ---------------------------------------------------------------------------
 
 class TestBrowserVaultTools:
+    @pytest.mark.parametrize(("kind", "secret"), [
+        ("payment", _CARD),
+        ("address", _ADDRESS),
+    ])
+    def test_non_login_cross_origin_frame_refuses_before_secret_resolution(self, store, kind, secret):
+        """Checkout items must never inherit the login-only OOPIF authority.
+
+        Finding a matching payment or address form in a cross-origin child
+        frame is not authority to resolve its values or try another frame.
+        """
+        from tools import browser_vault_tool
+
+        meta = store.add_item(kind=kind, label=kind.title(), origin="https://shop.test", secret=secret)
+        resolved = False
+
+        class _Backend:
+            name, display_name, needs_unlock = "local", "Local", False
+
+            def is_unlocked(self):
+                return True
+
+            def get_meta(self, handle):
+                return meta if handle == meta.id else None
+
+            def resolve_secret(self, handle):
+                nonlocal resolved
+                resolved = True
+                return secret
+
+        calls = []
+
+        class _Supervisor:
+            def focus_top_level_page(self, origin, *, accept=None):
+                calls.append((origin, accept))
+                assert accept == browser_vault_tool._TAB_PROBES[kind]
+                return {
+                    "ok": True,
+                    "url": "https://shop.test/checkout",
+                    "frame_origin": "https://checkout-provider.example",
+                    "route": {"page_session_id": "top", "frame_id": "payment", "frame_session_id": "frame"},
+                }
+
+            def focus_page(self, *_args, **_kwargs):
+                raise AssertionError("non-login fill must not enable OOPIF discovery")
+
+        with patch("agent.vault_backends.backend_for_handle", return_value=_Backend()), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=_Supervisor()), \
+             patch.object(browser_vault_tool, "_confirm_payment_fill", return_value=True), \
+             patch.object(browser_vault_tool, "_eval_js") as inspect, \
+             patch.object(browser_vault_tool, "_eval_js_secret") as fill:
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+
+        assert out["success"] is False
+        assert out["error_type"] == "cross_origin_non_login_refused"
+        assert calls == [("https://shop.test", browser_vault_tool._TAB_PROBES[kind])]
+        assert resolved is False
+        inspect.assert_not_called()
+        fill.assert_not_called()
+
     def test_cross_origin_login_requires_exact_pair_consent_before_password_resolution(self, store):
         """Discovering an in-tree OOPIF is not authority to resolve a login secret.
 
@@ -442,6 +501,7 @@ class TestBrowserVaultTools:
 
         meta = _add_login(store, origin="https://example.com")
         with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
              patch.object(browser_vault_tool, "_current_page_origin", return_value="https://evil.com"):
             out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
         assert out["success"] is False
@@ -492,6 +552,7 @@ class TestBrowserVaultTools:
             return {"success": True, "result": json.dumps({"filled": 1})}
 
         with patch("agent.vault_backends.backend_for_handle", return_value=_ManagerBackend()), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
              patch.object(browser_vault_tool, "_current_page_origin", return_value="https://www.amazon.co.uk"), \
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
              patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_eval_secret):
@@ -631,6 +692,7 @@ class TestBrowserVaultTools:
                 return "s3cret-pw"
 
         with patch("agent.vault_backends.backend_for_handle", return_value=_ManagerBackend()), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
              patch.object(browser_vault_tool, "_current_page_origin", return_value="https://payments.amazon.co.uk"):
             out = json.loads(browser_vault_tool.browser_vault_fill("op:multi"))
         assert out["success"] is False
@@ -665,6 +727,7 @@ class TestBrowserVaultTools:
             return {"success": True, "result": json.dumps({"filled": 1})}
 
         with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
              patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_eval_secret):
             raw = browser_vault_tool.browser_vault_fill(meta.id)
@@ -717,6 +780,7 @@ class TestBrowserVaultTools:
             }
 
         with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
              patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_eval_secret):
             raw = browser_vault_tool.browser_vault_fill(meta.id)
@@ -780,6 +844,7 @@ class TestBrowserVaultTools:
 
         try:
             with patch("agent.vault_store.get_vault_store", return_value=store), \
+                 patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
                  patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
                  patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_eval_secret):
                 out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
@@ -829,6 +894,7 @@ class TestBrowserVaultTools:
 
         try:
             with patch("agent.vault_store.get_vault_store", return_value=store), \
+                 patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
                  patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
                  patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_eval_secret), \
                  patch("tools.approval_prompt.request_elicitation_consent", return_value="decline"):
@@ -837,6 +903,7 @@ class TestBrowserVaultTools:
             assert secret_exprs == []
 
             with patch("agent.vault_store.get_vault_store", return_value=store), \
+                 patch.object(browser_vault_tool, "_ensure_supervisor", return_value=None), \
                  patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
                  patch.object(browser_vault_tool, "_eval_js_secret", side_effect=fake_eval_secret), \
                  patch("tools.approval_prompt.request_elicitation_consent", return_value="accept"):
@@ -928,6 +995,7 @@ class TestSaveLoginPrompt:
             return {"identifier": "tek@acme.test", "password": "hunter2-very-secret"}
 
         unlock_mod.set_save_login_prompt_callback(prompt)
+        monkeypatch.setattr(browser_vault_tool, "_ensure_supervisor", lambda _task_id: None)
         monkeypatch.setattr(browser_vault_tool, "_current_page_origin", lambda task_id: "https://acme.test")
         monkeypatch.setattr(browser_vault_tool, "browser_vault_fill",
                             lambda handle, task_id=None: json.dumps({"success": True, "filled_fields": 1}))
@@ -946,6 +1014,7 @@ class TestSaveLoginPrompt:
         from agent.vault_backends import unlock as unlock_mod
         from tools import browser_vault_tool
 
+        monkeypatch.setattr(browser_vault_tool, "_ensure_supervisor", lambda _task_id: None)
         monkeypatch.setattr(browser_vault_tool, "_current_page_origin", lambda task_id: "https://acme.test")
         with patch("agent.vault_store.get_vault_store", return_value=store):
             unlock_mod.set_save_login_prompt_callback(lambda origin, site: None)

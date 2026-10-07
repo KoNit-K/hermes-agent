@@ -279,7 +279,8 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
             value = result_obj.get("description") or result_obj.get("unserializableValue")
         return {"ok": True, "result": value, "result_type": result_type}
 
-    def focus_page(self, origin: str, *, accept: Optional[str] = None, timeout: float = 10.0) -> Dict[str, Any]:
+    def focus_page(self, origin: str, *, accept: Optional[str] = None, timeout: float = 10.0,
+                   allow_oopif: bool = True) -> Dict[str, Any]:
         """Re-attach the supervisor's page session to an open page target on ``origin``
         (``scheme://host[:port]``). The initial attach picks the FIRST page target, but tools
         that open their own tabs (browser_exec) put the login form somewhere else. With
@@ -318,7 +319,10 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                 if accept:
                     probe = await self._cdp("Runtime.evaluate", {"expression": accept, "returnByValue": True},
                                             session_id=sid, timeout=timeout)
-                    if not probe.get("result", {}).get("result", {}).get("value"):
+                    if not probe.get("result", {}).get("result", {}).get("value") and not allow_oopif:
+                        await self._cdp("Target.detachFromTarget", {"sessionId": sid}, timeout=timeout)
+                        continue
+                    if not probe.get("result", {}).get("result", {}).get("value") and allow_oopif:
                         # A vault form may live in a cross-origin OOPIF. Only
                         # inspect frame ids returned by THIS top-level page's
                         # frame tree: arbitrary attached iframe targets must
@@ -421,6 +425,11 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
             return _schedule(_focus(), loop, timeout=timeout + 1)
         except Exception as exc:
             return _err(exc)
+
+    def focus_top_level_page(self, origin: str, *, accept: Optional[str] = None,
+                             timeout: float = 10.0) -> Dict[str, Any]:
+        """Focus a matching top-level page without probing remote child frames."""
+        return self.focus_page(origin, accept=accept, timeout=timeout, allow_oopif=False)
 
     # ── Supervisor loop internals ────────────────────────────────────────────
 
