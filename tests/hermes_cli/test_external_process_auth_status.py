@@ -80,6 +80,26 @@ def test_external_process_status_finds_user_local_cli_outside_backend_path(
     assert resolve_external_process_provider_credentials("copilot-acp")["command"] == str(cli)
 
 
+def test_external_process_status_resolves_relative_configured_path_from_cwd(
+    tmp_path, monkeypatch, _clean_copilot_env
+):
+    """An operator's relative command path keeps resolving against the launch cwd."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli = bin_dir / ("copilot.exe" if os.name == "nt" else "copilot")
+    cli.write_text("", encoding="utf-8")
+    cli.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "backend-bin"))
+    monkeypatch.setenv("HERMES_COPILOT_ACP_COMMAND", os.path.join(".", "bin", cli.name))
+
+    status = get_external_process_provider_status("copilot-acp")
+
+    assert status["configured"] is True
+    assert status["resolved_command"] == str(cli)
+    assert resolve_external_process_provider_credentials("copilot-acp")["command"] == str(cli)
+
+
 @pytest.mark.platforms("posix")
 @pytest.mark.parametrize("preferred", ["claude-prefix", "user-local", "path", "explicit"])
 def test_external_process_claude_resolution_preserves_precedence(
