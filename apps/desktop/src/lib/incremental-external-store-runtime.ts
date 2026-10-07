@@ -104,11 +104,22 @@ export function syncRepositoryIncrementally(
   // reports tool activity. Keep only a visible, running stream tail: settled
   // rows remain subject to authoritative deletion, and a disjoint thread swap
   // still rebuilds from the incoming transcript.
-  const liveTail = existing.at(-1)?.message
+  const liveTailItem = existing.at(-1)
+  const liveTail = liveTailItem?.message
+  const incomingTailId = incoming.at(-1)?.message.id ?? null
+  const hasAuthoritativeReplacement = liveTailItem && incoming.some(({ message, parentId }) => (
+    parentId === liveTailItem.parentId &&
+    message.role === 'assistant' &&
+    message.status.type !== 'running'
+  ))
 
   const preservedLiveAssistantId = disjoint
     ? null
-    : liveTail && isVisibleLiveAssistant(liveTail) && !incomingIds.has(liveTail.id)
+    : liveTail &&
+        headId === incomingTailId &&
+        !hasAuthoritativeReplacement &&
+        isVisibleLiveAssistant(liveTail) &&
+        !incomingIds.has(liveTail.id)
       ? liveTail.id
       : null
 
