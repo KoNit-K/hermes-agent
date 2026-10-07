@@ -5,7 +5,10 @@ six minutes; two CLIs launched 12 s apart both ran it.
 """
 
 import importlib
+import json
+import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -113,3 +116,49 @@ def test_async_review_keeps_claim_until_worker_finishes(env, monkeypatch):
             if thread.name == "curator-review":
                 thread.join(timeout=5)
     assert not curator._run_claim_path().exists()
+
+
+def test_failed_async_thread_start_releases_claim(env, monkeypatch):
+    curator = env["curator"]
+    monkeypatch.setattr(curator, "should_run_now", lambda now=None: True)
+
+    def _fail_start(self):
+        raise RuntimeError("simulated thread start failure")
+
+    monkeypatch.setattr(threading.Thread, "start", _fail_start)
+    assert curator.maybe_run_curator() is None
+    assert not curator._run_claim_path().exists()
+
+
+def test_live_curator_owner_is_not_reclaimed_just_because_its_lock_is_old(env):
+    curator = env["curator"]
+    claim = curator._claim_run()
+    assert claim is not None
+    lock = curator._run_claim_path()
+    os.utime(lock, (time.time() - 7200, time.time() - 7200))
+
+    assert curator._claim_run() is None
+    assert lock.exists()
+
+    curator._release_run_claim(claim)
+    assert not lock.exists()
+
+
+def test_stale_dead_claim_is_recovered_and_old_owner_cannot_release_successor(env):
+    curator = env["curator"]
+    first = curator._claim_run()
+    assert first is not None
+    lock = curator._run_claim_path()
+    (lock / "owner.json").write_text(
+        json.dumps({"pid": 999_999_999, "started_at": 0, "token": first.token}), encoding="utf-8"
+    )
+    os.utime(lock, (time.time() - 7200, time.time() - 7200))
+
+    second = curator._claim_run()
+    assert second is not None and second.token != first.token
+
+    curator._release_run_claim(first)
+    assert lock.exists(), "a late callback must not remove a newer generation"
+
+    curator._release_run_claim(second)
+    assert not lock.exists()

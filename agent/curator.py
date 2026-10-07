@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import re
+import secrets
+import shutil
 import threading
 import time
 from collections import Counter
@@ -1168,37 +1170,102 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
 _CLAIM_STALE_SECONDS = 3600.0
 
 
+class _RunClaim(NamedTuple):
+    token: str
+
+
+def _run_claim_owner(lock: Path) -> Dict[str, Any]:
+    """Read the bounded owner record; legacy single-file locks only carry a PID."""
+    try:
+        if lock.is_dir():
+            raw = (lock / "owner.json").read_text(encoding="utf-8")[:4096]
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        return {"pid": int(lock.read_text(encoding="utf-8")[:32].strip())}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _run_claim_owner_is_live(owner: Dict[str, Any]) -> bool:
+    """Fail closed unless a recorded PID is proven gone or has been recycled."""
+    try:
+        pid = int(owner.get("pid"))
+        import psutil
+    except (TypeError, ValueError):
+        return False
+    except Exception:
+        # Access denied and transient process-table failures are not proof that
+        # the holder died. Preserve mutual exclusion rather than overlap work.
+        return True
+    try:
+        process = psutil.Process(pid)
+        expected_start = owner.get("started_at")
+        return expected_start is None or abs(process.create_time() - float(expected_start)) < 1.0
+    except psutil.NoSuchProcess:
+        return False
+    except Exception:
+        # Access denied and transient process-table failures are not proof that
+        # the holder died. Preserve mutual exclusion rather than overlap work.
+        return True
+
+
 def _run_claim_path() -> Path:
     return get_hermes_home() / "skills" / ".locks" / "curator-run"
 
 
-def _claim_run() -> bool:
+def _claim_run() -> Optional[_RunClaim]:
     """One automatic pass per home across processes: two CLIs launched seconds apart both saw the
-    weekly interval elapsed and both pruned the tree. O_EXCL create wins the claim; a claim older than
-    an hour is a crashed holder and is taken over. When the lock dir cannot be created, run anyway."""
+    weekly interval elapsed and both pruned the tree. A directory create wins the claim; the owner
+    record prevents an active long review from being stolen only because its lock is old. When the
+    lock dir cannot be created, run anyway."""
     lock = _run_claim_path()
     try:
         lock.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
-        return True
+        return _RunClaim("unlocked")
     try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        lock.mkdir()
     except FileExistsError:
         try:
-            if time.time() - lock.stat().st_mtime > _CLAIM_STALE_SECONDS:
-                lock.unlink()
+            stale = time.time() - lock.stat().st_mtime > _CLAIM_STALE_SECONDS
+            if stale and not _run_claim_owner_is_live(_run_claim_owner(lock)):
+                if lock.is_dir():
+                    shutil.rmtree(lock)
+                else:  # upgrade the pre-owner-record file lock on first recovery
+                    lock.unlink()
                 return _claim_run()
         except OSError:
             pass
-        return False
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(str(os.getpid()))
-    return True
+        return None
+
+    token = secrets.token_hex(16)
+    try:
+        import psutil
+
+        started_at = psutil.Process(os.getpid()).create_time()
+        (lock / "owner.json").write_text(
+            json.dumps({"pid": os.getpid(), "started_at": started_at, "token": token}), encoding="utf-8"
+        )
+    except Exception:
+        with contextlib.suppress(OSError):
+            lock.rmdir()
+        return None
+    return _RunClaim(token)
 
 
-def _release_run_claim() -> None:
-    with contextlib.suppress(OSError):
-        _run_claim_path().unlink()
+def _release_run_claim(claim: _RunClaim) -> None:
+    """Release only the generation this worker acquired; never unlink a successor's lock."""
+    if claim.token == "unlocked":
+        return
+    lock = _run_claim_path()
+    if not lock.is_dir() or _run_claim_owner(lock).get("token") != claim.token:
+        return
+    try:
+        (lock / "owner.json").unlink()
+        lock.rmdir()
+    except OSError:
+        # A failed release remains recoverable through the stale, dead-owner path.
+        pass
 
 
 def maybe_run_curator(*, idle_for_seconds: Optional[float] = None, on_summary: Optional[Callable[[str], None]] = None) -> Optional[Dict[str, Any]]:
@@ -1207,12 +1274,15 @@ def maybe_run_curator(*, idle_for_seconds: Optional[float] = None, on_summary: O
         # Idle gating: only enforce when the caller provided a measurement.
         if not should_run_now() or (idle_for_seconds is not None and idle_for_seconds < get_min_idle_hours() * 3600.0):
             return None
-        if not _claim_run():  # the holder's own pass is the one counted; every tick would re-count it
+        claim = _claim_run()
+        if claim is None:  # the holder's own pass is the one counted; every tick would re-count it
             return None
         try:
-            return run_curator_review(on_summary=on_summary, trigger="scheduled", _on_complete=_release_run_claim)
+            return run_curator_review(
+                on_summary=on_summary, trigger="scheduled", _on_complete=lambda: _release_run_claim(claim)
+            )
         except Exception:
-            _release_run_claim()
+            _release_run_claim(claim)
             raise
     except Exception as e:
         logger.debug("maybe_run_curator failed: %s", e, exc_info=True)
