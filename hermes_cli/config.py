@@ -1381,6 +1381,8 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     else:
         migration_failed = run_migrations(
             current_ver, results, quiet, unversioned=not has_explicit_version)
+        if migration_failed:
+            results["migration_failed"] = True
 
     _disable_suspicious_mcp_servers(results, quiet)
     _warn_invalid_platform_toolsets(results, quiet)

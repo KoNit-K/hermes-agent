@@ -844,6 +844,7 @@ def run_migrations(
                 migration_fn(results, quiet)
             except Exception as exc:
                 migration_failed = True
+                results.setdefault("pending_migrations", []).append(target_ver)
                 # A malformed nested value in one step must not abort the rest of the
                 # ladder (config loading itself fails otherwise). Loud, not silent.
                 warning = f"config migration to v{target_ver} failed and was skipped: {exc}"
