@@ -320,6 +320,9 @@ def test_fresh_claim_discards_previous_run_heartbeat_before_stale_sweep(
 
         monkeypatch.setattr(_kb.time, "time", lambda: fresh_now)
         assert kb.claim_task(conn, task_id, claimer=f"{host}:fresh") is not None
+        assert conn.execute(
+            "SELECT last_heartbeat_at FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["last_heartbeat_at"] == fresh_now
         conn.execute(
             "UPDATE tasks SET worker_pid = ?, claim_expires = ? WHERE id = ?",
             (12345, fresh_now - 1, task_id),
@@ -334,6 +337,23 @@ def test_fresh_claim_discards_previous_run_heartbeat_before_stale_sweep(
 
         assert kb.release_stale_claims(conn) == 0
         assert terminated == []
+
+
+def test_review_claim_seeds_its_own_heartbeat(kanban_home, monkeypatch):
+    """Review claims use the same CAS helper and must arm the stale backstop."""
+    import hermes_cli.kanban_db as _kb
+
+    now = 42_000
+    monkeypatch.setattr(_kb.time, "time", lambda: now)
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="review heartbeat", assignee="a")
+        conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (task_id,))
+        host = _kb._claimer_id().split(":", 1)[0]
+
+        assert kb.claim_review_task(conn, task_id, claimer=f"{host}:reviewer") is not None
+        assert conn.execute(
+            "SELECT last_heartbeat_at FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["last_heartbeat_at"] == now
 
 
 
