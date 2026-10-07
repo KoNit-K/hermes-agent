@@ -3432,9 +3432,12 @@ class _StreamingCall(StreamingWaitMonitor):
         if finish_reason is None and not content_parts and not reasoning_parts and not refusal_parts and not tool_calls_acc:
             raise EmptyStreamError(
                 "Provider returned an empty stream with no finish_reason (possible upstream error or malformed SSE response).")
-        if has_truncated_tool_args:
-            # Unrepairable args must never reach dispatch, even with a terminal finish_reason.
-            # Retain chunked retry for every incomplete call; only missing finish_reason is clean EOF.
+        if has_truncated_tool_args and finish_reason != "length":
+            # Unrepairable args must never reach dispatch.  A provider-confirmed
+            # output cap is different: retain that response so the length recovery
+            # can retry the same tool call with a higher output budget.  Other
+            # terminal reasons (and a missing reason) cannot establish an output
+            # cap, so replace their calls with the non-executable stream stub.
             _dropped_names = [(tool_calls_acc[idx]["function"]["name"] or "?") for idx in sorted(tool_calls_acc)]
             logger.warning(
                 "Stream ended with incomplete or unrepairable tool call arguments "
