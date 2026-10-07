@@ -84,6 +84,31 @@ def test_prepare_goal_prompt_selects_goal_adapted_hint(monkeypatch):
     assert captured["cron_hint"] == _GOAL_CRON_HINT
 
 
+def test_goal_watchdog_passes_prior_turn_history_to_the_agent(monkeypatch):
+    import cron.scheduler as scheduler
+
+    calls = []
+
+    class Agent:
+        def run_conversation(self, prompt, *, task_id, conversation_history=None):
+            calls.append((prompt, task_id, conversation_history))
+            return {"messages": [{"role": "assistant", "content": prompt}]}
+
+    monkeypatch.setenv("HERMES_CRON_TIMEOUT", "0")
+    first = scheduler._run_agent_with_watchdog(
+        Agent(), "assembled context", {}, "goal-job", "goal job", "cron:goal-job", None,
+    )
+    scheduler._run_agent_with_watchdog(
+        Agent(), "continue", {}, "goal-job", "goal job", "cron:goal-job", None,
+        conversation_history=first["messages"],
+    )
+
+    assert calls == [
+        ("assembled context", "cron:goal-job", None),
+        ("continue", "cron:goal-job", [{"role": "assistant", "content": "assembled context"}]),
+    ]
+
+
 def test_run_goal_turns_continues_until_the_judge_finishes(monkeypatch):
     decisions = iter((
         {"should_continue": True, "continuation_prompt": "continue", "message": "keep going"},

@@ -1865,7 +1865,7 @@ def _raise_inactivity_timeout(agent, job_name: str, limit_s: float) -> None:
 
 def _run_agent_with_watchdog(
     agent, prompt: str, job: dict, job_id: str, job_name: str, task_id: str, cancel_event,
-    worker_state: Optional[dict] = None,
+    worker_state: Optional[dict] = None, conversation_history: Optional[list[dict]] = None,
 ) -> dict:
     """Run ``agent.run_conversation`` on a worker thread under the inactivity (not wall-clock)
     watchdog: default 600s, override HERMES_CRON_TIMEOUT, 0 = unlimited."""
@@ -1909,7 +1909,8 @@ def _run_agent_with_watchdog(
     # Carry scheduler-scoped ContextVar state (e.g. env passthrough) into the worker thread.
     _cron_context = contextvars.copy_context()
     _cron_future = _cron_pool.submit(
-        _cron_context.run, agent.run_conversation, prompt, task_id=task_id)
+        _cron_context.run, agent.run_conversation, prompt, task_id=task_id,
+        conversation_history=conversation_history)
     if worker_state is not None:
         worker_state["future"] = _cron_future
     _inactivity_timeout = False
@@ -2514,11 +2515,19 @@ def run_job(
                 session_id=cron_goal_session_id(job_id), default_max_turns=default_max_turns,
             )
 
+            goal_history: Optional[list[dict]] = None
+
             def _run_goal_turn(turn_prompt: str) -> dict:
-                return _run_agent_with_watchdog(
+                nonlocal goal_history
+                turn_result = _run_agent_with_watchdog(
                     agent, turn_prompt, job, job_id, job_name, scope.task_id, cancel_event,
                     worker_state=_worker_state,
+                    conversation_history=goal_history,
                 )
+                messages = turn_result.get("messages")
+                if isinstance(messages, list):
+                    goal_history = messages
+                return turn_result
 
             def _goal_response(result: dict) -> str:
                 return _final_response_from_result(result, job_id, job_name, AIAgent)
