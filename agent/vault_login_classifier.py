@@ -320,6 +320,15 @@ def build_fill_js(fills: List[Dict[str, Any]], expected_origin: str, nonce: str 
 
 _FILL_JS_TEMPLATE = """(() => {
   const expectedOrigin = __EXPECTED_ORIGIN__;
+  // location.origin describes the URL, not the sandboxed document's
+  // effective principal. Opaque documents can retain an HTTPS URL.
+  try {
+    const parsedOrigin = new URL(expectedOrigin);
+    if (!["http:", "https:"].includes(parsedOrigin.protocol) || parsedOrigin.origin !== expectedOrigin ||
+        self.origin === "null" || self.origin !== expectedOrigin) {
+      return JSON.stringify({ refused: "origin_changed", found: self.origin });
+    }
+  } catch (_) { return JSON.stringify({ refused: "origin_changed", found: null }); }
   if (window.location.origin !== expectedOrigin) {
     return JSON.stringify({ refused: "origin_changed", found: window.location.origin });
   }

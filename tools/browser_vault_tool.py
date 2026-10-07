@@ -230,11 +230,36 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[tuple[
             top_level_origin = normalize_origin(str(focused.get("url") or ""))
         except Exception:
             return None
-    child_origin = str(focused.get("frame_origin") or top_level_origin)
+    from agent.vault_store import VaultError, normalize_origin
+    from urllib.parse import urlsplit
+
+    # An explicit empty/opaque child is a refusal, not a request to use the
+    # top-level origin or fall back to another document.
+    raw_child_origin = str(focused.get("frame_origin", top_level_origin))
+    child_origin = normalize_origin(raw_child_origin)
+    parsed_child = urlsplit(raw_child_origin)
+    if (parsed_child.scheme.lower() not in {"http", "https"}
+            or parsed_child.username is not None or parsed_child.password is not None
+            or any(c.isspace() or c == "\\" for c in raw_child_origin)
+            or parsed_child.path not in {"", "/"} or parsed_child.query or parsed_child.fragment):
+        raise VaultError("child frame requires a valid HTTP(S) origin")
+    if ":" in parsed_child.hostname:
+        # normalize_origin predates IPv6 origins and omits their brackets.
+        host = parsed_child.hostname.lower()
+        child_origin = child_origin.replace(f"//{host}", f"//[{host}]", 1)
     route = focused.get("route") if child_origin != top_level_origin else None
     if route is not None and not isinstance(route, dict):
         return None
     return top_level_origin, child_origin, route
+
+
+def _focus_allowed_origin(task_id: str, allowed: list[str], kind: str):
+    """Select one document; a selected invalid origin aborts the search."""
+    for candidate in allowed:
+        focused = _focus_bound_origin(task_id, candidate, kind)
+        if focused:
+            return focused
+    return None
 
 
 def _eval_js_in_route(task_id: str, expression: str, route: Dict[str, str]) -> Dict[str, Any]:
@@ -325,12 +350,16 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
     """Ask the user (masked prompt on their surface) for the login of the CURRENT page, store it in the local
     vault bound to that origin, and fill the password at once. The values never enter the conversation."""
     from agent.vault_backends.unlock import can_prompt_here, get_save_login_prompt_callback
-    from agent.vault_store import get_vault_store
+    from agent.vault_store import VaultError, get_vault_store
 
     effective_task_id = task_id or "default"
     # The supervisor's default page session is whatever tab it attached to first (on Browser Use that is
     # the daemon's blank tab); the login form lives in the tab with a password field, so focus that one.
-    focused = _focus_bound_origin(effective_task_id, "", "login")
+    try:
+        focused = _focus_bound_origin(effective_task_id, "", "login")
+    except (VaultError, ValueError):
+        return json.dumps({"success": False, "error_type": "invalid_frame_origin",
+                           "error": "Refused: the selected frame has no valid HTTP(S) origin."})
     # When the form is in an OOPIF, the active CDP session is the child so a
     # location read would name the identity provider. A login saved from that
     # form belongs to the selected top-level site instead.
@@ -453,7 +482,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
         select_password_fill,
     )
     from agent.vault_backends import UnlockRequired, backend_for_handle
-    from agent.vault_store import ADDRESS_FIELDS, PAYMENT_FIELDS, scrub_secret_from_text
+    from agent.vault_store import ADDRESS_FIELDS, PAYMENT_FIELDS, VaultError, scrub_secret_from_text
 
     effective_task_id = task_id or "default"
     backend = backend_for_handle(handle)
@@ -494,11 +523,13 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     page_origin = None
     fill_origin = None
     frame_route = None
-    for candidate in allowed:
-        focused = _focus_bound_origin(effective_task_id, candidate, meta.kind)
-        if focused:
-            page_origin, fill_origin, frame_route = focused
-            break
+    try:
+        focused = _focus_allowed_origin(effective_task_id, allowed, meta.kind)
+    except (VaultError, ValueError):
+        return json.dumps({"success": False, "error_type": "invalid_frame_origin",
+                           "error": "Refused: the selected frame has no valid HTTP(S) origin. Nothing was resolved or written."})
+    if focused:
+        page_origin, fill_origin, frame_route = focused
     page_origin = page_origin or _current_page_origin(effective_task_id)
     fill_origin = fill_origin or page_origin
     if not page_origin:

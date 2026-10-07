@@ -94,6 +94,7 @@ def chrome_cdp(tmp_path):
             "--disable-gpu",
             "--site-per-process",  # force OOPIFs for cross-origin iframes
             "--host-resolver-rules=MAP *.test 127.0.0.1",
+            "--no-proxy-server",  # local fixtures must not inherit the host's proxy
             # The .test TLD is HSTS-preloaded.  This temporary, test-only
             # profile accepts the fixture's ephemeral self-signed certificate.
             "--ignore-certificate-errors",
@@ -222,13 +223,19 @@ def cross_site_pages():
             pass
 
         def do_GET(self):  # noqa: N802
-            if self.path in {"/rp", "/rp-idp"}:
+            if self.path in {"/rp-sandbox", "/rp-sandbox-spoof"}:
+                child_path = "login-spoof" if self.path.endswith("-spoof") else "login"
+                body = ("<!doctype html><iframe id=idp sandbox='allow-scripts allow-forms' "
+                        "src='https://idp.test:%d/%s'></iframe>" % (server.server_port, child_path))
+            elif self.path in {"/rp", "/rp-idp"}:
                 evil = ("<iframe id=evil src='https://evil.test:%d/login'></iframe>" % server.server_port
                         if self.path == "/rp" else "")
                 body = ("<!doctype html>" + evil
                         + "<iframe id=idp src='https://idp.test:%d/login'></iframe>" % server.server_port)
             else:
                 body = "<input type=password id=password>"
+                if self.path == "/login-spoof":
+                    body += "<script>self.origin = location.origin</script>"
             self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
             self.wfile.write(body.encode())
 
@@ -300,7 +307,7 @@ def _top_body(cdp_url: str, target_id: str) -> str:
             await ws.send(json.dumps({"id": 1, "method": "Target.attachToTarget", "params": {"targetId": target_id, "flatten": True}}))
             while (m := json.loads(await ws.recv())).get("id") != 1:
                 pass
-            await ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {"expression": "document.body.innerHTML", "returnByValue": True}, "sessionId": m["result"]["sessionId"]}))
+            await ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate", "params": {"expression": "document.body ? document.body.innerHTML : ''", "returnByValue": True}, "sessionId": m["result"]["sessionId"]}))
             while (m := json.loads(await ws.recv())).get("id") != 2:
                 pass
             return str(m["result"]["result"]["value"])
@@ -359,16 +366,24 @@ def test_cross_site_frames_are_real_oopifs(chrome_cdp, supervisor_registry, cros
         with supervisor._state_lock:
             frames = list(supervisor._frames.values())
         top_frame_id = str((_top_frame_tree(cdp_url, target_id).get("frame") or {}).get("id") or "")
-        top_children = [f for f in frames if f.parent_frame_id == top_frame_id]
+        top_children = [f for f in frames if f.parent_frame_id == top_frame_id and f.is_oopif and f.cdp_session_id]
         if len(top_children) == 2 and all(f.is_oopif and f.cdp_session_id for f in top_children):
             break
         time.sleep(.1)
-    children = [f for f in frames if f.parent_frame_id == top_frame_id]
+    # Frame events may retain provisional local records after the OOPIF swap.
+    # Verify the two live remote documents, including their CDP identity.
+    children = [f for f in frames if f.parent_frame_id == top_frame_id and f.is_oopif and f.cdp_session_id]
     assert len(children) == 2, [
         (f.frame_id, f.origin, f.url, f.is_oopif, f.cdp_session_id)
         for f in frames
     ]
     assert all(f.is_oopif and f.cdp_session_id for f in children)
+    live_frames = [_top_frame_tree(cdp_url, f.frame_id)["frame"] for f in children]
+    assert {f["id"] for f in live_frames} == {f.frame_id for f in children}
+    assert {f["parentId"] for f in live_frames} == {top_frame_id}
+    assert {f["securityOrigin"] for f in live_frames} == {
+        f"https://idp.test:{cross_site_pages}", f"https://evil.test:{cross_site_pages}",
+    }
     snapshot = supervisor.snapshot().frame_tree
     assert snapshot["top"]["frame_id"] == top_frame_id
     assert {child["frame_id"] for child in snapshot["children"]} >= {f.frame_id for f in children}
@@ -425,6 +440,59 @@ def test_browser_vault_fill_uses_real_oopif_route(chrome_cdp, supervisor_registr
         "document.querySelector('#password').value === 'oopif-test-canary'", route=route,
     )
     assert check == {"ok": True, "result": True, "result_type": "boolean"}
+
+
+@pytest.mark.parametrize("spoof_origin", [False, True])
+def test_browser_vault_rejects_real_sandboxed_oopif(chrome_cdp, supervisor_registry, cross_site_pages, spoof_origin):
+    """An opaque document must not obtain consent or receive a password."""
+    from tools import browser_vault_tool
+    from unittest.mock import Mock
+
+    cdp_url, _port = chrome_cdp
+    task_id = "pytest-live-vault-sandbox"
+    supervisor = supervisor_registry.get_or_start(task_id=task_id, cdp_url=cdp_url)
+    path = "rp-sandbox-spoof" if spoof_origin else "rp-sandbox"
+    target_id = _navigate(cdp_url, f"https://rp.test:{cross_site_pages}/{path}")
+    body = _top_body(cdp_url, target_id)
+    assert 'sandbox="allow-scripts allow-forms"' in body, body[:1000]
+    deadline = time.monotonic() + 5
+    child = None
+    while time.monotonic() < deadline:
+        with supervisor._state_lock:
+            child = next((f for f in supervisor._frames.values() if f.is_oopif and f.cdp_session_id), None)
+        if child is not None and 'id="password"' in _top_body(cdp_url, child.frame_id):
+            break
+        time.sleep(.1)
+    assert child is not None
+    top_origin = f"https://rp.test:{cross_site_pages}"
+    meta = SimpleNamespace(id="sandbox-login", kind="login", origin=top_origin,
+                           allowed_origins=[top_origin], label="Sandbox", has_otp=False)
+    backend = Mock(needs_unlock=False, name="test-backend")
+    backend.name = "test"
+    backend.get_meta.return_value = meta
+    backend.resolve_password.return_value = "must-not-be-resolved"
+    with patch("agent.vault_backends.backend_for_handle", return_value=backend), \
+         patch("tools.approval_prompt.request_elicitation_consent", return_value="accept") as consent, \
+         patch.object(browser_vault_tool, "_eval_js_in_route", wraps=browser_vault_tool._eval_js_in_route) as inspect, \
+         patch.object(browser_vault_tool, "_eval_js_secret", wraps=browser_vault_tool._eval_js_secret) as fill:
+        result = json.loads(browser_vault_tool.browser_vault_fill(meta.id, task_id=task_id))
+    assert result.get("error_type") == "invalid_frame_origin", (result, _top_frame_tree(cdp_url, child.frame_id))
+    consent.assert_not_called()
+    backend.resolve_password.assert_not_called()
+    inspect.assert_not_called()
+    fill.assert_not_called()
+    with supervisor._state_lock:
+        child = supervisor._frames[child.frame_id]
+        route = {"page_session_id": supervisor._page_session_id, "frame_id": child.frame_id,
+                 "frame_session_id": child.cdp_session_id, "frame_loader_id": child.loader_id}
+    witness = supervisor.evaluate_runtime(
+        "JSON.stringify({origin: self.origin, locationOrigin: location.origin, value: document.querySelector('#password').value})",
+        route=route,
+    )
+    assert witness["ok"], witness
+    observed = json.loads(witness["result"])
+    assert observed["origin"] == (observed["locationOrigin"] if spoof_origin else "null"), observed
+    assert observed["value"] == "", observed
 
 
 def test_browser_vault_decline_never_resolves_real_evil_oopif(chrome_cdp, supervisor_registry, cross_site_pages):

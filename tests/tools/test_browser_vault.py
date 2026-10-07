@@ -257,6 +257,38 @@ class TestClassifier:
 # ---------------------------------------------------------------------------
 
 class TestBrowserVaultTools:
+    @pytest.mark.parametrize("child_origin", [
+        "null", "", "not-an-origin", "file://host", "ftp://idp.test", "https://idp.test:bad",
+        "https://", "https://user@idp.test", "https://idp.test/path", "https://idp.test?x=1",
+        "https://idp.test#fragment", "https://idp.test\\evil", "https://idp. test",
+    ])
+    def test_invalid_child_origin_refuses_before_consent_or_resolution(self, store, child_origin):
+        from tools import browser_vault_tool
+        from unittest.mock import Mock
+
+        meta = _add_login(store)
+        backend = Mock(needs_unlock=False)
+        backend.get_meta.return_value = meta
+        supervisor = Mock()
+        supervisor.focus_page.return_value = {
+            "ok": True, "url": "https://example.com/login", "frame_origin": child_origin,
+            "route": {"page_session_id": "top", "frame_id": "child", "frame_session_id": "child-session"},
+        }
+        with patch("agent.vault_backends.backend_for_handle", return_value=backend), \
+             patch.object(browser_vault_tool, "_ensure_supervisor", return_value=supervisor), \
+             patch.object(browser_vault_tool, "_current_page_origin") as fallback, \
+             patch("tools.approval_prompt.request_elicitation_consent", return_value="accept") as consent, \
+             patch.object(browser_vault_tool, "_eval_js_in_route") as inspect, \
+             patch.object(browser_vault_tool, "_eval_js_secret") as fill:
+            result = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+
+        assert result["error_type"] == "invalid_frame_origin"
+        backend.resolve_password.assert_not_called()
+        consent.assert_not_called()
+        inspect.assert_not_called()
+        fill.assert_not_called()
+        fallback.assert_not_called()
+
     @pytest.mark.parametrize(("kind", "secret"), [
         ("payment", _CARD),
         ("address", _ADDRESS),
@@ -368,7 +400,10 @@ class TestBrowserVaultTools:
         assert "https://www.espn.com" in prompt[0]
         assert "https://evil.example" in prompt[0]
 
-    def test_supervisor_focuses_only_an_oopif_owned_by_the_selected_page(self, monkeypatch):
+    @pytest.mark.parametrize(("child_origin", "probe_failure"), [
+        ("https://login.example", None), ("null", None), ("", None), ("", "world"), ("", "probe"),
+    ])
+    def test_supervisor_focuses_only_an_oopif_owned_by_the_selected_page(self, monkeypatch, child_origin, probe_failure):
         """The OOPIF probe must use the selected page's frame tree, not every
         attached iframe session in the browser."""
         from tools import browser_supervisor
@@ -385,6 +420,10 @@ class TestBrowserVaultTools:
             # page's frame tree and therefore must never be probed.
             "other-frame": FrameInfo("other-frame", "https://evil.example/form",
                                       "https://evil.example", "other-top", True, "other-session"),
+            # Even a valid sibling in THIS page must not become fallback
+            # authority after the first matching child reports an empty origin.
+            "valid-sibling": FrameInfo("valid-sibling", "https://idp.test/form",
+                                        "https://idp.test", "top-frame", True, "sibling-session"),
         }
         supervisor._frames["child-frame"].loader_id = "child-document"
 
@@ -396,7 +435,7 @@ class TestBrowserVaultTools:
             if method == "Page.getFrameTree":
                 if session_id == "child-session":
                     return {"result": {"frameTree": {"frame": {
-                        "id": "child-frame", "loaderId": "child-document",
+                        "id": "child-frame", "loaderId": "child-document", "securityOrigin": child_origin,
                     }}}}
                 return {"result": {"frameTree": {"frame": {"id": "top-frame"}, "childFrames": [
                     {"frame": {"id": "child-frame"}},
@@ -404,8 +443,18 @@ class TestBrowserVaultTools:
             if method == "Runtime.evaluate" and session_id == "top-session":
                 return {"result": {"result": {"value": False}}}
             if method == "Runtime.evaluate" and session_id == "child-session":
-                value = "https://login.example" if params["expression"] == "window.location.origin" else True
-                return {"result": {"result": {"value": value}}}
+                if params["expression"] == "self.origin":
+                    assert params["contextId"] == 7
+                    if probe_failure == "probe":
+                        raise RuntimeError("origin context disappeared")
+                    return {"result": {"result": {"value": child_origin}}}
+                return {"result": {"result": {"value": True}}}
+            if method == "Page.createIsolatedWorld" and session_id == "child-session":
+                assert params["frameId"] == "child-frame"
+                assert not params.get("grantUniveralAccess", False)
+                if probe_failure == "world":
+                    return {"error": {"message": "context unavailable"}}
+                return {"result": {"executionContextId": 7}}
             raise AssertionError((method, params, session_id))
 
         supervisor._cdp = fake_cdp
@@ -415,7 +464,7 @@ class TestBrowserVaultTools:
 
         result = supervisor.focus_page("https://www.espn.com", accept="hasPassword")
         assert result["ok"] is True
-        assert result["frame_origin"] == "https://login.example"
+        assert result["frame_origin"] == child_origin
         assert result["route"] == {"page_session_id": "top-session", "frame_id": "child-frame",
                                    "frame_session_id": "child-session", "frame_loader_id": "child-document"}
         # The persistent page session remains the selected relying party.
@@ -565,7 +614,12 @@ class TestBrowserVaultTools:
         assert "s3cret-pw" not in raw
         assert out["filled_fields"] == 1
 
-    def test_fill_routes_a_bound_top_level_login_to_its_oopif(self, store):
+    @pytest.mark.parametrize(("child_origin", "expected_origin"), [
+        ("https://cdn.registerdisney.go.com", "https://cdn.registerdisney.go.com"),
+        ("HTTPS://CDN.RegisterDisney.Go.Com:443", "https://cdn.registerdisney.go.com"),
+        ("https://[::1]:8443", "https://[::1]:8443"),
+    ])
+    def test_fill_routes_a_bound_top_level_login_to_its_oopif(self, store, child_origin, expected_origin):
         """A password field in a cross-origin OOPIF is inspected and written
         through that frame's CDP session, while the vault binding remains the
         exact top-level site that embedded it."""
@@ -583,7 +637,7 @@ class TestBrowserVaultTools:
                 assert origin == "https://www.espn.com"
                 assert accept == browser_vault_tool._TAB_PROBES["login"]
                 return {"ok": True, "url": "https://www.espn.com/login/",
-                        "frame_origin": "https://cdn.registerdisney.go.com",
+                        "frame_origin": child_origin,
                         "route": {"page_session_id": "top", "frame_id": "idp", "frame_session_id": "idp-session"}}
 
         def fake_eval(task_id, expression, *_route):
@@ -602,7 +656,7 @@ class TestBrowserVaultTools:
         out = json.loads(raw)
         assert out["success"] is True
         assert out["origin"] == "https://www.espn.com"
-        assert '"https://cdn.registerdisney.go.com"' in secret_exprs[0]
+        assert json.dumps(expected_origin) in secret_exprs[0]
         assert '"https://www.espn.com"' in secret_exprs[0]
         assert "s3cret-pw" not in raw
 

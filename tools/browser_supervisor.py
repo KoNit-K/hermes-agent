@@ -303,6 +303,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
 
         async def _focus() -> Dict[str, Any]:
             from agent.vault_store import normalize_origin
+            from websockets.exceptions import WebSocketException
             targets = (await self._cdp("Target.getTargets", timeout=timeout)).get("result", {}).get("targetInfos", [])
             candidates = []
             for t in targets:
@@ -391,15 +392,30 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                                 session_id=frame.cdp_session_id, timeout=timeout,
                             )
                             if child_probe.get("result", {}).get("result", {}).get("value"):
-                                origin_probe = await self._cdp(
-                                    "Runtime.evaluate", {"expression": "window.location.origin", "returnByValue": True},
-                                    session_id=frame.cdp_session_id, timeout=timeout,
-                                )
-                                child_origin = str(origin_probe.get("result", {}).get("result", {}).get("value") or "")
-                                if child_origin:
-                                    child_session = frame.cdp_session_id
-                                    child_loader_id = loader_id
-                                    break
+                                # The effective principal can be opaque despite
+                                # an HTTPS location/securityOrigin. Probe in an
+                                # isolated world so page code cannot replace
+                                # self.origin to grant itself vault authority.
+                                try:
+                                    world = await self._cdp(
+                                        "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": "hermes-vault-origin"},
+                                        session_id=frame.cdp_session_id, timeout=timeout,
+                                    )
+                                    origin_probe = await self._cdp(
+                                        "Runtime.evaluate", {"expression": "self.origin", "returnByValue": True,
+                                                             "contextId": world["result"]["executionContextId"]},
+                                        session_id=frame.cdp_session_id, timeout=timeout,
+                                    )
+                                    child_origin = str(origin_probe.get("result", {}).get("result", {}).get("value") or "")
+                                except (KeyError, TypeError, RuntimeError, TimeoutError, WebSocketException):
+                                    # Failed provenance cannot become a request
+                                    # to try another credential destination.
+                                    child_origin = ""
+                                # Even an empty origin selects this document;
+                                # the vault refuses it without sibling fallback.
+                                child_session = frame.cdp_session_id
+                                child_loader_id = loader_id
+                                break
                         if child_session is None:
                             await self._cdp("Target.detachFromTarget", {"sessionId": sid}, timeout=timeout)
                             continue
