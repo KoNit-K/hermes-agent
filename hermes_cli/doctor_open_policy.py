@@ -45,8 +45,12 @@ def _check_open_platform_toolsets_for_config(
             continue
         dm_env, group_env, allow_all_env = policy_env
         extra = platform_config.extra or {}
-        dm_policy = str(extra.get("dm_policy") or env_get(dm_env) or "pairing").strip().lower()
-        group_policy = str(extra.get("group_policy") or env_get(group_env) or "pairing").strip().lower()
+        dm_policy = str(
+            extra.get("dm_policy") or (env_get(dm_env) if dm_env else None) or "pairing"
+        ).strip().lower()
+        group_policy = str(
+            extra.get("group_policy") or (env_get(group_env) if group_env else None) or "pairing"
+        ).strip().lower()
         if dm_policy != "open" and group_policy != "open":
             continue
         if not _is_allow_all_enabled(env_get, allow_all_env):
