@@ -209,6 +209,29 @@ def test_all_provider_pins_do_not_resolve_an_unused_default_route():
     assert run_batch.call_args.args[0].children[0][2].provider != "unavailable-default"
 
 
+def test_all_provider_pins_keep_background_batch_metadata_without_default_creds():
+    """Detached dispatch keeps its model label without resolving unused credentials."""
+    parent = _make_mock_parent()
+
+    def check_background_batch(batch, background):
+        assert background is True
+        assert batch.creds == {"model": parent.model, "provider": parent.provider}
+        return '{"status": "built"}'
+
+    with (
+        patch("tools.delegate_tool._load_config", return_value={"provider": "unavailable-default"}),
+        patch("tools.delegate_tool._resolve_delegation_credentials", side_effect=_route_resolver_with_unavailable_default),
+        patch("tools.delegate_tool._build_child_preserving_parent_tools", side_effect=lambda **_kwargs: _ok_child()),
+        patch("tools.delegate_tool._run_batch", side_effect=check_background_batch),
+    ):
+        raw = delegate_task(
+            tasks=[{"goal": "Research topic A with enough length", "provider": "lmstudio-x121"}],
+            background=True, parent_agent=parent,
+        )
+
+    assert json.loads(raw) == {"status": "built"}
+
+
 def test_model_pin_uses_its_effective_route_without_resolving_default_model():
     """A model pin still validates its inherited provider but not its unused model."""
     parent = _make_mock_parent()
