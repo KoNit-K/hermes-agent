@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 # The delegate_tool_* siblings hold the pieces split out of this module; every name callers or patching tests reach as
 # ``tools.delegate_tool.<name>`` is re-imported here. Mutable flag globals live only in their owning module.
 from tools.delegate_tool_child_run import (  # noqa: F401
-    _ChildRun, _attach_child, _build_child_goal_message, _build_result_entry, _dump_subagent_timeout_diagnostic, _fabricated_entry,
+    _ChildRun, _attach_child, _build_child_goal_message, _build_result_entry, _close_child, _detach_child,
+    _dump_subagent_timeout_diagnostic, _fabricated_entry,
     _lease_child_credential, _merge_late_steer, _register_child, _start_heartbeat, _validate_child_output_schema,
 )
 from tools.delegate_tool_config import (  # noqa: F401
@@ -420,13 +421,13 @@ def _child_credential_overrides(creds_i: Dict[str, Any], routing_cfg: Dict[str, 
 
 
 def _resolve_task_credentials(
-    task: Dict[str, Any], creds: Dict[str, Any], routing_cfg: Dict[str, Any], parent_agent,
+    task: Dict[str, Any], creds: Optional[Dict[str, Any]], routing_cfg: Dict[str, Any], parent_agent,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Batch creds, or a per-task overlay when ``provider``/``model`` is a non-empty string."""
     pin_provider = _task_route_pin(task.get("provider"))
     pin_model = _task_route_pin(task.get("model"))
     if not pin_provider and not pin_model:
-        return creds, routing_cfg
+        return creds or _resolve_delegation_credentials(routing_cfg, parent_agent), routing_cfg
     overlay = dict(routing_cfg)
     if pin_provider:
         overlay["provider"] = pin_provider
@@ -436,8 +437,33 @@ def _resolve_task_credentials(
     return _resolve_delegation_credentials(overlay, parent_agent), overlay
 
 
+def _task_has_route_pin(task: Dict[str, Any]) -> bool:
+    return bool(_task_route_pin(task.get("provider")) or _task_route_pin(task.get("model")))
+
+
+def _batch_route_metadata(parent_agent) -> Dict[str, Any]:
+    """Labels for logs/background dispatch when every task resolves its own route.
+
+    These are deliberately not a credential bundle: resolving an unused default
+    merely to populate batch metadata would make fully pinned work depend on the
+    parent's authentication.
+    """
+    return {
+        "model": getattr(parent_agent, "model", None),
+        "provider": getattr(parent_agent, "provider", None),
+    }
+
+
+def _rollback_built_children(parent_agent, children: List[tuple]) -> None:
+    """Release only children returned while this batch was being prepared."""
+    for _, _, child in children:
+        _close_child(child, "Failed to close child while rolling back delegation batch")
+        with _quiet("Failed to detach child while rolling back delegation batch", exc_info=True):
+            _detach_child(parent_agent, child)
+
+
 def _build_children(
-    task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
+    task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Optional[Dict[str, Any]], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[List[Optional[List[str]]]] = None,
 ) -> tuple[List[tuple], Optional[str]]:
@@ -445,14 +471,21 @@ def _build_children(
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
-    children = []
-    for i, t in enumerate(task_list):
-        _task_schema = task_schemas[i] if i < len(task_schemas) else None
-        _child_context = t.get("context")
-        if _task_schema is not None:
-            _child_context = append_output_contract(_child_context, _task_schema)
+    resolved_routes = []
+    for t in task_list:
         try:
-            creds_i, routing_i = _resolve_task_credentials(t, creds, routing_cfg, parent_agent)
+            resolved_routes.append(_resolve_task_credentials(t, creds, routing_cfg, parent_agent))
+        except ValueError as exc:
+            return [], str(exc)
+
+    children = []
+    try:
+        for i, t in enumerate(task_list):
+            creds_i, routing_i = resolved_routes[i]
+            _task_schema = task_schemas[i] if i < len(task_schemas) else None
+            _child_context = t.get("context")
+            if _task_schema is not None:
+                _child_context = append_output_contract(_child_context, _task_schema)
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
@@ -460,28 +493,29 @@ def _build_children(
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
                 **_child_credential_overrides(creds_i, routing_i),
             )
-        except ValueError as exc:
-            return [], str(exc)
-        if _task_schema is not None:
-            with _quiet("Could not attach output schema to child %d", i):
-                child._delegate_output_schema = _task_schema
-        # Validated per-task images; absent on image-less tasks, which keep the text-only goal turn.
-        _t_images = task_images[i] if task_images and i < len(task_images) else None
-        if _t_images:
-            with _quiet("Could not attach images to child %d", i):
-                child._delegate_images = _t_images
-        # Tee progress events into the live transcript (wrapper keeps the
-        # _flush contract and swallows writer failures).
-        _writer = live_writers[i] if i < len(live_writers) else None
-        if _writer is not None:
-            child.tool_progress_callback = wrap_progress_callback(getattr(child, "tool_progress_callback", None), _writer)
-            child._live_transcript_path = str(_writer.path)
-        if live_deleg_id:
-            setattr(child, "_delegation_id", live_deleg_id)
-            _ident_ref = getattr(child, "_progress_identity_ref", None)
-            if isinstance(_ident_ref, dict):
-                _ident_ref["delegation_id"] = live_deleg_id
-        children.append((i, t, child))
+            children.append((i, t, child))
+            if _task_schema is not None:
+                with _quiet("Could not attach output schema to child %d", i):
+                    child._delegate_output_schema = _task_schema
+            # Validated per-task images; absent on image-less tasks, which keep the text-only goal turn.
+            _t_images = task_images[i] if task_images and i < len(task_images) else None
+            if _t_images:
+                with _quiet("Could not attach images to child %d", i):
+                    child._delegate_images = _t_images
+            # Tee progress events into the live transcript (wrapper keeps the
+            # _flush contract and swallows writer failures).
+            _writer = live_writers[i] if i < len(live_writers) else None
+            if _writer is not None:
+                child.tool_progress_callback = wrap_progress_callback(getattr(child, "tool_progress_callback", None), _writer)
+                child._live_transcript_path = str(_writer.path)
+            if live_deleg_id:
+                setattr(child, "_delegation_id", live_deleg_id)
+                _ident_ref = getattr(child, "_progress_identity_ref", None)
+                if isinstance(_ident_ref, dict):
+                    _ident_ref["delegation_id"] = live_deleg_id
+    except BaseException:
+        _rollback_built_children(parent_agent, children)
+        raise
     return children, None
 
 
@@ -559,12 +593,6 @@ def delegate_task(
     # a per-call routing owner shaped like the delegation config section. Keep
     # the route and its fallback policy together through child construction.
     routing_cfg = credentials_cfg if credentials_cfg is not None else cfg
-    try:
-        creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
-    except ValueError as exc:
-        # Explicit-pin preflight failures (e.g. pinned delegation.command missing from PATH) refuse the
-        # spawn loudly (#80450).
-        return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
     if not err:
@@ -576,6 +604,16 @@ def delegate_task(
     err = _oneshot_spawn_budget(parent_agent, len(task_list))
     if err:
         return tool_error(err)
+
+    default_creds = None
+    if any(not _task_has_route_pin(task) for task in task_list):
+        try:
+            default_creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
+        except ValueError as exc:
+            # An unpinned task genuinely inherits this route, so its failure
+            # must reject the complete batch before any child is allocated.
+            return tool_error(str(exc))
+    creds = default_creds or _batch_route_metadata(parent_agent)
 
     overall_start = time.monotonic()
     # Live transcripts: cache/delegation/live/<id>/task-<n>.log per task, a side channel with zero effect on message
