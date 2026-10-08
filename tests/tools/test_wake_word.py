@@ -65,6 +65,63 @@ def test_looks_like_path():
     assert not _looks_like_path("hey_jarvis")
 
 
+def test_sherpa_tokenization_args_select_documented_layouts(tmp_path):
+    from tools.wake_word_engines import _sherpa_tokenization_args
+
+    bpe = tmp_path / "bpe"
+    bpe.mkdir()
+    (bpe / "bpe.model").write_bytes(b"x")
+
+    phone = tmp_path / "phone"
+    phone.mkdir()
+    (phone / "en.phone").write_text("A AH0", encoding="utf-8")
+
+    wenetspeech = tmp_path / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+    wenetspeech.mkdir()
+
+    assert _sherpa_tokenization_args(bpe) == {
+        "tokens_type": "bpe",
+        "bpe_model": str(bpe / "bpe.model"),
+    }
+    assert _sherpa_tokenization_args(phone) == {
+        "tokens_type": "phone+ppinyin",
+        "lexicon": str(phone / "en.phone"),
+    }
+    assert _sherpa_tokenization_args(wenetspeech) == {"tokens_type": "ppinyin"}
+
+
+@pytest.mark.parametrize(
+    "name,assets",
+    [
+        ("unverified-character-model", ()),
+        ("sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-renamed", ()),
+        ("ambiguous-bpe-phone", ("bpe.model", "en.phone")),
+        ("ambiguous-many-phone", ("en.phone", "zh.phone")),
+    ],
+)
+def test_sherpa_tokenization_args_reject_unverified_or_ambiguous_layouts(tmp_path, name, assets):
+    from tools.wake_word_engines import _sherpa_tokenization_args
+
+    model_dir = tmp_path / name
+    model_dir.mkdir()
+    for asset in assets:
+        (model_dir / asset).write_text("x", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="supported layouts"):
+        _sherpa_tokenization_args(model_dir)
+
+
+def test_sherpa_tokenization_args_reject_assets_that_conflict_with_wenetspeech(tmp_path):
+    from tools.wake_word_engines import _sherpa_tokenization_args
+
+    model_dir = tmp_path / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+    model_dir.mkdir()
+    (model_dir / "bpe.model").write_bytes(b"x")
+
+    with pytest.raises(RuntimeError, match="conflicts with its documented ppinyin layout"):
+        _sherpa_tokenization_args(model_dir)
+
+
 @pytest.mark.parametrize("system,machine,expected", [
     ("win32", "ARM64", "sherpa"),
     ("win32", "AMD64", "openwakeword"),
