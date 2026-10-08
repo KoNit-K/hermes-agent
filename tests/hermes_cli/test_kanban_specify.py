@@ -120,6 +120,40 @@ def test_specify_task_rewrites_body_only_when_explicitly_requested(kanban_home):
     assert task.body == "**Goal**\nA concrete goal."
 
 
+def test_specify_task_fills_an_empty_body_without_rewrite_opt_in(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rough", body="   ", triage=True)
+
+    content = jsonlib.dumps({"title": "Refined rough", "body": "**Goal**\nA concrete goal."})
+    p, _ = _patch_aux_client(content)
+    with p:
+        outcome = spec.specify_task(tid, author="ace")
+
+    assert outcome.ok is True
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+    assert task.body == "**Goal**\nA concrete goal."
+    specified = next(event for event in events if event.kind == "specified")
+    assert specified.payload == {"changed_fields": ["title", "body"]}
+
+
+def test_specify_task_does_not_promote_empty_body_without_usable_output(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rough", body=None, triage=True)
+
+    p, _ = _patch_aux_client(jsonlib.dumps({"title": "Refined rough", "body": "  "}))
+    with p:
+        outcome = spec.specify_task(tid, author="ace")
+
+    assert outcome.ok is False
+    assert outcome.reason == "LLM response missing a usable body for an empty card"
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+    assert task.status == "triage"
+    assert task.body is None
+
+
 def test_specify_task_malformed_response_preserves_existing_body(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="rough", body="Must not be replaced", triage=True)

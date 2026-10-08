@@ -213,20 +213,26 @@ def specify_task(
     if raw is None:
         return SpecifyOutcome(task_id, False, reason)
     raw = raw.strip()
+    has_existing_body = bool((task.body or "").strip())
 
     parsed = _extract_json_blob(raw)
     if parsed is None:
         if not raw:
             return SpecifyOutcome(task_id, False, "LLM returned an empty response")
-        # A malformed response has no trustworthy title.  Preserve the card
-        # body unless the caller deliberately opted in to accepting raw output.
+        # A malformed response has no trustworthy title. Preserve an existing
+        # card body, but do not promote an empty card on unstructured output.
+        if not has_existing_body and not rewrite_body:
+            return SpecifyOutcome(task_id, False, "LLM returned an unusable response for an empty body")
+        # Callers that deliberately opted in may still accept raw output.
         new_title, new_body = None, raw if rewrite_body else None
     else:
         new_title, new_body = _title_body(parsed)
         if new_body is None and new_title is None:
             return SpecifyOutcome(task_id, False, "LLM response missing title and body")
-        if not rewrite_body:
+        if not rewrite_body and has_existing_body:
             new_body = None
+        if not rewrite_body and not has_existing_body and not (new_body and new_body.strip()):
+            return SpecifyOutcome(task_id, False, "LLM response missing a usable body for an empty card")
 
     with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(
