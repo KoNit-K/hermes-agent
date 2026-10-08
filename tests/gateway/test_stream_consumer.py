@@ -371,6 +371,56 @@ class TestSegmentBreakOnToolBoundary:
 
 
     @pytest.mark.asyncio
+    async def test_single_message_mode_keeps_preview_id_across_two_tool_boundaries(self):
+        """Both tool boundaries must continue editing the original Telegram preview."""
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        initial_preview_sent = asyncio.Event()
+        first_boundary_finalized = asyncio.Event()
+        second_boundary_finalized = asyncio.Event()
+
+        async def _send(*_args, **_kwargs):
+            initial_preview_sent.set()
+            return SimpleNamespace(success=True, message_id="preview_1")
+
+        async def _edit(*_args, **kwargs):
+            if kwargs["content"] == "Before tool. ":
+                first_boundary_finalized.set()
+            elif kwargs["content"] == "Before tool. After first tool. ":
+                second_boundary_finalized.set()
+            return SimpleNamespace(success=True)
+
+        adapter.send = AsyncMock(side_effect=_send)
+        adapter.edit_message = AsyncMock(side_effect=_edit)
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_123",
+            StreamConsumerConfig(
+                edit_interval=0.01, buffer_threshold=5, single_message_per_turn=True,
+            ),
+        )
+
+        task = asyncio.create_task(consumer.run())
+        consumer.on_delta("Before tool. ")
+        await asyncio.wait_for(initial_preview_sent.wait(), timeout=1)
+        consumer.on_delta(None)
+        await asyncio.wait_for(first_boundary_finalized.wait(), timeout=1)
+        consumer.on_delta("After first tool. ")
+        consumer.on_delta(None)
+        await asyncio.wait_for(second_boundary_finalized.wait(), timeout=1)
+        consumer.on_delta("After second tool.")
+        consumer.finish("Before tool. After first tool. After second tool.")
+        await task
+
+        assert adapter.send.await_count == 1
+        assert {call.kwargs["message_id"] for call in adapter.edit_message.call_args_list} == {
+            "preview_1",
+        }
+        assert adapter.edit_message.call_args_list[-1].kwargs["content"] == (
+            "Before tool. After first tool. After second tool."
+        )
+
+
+    @pytest.mark.asyncio
     async def test_segment_break_removes_cursor(self):
         """The finalized segment message should not have a cursor."""
         adapter = MagicMock()
