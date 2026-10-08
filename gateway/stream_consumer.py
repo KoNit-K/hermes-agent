@@ -883,7 +883,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     async def _deliver_commentary(self, commentary_text: str) -> None:
         """Post commentary as its own message.  Cumulative transports keep the stream going —
         resetting _accumulated would break the append-only invariant / lose text."""
-        cumulative = self._cumulative_transport()
+        cumulative = self._cumulative_transport() or self.cfg.single_message_per_turn
         if not cumulative:
             self._reset_segment_state()
         await self._send_commentary(commentary_text)
