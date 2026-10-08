@@ -217,6 +217,7 @@ class TestClassicInjection:
         "command",
         [
             "cat ~/.env",
+            "cat .env.local",
             "cat ~/.aws/credentials",
             "cat ~/.netrc",
             "cat ~/.pgpass",
@@ -225,8 +226,35 @@ class TestClassicInjection:
     def test_read_secrets_with_standalone_cat_command(self, command):
         assert "read_secrets" in scan_for_threats(command, scope="all")
 
-    def test_read_secrets_does_not_match_cat_inside_command_name(self):
-        command = "pw-cat --record --target=systemd.environment"
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pw-cat --record --target=systemd.environment",
+            "mycat .env",
+        ],
+    )
+    def test_read_secrets_does_not_match_cat_inside_command_name(self, command):
+        assert "read_secrets" not in scan_for_threats(command, scope="all")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/usr/bin/cat /app/.env",
+            'sh -c "cat .env"',
+        ],
+    )
+    def test_read_secrets_recognises_path_and_quoted_cat_commands(self, command):
+        assert "read_secrets" in scan_for_threats(command, scope="all")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat foo.environment",
+            "cat systemd.environment",
+            "cat programs.caelestia.systemd.environment",
+        ],
+    )
+    def test_read_secrets_does_not_match_environment_filenames(self, command):
         assert "read_secrets" not in scan_for_threats(command, scope="all")
 
     def test_html_comment_injection(self):
