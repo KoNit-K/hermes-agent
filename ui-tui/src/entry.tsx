@@ -9,7 +9,11 @@ import { setRpcErrorLogSink } from './app/userMessages.js'
 import { DASHBOARD_TUI_MODE, NATIVE_MODE, TERMUX_TUI_MODE } from './config/env.js'
 import { GatewayClient } from './gatewayClient.js'
 import { messages } from './i18n/runtime.js'
-import { ignoredSignalsForTuiMode, setupGracefulExit } from './lib/gracefulExit.js'
+import {
+  ignoredSignalsForTuiMode,
+  nextDeadOutputStreamErrorCount,
+  setupGracefulExit
+} from './lib/gracefulExit.js'
 import { formatBytes, type HeapDumpResult, performHeapDump } from './lib/memory.js'
 import { type MemorySnapshot, startMemoryMonitor } from './lib/memoryMonitor.js'
 import { openExternalUrl } from './lib/openExternalUrl.js'
@@ -90,8 +94,10 @@ setupGracefulExit({
     // the gateway child keeps running. Bail out for real after a few in a row.
     const code = (err as NodeJS.ErrnoException)?.code
 
-    if (code === 'EIO' || code === 'EPIPE') {
-      if (++consecutiveDeadStreamErrors >= 5) {
+    consecutiveDeadStreamErrors = nextDeadOutputStreamErrorCount(consecutiveDeadStreamErrors, code)
+
+    if (consecutiveDeadStreamErrors > 0) {
+      if (consecutiveDeadStreamErrors >= 5) {
         recordParentLifecycle(`dead output stream (${code} x${consecutiveDeadStreamErrors}) → exiting`)
         void gw.kill('dead-output-stream')
         process.exit(1)
@@ -99,8 +105,6 @@ setupGracefulExit({
 
       return
     }
-
-    consecutiveDeadStreamErrors = 0
 
     try {
       process.stderr.write(`hermes-tui lifecycle ${scope}: ${message.slice(0, 2000)}\n`)
