@@ -220,10 +220,9 @@ class TestResumeGuardBoundsWhatResumeLoads:
     def test_guard_counts_deduped_compaction_generations_not_raw_copies(self, db):
         """In-place compaction copies the protected tail into every generation.
 
-        The display reader dedupes those copies by the stored 6-tuple
-        (role, content, timestamp, tool_call_id, tool_calls, tool_name).
-        The guard must count the same logical keys — not raw SQL rows —
-        or a 4.7k-message chat is refused at the 20k raw-row limit.
+        This fixture has no later cleanup, so the actual display reader is an
+        independent oracle for the storage-identity count. The guard must not
+        count raw SQL rows, or a 4.7k-message chat is refused at the 20k limit.
         """
         sid = _compact_in_place(
             db, "chat", epochs=4, turns=4, tail_count=2, rewind_tail=False
@@ -234,21 +233,53 @@ class TestResumeGuardBoundsWhatResumeLoads:
             "AND (active = 1 OR compacted = 1)",
             (sid,),
         )[0]
-        logical = db._read_one(
-            "SELECT COUNT(*) FROM ("
-            "SELECT 1 FROM messages WHERE session_id = ? "
-            "AND (active = 1 OR compacted = 1) "
-            "GROUP BY role, content, timestamp, tool_call_id, tool_calls, tool_name)",
-            (sid,),
-        )[0]
-
         assert raw > len(display)
-        assert raw > logical
-        # raw > limit >= logical: pre-fix refuses on the raw count; post-fix accepts.
-        limit = logical
-        assert raw > limit >= logical
-        assert db.assert_resume_safe(sid, max_messages=limit) <= limit
-        assert db.get_resume_message_count(sid) == logical
+        # raw > limit == display length: pre-fix refuses; storage-identity count accepts.
+        limit = len(display)
+        assert raw > limit
+        assert db.assert_resume_safe(sid, max_messages=limit) == limit
+        assert db.get_resume_message_count(sid) == limit
+
+        from hermes_state import SessionResumeTooLargeError
+
+        with pytest.raises(SessionResumeTooLargeError):
+            db.assert_resume_safe(sid, max_messages=limit - 1)
+
+    def test_guard_is_conservative_after_live_view_normalization_and_cleanup(self, db):
+        """The SQL contract is a stored-identity upper bound, not final display length.
+
+        Composite summary carriers normalize their dedupe key to their live
+        user view, while the reader also strips legacy review harness rows.
+        Neither transformation is expressible by this narrow SQL query, so
+        both fixtures document the intentional fail-closed difference.
+        """
+        from agent.context_compressor import HISTORICAL_TASK_HEADING, SUMMARY_PREFIX, _SUMMARY_END_MARKER
+
+        db.create_session("carrier", source="desktop")
+        db.append_message("carrier", "user", "REAL ASK", timestamp=1)
+        db.append_message(
+            "carrier", "user",
+            f"{SUMMARY_PREFIX}\n{HISTORICAL_TASK_HEADING}\nold task\n\n"
+            f"{_SUMMARY_END_MARKER}\n\nREAL ASK",
+            timestamp=1,
+        )
+        _, carrier_display = db.get_resume_conversations("carrier")
+
+        assert len(carrier_display) == 1
+        assert db.get_resume_message_count("carrier") == 2
+
+        db.create_session("cleanup", source="desktop")
+        db.append_message("cleanup", "user", "keep")
+        db.append_message("cleanup", "assistant", "kept reply")
+        db.append_message(
+            "cleanup", "user",
+            "Review the conversation above and update the skill library.",
+        )
+        db.append_message("cleanup", "assistant", "curator reply")
+        _, cleanup_display = db.get_resume_conversations("cleanup")
+
+        assert len(cleanup_display) == 2
+        assert db.get_resume_message_count("cleanup") == 4
 
     def test_guard_still_rejects_when_logical_count_exceeds_limit(self, db):
         """CONTROL: a session that is logically over the limit still refuses."""

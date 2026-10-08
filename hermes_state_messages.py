@@ -1033,10 +1033,13 @@ class SessionMessagesMixin:
     ) -> int:
         """Count the rows a resume in this scope would materialize.
 
-        Full-lineage matches ``_dedupe_display_generations``' stored 6-tuple so
-        in-place compaction copies of the protected tail count once. ``tip_only``
-        stays a raw ``active = 1`` count. ``limit`` is the guard's
-        ``max_messages+1`` SQL short-circuit — do not pull the full row set.
+        Full-lineage groups the stored 6-tuple used by
+        ``_dedupe_display_generations`` so in-place compaction copies of the
+        protected tail count once. It is deliberately a conservative bound:
+        user-carrier normalization and later display cleanup can produce fewer
+        displayed messages. ``tip_only`` stays a raw ``active = 1`` count.
+        ``limit`` caps grouped result rows for the guard; SQLite may still scan
+        or aggregate more source rows before applying it.
         """
         placeholders = _placeholders(session_ids)
         group_by = "" if tip_only else (
