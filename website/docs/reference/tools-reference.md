@@ -12,7 +12,7 @@ This page documents Hermes' built-in tools, grouped by toolset. Availability var
 
 `desktop_ui` belongs to the desktop app session, not to a conversation regardless of where it
 began. Consequently, resuming or continuing a desktop conversation in the CLI or TUI removes
-preview-pane tools such as `read_preview` and `drive_preview`; it does not transfer the rendered
+preview-pane tools such as `desktop_preview` and `drive_preview`; it does not transfer the rendered
 pane to that surface. TUI and CLI sessions can still use the separate `browser` toolset with
 `/browser connect <url>` to drive a Chromium-family browser through CDP.
 
@@ -243,7 +243,7 @@ silently providing a browser view outside the desktop app.
 | `focus_pane` | Reveal and focus a pane in the Hermes desktop app (chat, files, terminal, review, sessions). | — |
 | `react_to_message` | React to a message with a single emoji, iMessage-tapback style. Opt-in via Settings → Appearance (`display.message_reactions`). | — |
 | `gui_tour` | Give a live guided tour: dim the screen, highlight an element, and attach a narrated popover (driver.js). Works on the Hermes app's own UI and on any page open in the preview pane. `start` with no steps runs the app's built-in tour (`preset` `quick` or `full`, default `full`). For a custom tour, `targets` discovers what's on screen, `show` narrates step-by-step, and `start` with `steps` hands the user Next/Prev controls. | — |
-| `show_tip` | Point at one element with a small accent bubble and an arrow — the quiet sibling of `gui_tour`, with no dimming, no spotlight, and no Next/Prev. Same `data-tour` handles and the same `tour(action='targets')` discovery call. | — |
+| `show_tip` | Point at one element with a small accent bubble and an arrow — the quiet sibling of `gui_tour`, with no dimming, no spotlight, and no Next/Prev. Same `data-tour` handles and the same `gui_tour(action='targets')` discovery call. | — |
 | `apply_layout` | Apply a saved layout preset to the Hermes desktop app when the user asks to rearrange the workspace. Built-ins: default (chat + sidebars), focus (chat only), terminal-deck, quad; plugin/user presets by id. To reveal ONE pane, use `focus_pane` instead. | — |
 
 ### Tours
@@ -421,4 +421,3 @@ Registered only on the `hermes-yuanbao` platform toolset. Yuanbao is Tencent's c
 | `yb_send_dm` | Send a private/direct message to a user in a group, with optional media files. | Yuanbao credentials |
 | `yb_search_sticker` | Search the built-in Yuanbao sticker (TIM face) catalogue by keyword. | Yuanbao credentials |
 | `yb_send_sticker` | Send a built-in sticker to the current Yuanbao chat. | Yuanbao credentials |
-
