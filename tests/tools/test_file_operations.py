@@ -637,6 +637,10 @@ class _DeletedTestGitBaselineCheck:
 # Atomic write: failed swaps clean temporary siblings
 # =========================================================================
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="failed-mv shim requires POSIX executable and PATH lookup semantics",
+)
 class TestAtomicWriteFailureCleanup:
     """A failed rename must leave the original file and no Hermes temp sibling."""
 
@@ -645,34 +649,57 @@ class TestAtomicWriteFailureCleanup:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         failing_mv = bin_dir / "mv"
-        failing_mv.write_text("#!/bin/sh\nexit 1\n")
+        mv_args = tmp_path / "mv-args"
+        failing_mv.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$@" > "$HERMES_TEST_MV_ARGS"\n'
+            "exit 1\n"
+        )
         failing_mv.chmod(0o755)
-        return make_real_subprocess_env(
-            str(tmp_path),
-            process_env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        return (
+            make_real_subprocess_env(
+                str(tmp_path),
+                process_env={
+                    "HERMES_TEST_MV_ARGS": str(mv_args),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            ),
+            mv_args,
         )
 
     def test_write_file_failed_atomic_swap_cleans_temp_sibling(self, failing_mv_env, tmp_path):
+        env, mv_args = failing_mv_env
         target = tmp_path / "write.txt"
         target.write_text("original\n")
-        ops = ShellFileOperations(failing_mv_env, cwd=str(tmp_path))
+        ops = ShellFileOperations(env, cwd=str(tmp_path))
 
         result = ops.write_file(str(target), "replacement\n")
 
         assert result.error is not None
         assert target.read_text() == "original\n"
         assert not list(tmp_path.glob(".hermes-tmp.*"))
+        mv_invocation = mv_args.read_text().splitlines()
+        assert mv_invocation[0] == "-f"
+        assert Path(mv_invocation[1]).parent == tmp_path
+        assert Path(mv_invocation[1]).name.startswith(".hermes-tmp.")
+        assert mv_invocation[2] == str(target)
 
     def test_patch_replace_failed_atomic_swap_cleans_temp_sibling(self, failing_mv_env, tmp_path):
+        env, mv_args = failing_mv_env
         target = tmp_path / "patch.txt"
         target.write_text("original\n")
-        ops = ShellFileOperations(failing_mv_env, cwd=str(tmp_path))
+        ops = ShellFileOperations(env, cwd=str(tmp_path))
 
         result = ops.patch_replace(str(target), "original", "replacement")
 
         assert result.error is not None
         assert target.read_text() == "original\n"
         assert not list(tmp_path.glob(".hermes-tmp.*"))
+        mv_invocation = mv_args.read_text().splitlines()
+        assert mv_invocation[0] == "-f"
+        assert Path(mv_invocation[1]).parent == tmp_path
+        assert Path(mv_invocation[1]).name.startswith(".hermes-tmp.")
+        assert mv_invocation[2] == str(target)
 
 
 # =========================================================================
