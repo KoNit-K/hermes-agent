@@ -13,12 +13,24 @@ the matcher used by the production `patch` tool without changing tool code.
 
 ```bash
 python3 evals/edittool/test_edittool.py
-python3 evals/edittool/runner.py --label current-main
-python3 evals/edittool/report.py evals/edittool/results/current-main.json
+python3 evals/edittool/runner.py --label <verified-commit>
+python3 evals/edittool/report.py evals/edittool/results/<verified-commit>.json
 ```
 
-Treat an `applied` result as an edit that landed, `rejected` as a fail-loud
-refusal, and `no_change` as an already-applied/no-op signal. Compare the two
-arms by task rather than treating fuzzy acceptance as automatically good: the
-purpose is to expose where it rescues harmless formatting drift and where the
-anchored control deliberately refuses an edit.
+The scorecard preserves `passed` v1 as its **status** metric: `applied` means
+the matcher reported an edit, `rejected` a fail-loud refusal, and `no_change`
+an already-applied/no-op signal. `no_change` and the strict arm's `rejected`
+are intentionally distinct no-change results; the latter is not a Hermes
+loss. The v1 `artifact_correct` metric separately checks the resulting file
+contents, and records partial writes so a final `rejected` cannot hide an
+earlier hunk that changed a file.
+
+Every scorecard records the checked-out measurement, fixture, and matcher
+commit along with the local Python/platform environment. This is a
+deterministic matcher audit with no model inference: it measures neither the
+complete `patch` wrapper nor model-facing tool-schema performance. In
+particular, it does not substitute for the separate small-model experiment.
+
+Compare the two arms by task rather than treating fuzzy acceptance as
+automatically good: the purpose is to expose where it rescues harmless
+formatting drift and where the anchored control deliberately refuses an edit.

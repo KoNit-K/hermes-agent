@@ -46,6 +46,7 @@ def _apply_task(arm: str, root: Path, task: Task) -> dict:
     replace = _strict_replace if arm == "str_replace" else _hermes_replace
     outcomes: list[str] = []
     reasons: list[str] = []
+    changed_files: set[str] = set()
     for edit in task.edits:
         path = root / edit.path
         content = path.read_text(encoding="utf-8")
@@ -54,19 +55,34 @@ def _apply_task(arm: str, root: Path, task: Task) -> dict:
         reasons.append(reason)
         if outcome == "applied":
             path.write_text(updated, encoding="utf-8")
+            if updated != content:
+                changed_files.add(edit.path)
         else:
             break
     outcome = "applied" if outcomes and all(item == "applied" for item in outcomes) else outcomes[-1]
     expected = EXPECTED_OUTCOMES[arm][task.task_id]
+    artifact_mismatches = [
+        path
+        for path, expected_content in task.expected_files
+        if (root / path).read_text(encoding="utf-8") != expected_content
+    ]
+    status_matches_expected = outcome == expected
     return {
         "task_id": task.task_id,
         "capability": task.capability,
         "outcome": outcome,
         "edits_attempted": len(outcomes),
         "edits_requested": len(task.edits),
+        "edits_applied": sum(item == "applied" for item in outcomes),
+        "changed_files": sorted(changed_files),
+        "partial_write": bool(changed_files) and outcome != "applied",
         "reason": "; ".join(reasons),
         "expected": expected,
-        "passed": outcome == expected,
+        "status_matches_expected": status_matches_expected,
+        "artifact_correct": not artifact_mismatches,
+        "artifact_mismatches": artifact_mismatches,
+        # Retained for scorecard consumers: this remains the v1 status metric.
+        "passed": status_matches_expected,
     }
 
 

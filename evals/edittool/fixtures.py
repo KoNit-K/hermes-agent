@@ -29,4 +29,7 @@ def build_workspace() -> tempfile.TemporaryDirectory[str]:
     (root / "src" / "already.py").write_text(
         "STATUS = 'new'\n", encoding="utf-8"
     )
+    (root / "src" / "partial.py").write_text(
+        "FLAG = 'old'\n", encoding="utf-8"
+    )
     return workspace

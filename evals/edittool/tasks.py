@@ -18,6 +18,7 @@ class Task:
     capability: str
     edits: tuple[Edit, ...]
     notes: str
+    expected_files: tuple[tuple[str, str], ...]
 
 
 TASKS = (
@@ -26,18 +27,21 @@ TASKS = (
         "exact unique replacement",
         (Edit("src/service.py", "return value.strip()", "return value.strip().lower()"),),
         "Both arms should apply an exact, unique replacement.",
+        (("src/service.py", "def normalize(value):\n    return value.strip().lower()\n"),),
     ),
     Task(
         "indentation_drift",
         "anchored replacement versus whitespace recovery",
         (Edit("src/retry.py", "\n  return 250\n", "\n  return 500\n"),),
         "The request has two spaces while the source has four.",
+        (("src/retry.py", "def retry_delay():\n    return 500\n"),),
     ),
     Task(
         "ambiguous_match",
         "unique-match enforcement",
         (Edit("config/settings.ini", "enabled = false", "enabled = true"),),
         "Two identical settings must not silently select one section.",
+        (("config/settings.ini", "[api]\nenabled = false\n[worker]\nenabled = false\n"),),
     ),
     Task(
         "multi_hunk",
@@ -51,18 +55,37 @@ TASKS = (
             Edit("src/handlers.py", "def delete_user():", "def remove_user():"),
         ),
         "Two independent, anchored changes must both land.",
+        (
+            (
+                "src/handlers.py",
+                "def create_user():\n    validate_input()\n    pass\n\n"
+                "def remove_user():\n    # TODO: validate input\n    pass\n",
+            ),
+        ),
     ),
     Task(
         "already_applied",
         "no-op / already-applied detection",
         (Edit("src/already.py", "STATUS = 'old'", "STATUS = 'new'"),),
         "The desired text is already present; the arm should say so loudly.",
+        (("src/already.py", "STATUS = 'new'\n"),),
     ),
     Task(
         "missing_anchor",
         "failure loudness",
         (Edit("src/service.py", "return value.trim()", "return value"),),
         "A materially wrong anchor must be rejected instead of drifting.",
+        (("src/service.py", "def normalize(value):\n    return value.strip()\n"),),
+    ),
+    Task(
+        "partial_multi_hunk",
+        "partial-write visibility",
+        (
+            Edit("src/partial.py", "FLAG = 'old'", "FLAG = 'new'"),
+            Edit("src/partial.py", "MISSING = true", "MISSING = false"),
+        ),
+        "A later failed hunk must not hide an earlier write behind a rejected outcome.",
+        (("src/partial.py", "FLAG = 'old'\n"),),
     ),
 )
 
@@ -76,6 +99,7 @@ EXPECTED_OUTCOMES = {
         "multi_hunk": "applied",
         "already_applied": "rejected",
         "missing_anchor": "rejected",
+        "partial_multi_hunk": "rejected",
     },
     "hermes_patch": {
         "anchored_replace": "applied",
@@ -84,5 +108,6 @@ EXPECTED_OUTCOMES = {
         "multi_hunk": "applied",
         "already_applied": "no_change",
         "missing_anchor": "rejected",
+        "partial_multi_hunk": "rejected",
     },
 }
