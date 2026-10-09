@@ -1564,6 +1564,65 @@ class TestCuaDriverSessionReconnect:
             ("call", "list_apps", {"session": "hermes-freshlabel12"}),
         ]
 
+    def test_pre_call_recovery_refreshes_label_before_first_request(self, monkeypatch):
+        """Timeout recovery can replace a label before its first post-recovery request."""
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+                self.effects = [
+                    {"isError": True, "structuredContent": {"code": "session_unavailable"}},
+                    {"isError": False},
+                    {"isError": False, "structuredContent": {"apps": []}},
+                ]
+
+            def run(self, value, timeout=None):
+                self.calls.append(value)
+                return self.effects.pop(0)
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+        monkeypatch.setattr(session, "_new_session_label", lambda: "hermes-freshlabel12", raising=False)
+        session._declared_session_id = "hermes-stale"
+        session._timeout_suspect = True
+
+        assert session.call_tool("list_apps", {"session": "hermes-stale"})["isError"] is False
+        assert bridge.calls == [
+            ("call", "start_session", {"session": "hermes-stale"}),
+            ("call", "start_session", {"session": "hermes-freshlabel12"}),
+            ("call", "list_apps", {"session": "hermes-freshlabel12"}),
+        ]
+
+    def test_rejected_fresh_label_stops_before_actual_tool_request(self, monkeypatch):
+        """A declaration rejection cannot be silently treated as an adopted label."""
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+                self.effects = [
+                    {"isError": True, "structuredContent": {"code": "session_unavailable"}},
+                    {"isError": True, "structuredContent": {"code": "permission_denied"}},
+                ]
+
+            def run(self, value, timeout=None):
+                self.calls.append(value)
+                return self.effects.pop(0)
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+        monkeypatch.setattr(session, "_new_session_label", lambda: "hermes-freshlabel12", raising=False)
+        session._declared_session_id = "hermes-stale"
+        session._timeout_suspect = True
+
+        result = session.call_tool("list_apps", {"session": "hermes-stale"})
+
+        assert result["isError"] is True
+        assert result["structuredContent"]["code"] == "session_label_recovery_failed"
+        assert session._declared_session_id == "hermes-stale"
+        assert session._retired_session_ids == set()
+        assert bridge.calls == [
+            ("call", "start_session", {"session": "hermes-stale"}),
+            ("call", "start_session", {"session": "hermes-freshlabel12"}),
+        ]
+
 
     def test_cli_fallback_reads_screenshot_from_file(self, tmp_path, monkeypatch):
         """_call_tool_via_cli must base64-read a screenshot written to disk

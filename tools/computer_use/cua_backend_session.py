@@ -427,11 +427,15 @@ class _CuaDriverSession:
         result = self._bridge.run(
             self._call_tool_async("start_session", {"session": replacement}), timeout=timeout)
         if result.get("isError") is True:
+            self._label_recovery_error = (
+                f"cua-driver fresh public session label {replacement} was rejected: "
+                f"{_logical_error_text(result)}")
             logger.warning("cua-driver fresh public session label %s was rejected: %s",
                            replacement, _logical_error_text(result))
             return False
         self._retired_session_ids.add(previous)
         self._declared_session_id = replacement
+        self._label_recovery_error = None
         return True
 
     def _live_label_args(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -443,7 +447,7 @@ class _CuaDriverSession:
         return args
 
     def _recreate_session(self, name: str, timeout: float, log_msg: str, *, restart: bool = True,
-                          clear_timeout_suspect: bool = False) -> None:
+                          clear_timeout_suspect: bool = False) -> bool:
         """Log *log_msg* (``%s`` = *name*), then either start() a dead session or (``restart``) tear
         down and rebuild the MCP lifecycle under ``_lock`` with capabilities repopulated from scratch;
         finally re-attach the declared public label inside the replacement private lifecycle."""
@@ -464,8 +468,22 @@ class _CuaDriverSession:
             if clear_timeout_suspect:
                 self._timeout_suspect = False
         if getattr(self, "_declared_session_id", None):
-            if not self._redeclare_session(timeout, "cua-driver public session label %s could not be restored: %s"):
-                self._adopt_fresh_session_label(timeout)
+            if self._redeclare_session(timeout, "cua-driver public session label %s could not be restored: %s"):
+                self._label_recovery_error = None
+            elif not self._adopt_fresh_session_label(timeout):
+                return False
+        return True
+
+    def _label_recovery_failure(self, name: str) -> Dict[str, Any]:
+        """Fail before the actual request when no current public label could be declared."""
+        message = getattr(
+            self, "_label_recovery_error",
+            "cua-driver could not restore or replace the public session label")
+        return _tool_envelope(
+            message, [],
+            {"ok": False, "code": "session_label_recovery_failed", "message": message,
+             "operation": name, "next_step": "retry_after_session_recovery"},
+            True, [])
 
     def _call_tool_via_cli(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         """Fallback transport: ``cua-driver call <tool> <json>`` subprocess. The MCP stdio bridge can persistently
@@ -503,14 +521,21 @@ class _CuaDriverSession:
         if name not in self._LIFECYCLE_CALLS:
             # A prior MCP timeout marks the session suspect (possibly wedged): recreate it so one timeout never
             # poisons the run. Healthy sessions are never restarted here.
-            if self._timeout_suspect:
-                self._recreate_session(
+            if self._timeout_suspect or getattr(self, "_label_recovery_error", None):
+                recovered = self._recreate_session(
                     name, timeout, "cua-driver session suspect after earlier MCP timeout; recreating before %s",
                     clear_timeout_suspect=True)
+                if not recovered:
+                    return self._label_recovery_failure(name)
             # A prior session may have died (MCP drop / driver crash) and reset _started.
             if not self._started:
-                self._recreate_session(
+                recovered = self._recreate_session(
                     name, timeout, "cua-driver session not active on %s; (re)starting before call", restart=False)
+                if not recovered:
+                    return self._label_recovery_failure(name)
+            # Either pre-call recovery can replace a transport-owned public label. Rebuild arguments only after
+            # recovery so the FIRST actual tool request carries that current label.
+            args = self._live_label_args(args)
         if not self._started:
             raise RuntimeError("cua-driver session not started")
         try:
