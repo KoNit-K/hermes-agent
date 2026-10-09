@@ -2,6 +2,8 @@
 
 import copy
 
+import pytest
+
 from agent.prompt_caching import (
     _apply_cache_marker,
     _build_marker,
@@ -164,6 +166,30 @@ def test_native_tool_cache_preserves_two_transaction_endpoints_with_context_pref
     assert _count_cache_markers(replanned.messages, replanned.tools) == 4
     assert history == original_history
     assert next_history == original_next_history
+    assert tools == original_tools
+
+
+@pytest.mark.parametrize("static_prefix", [None, "", "unmatched prefix"])
+def test_native_tool_cache_without_matching_prefix_uses_three_transaction_endpoints(static_prefix):
+    """Without a system marker, tools plus three completed turns fill the budget."""
+    history = [{"role": "system", "content": "system prompt"}]
+    for label in ("oldest", "prior", "current", "next"):
+        history.extend(_parallel_tool_round(label, count=1))
+    tools = _tool_heavy_native_tools()
+    original_history = copy.deepcopy(history)
+    original_tools = copy.deepcopy(tools)
+
+    plan = build_prompt_cache_plan(
+        history, tools, native_anthropic=True,
+        static_system_prefix=static_prefix, direct_native_tool_cache=True,
+    )
+
+    assert _native_marker_indexes(plan.messages) == {6, 9, 12}
+    assert plan.messages[0]["content"] == "system prompt"
+    assert plan.tools[-1]["cache_control"] == MARKER
+    assert all("cache_control" not in tool for tool in plan.tools[:-1])
+    assert _count_cache_markers(plan.messages, plan.tools) == 4
+    assert history == original_history
     assert tools == original_tools
 
 
