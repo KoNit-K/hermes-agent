@@ -265,7 +265,19 @@ class TestClassifier:
         assert "passwordForm.checkValidity()" in js
         assert "passwordForm.requestSubmit()" in js
         assert js.index("passwordForm.requestSubmit()") > js.index("setter.set.call")
-        assert 'submitted: true' in js
+        assert 'submissionRequested: true' in js
+
+    def test_build_fill_js_preserves_placeholder_like_secret_literals(self):
+        secret = 'before__EXPECTED_ORIGIN____FILLS____NONCE____SUBMIT__after\\\\"\u96ea'
+        js = build_fill_js(
+            [{"index": 0, "token": "current-password", "value": secret}],
+            expected_origin="https://example.com",
+            nonce="nonce-value",
+            submit=False,
+        )
+
+        assert json.dumps(secret) in js
+        assert "const submit = false" in js
 
     def test_build_fill_js_keeps_staged_fills_staged(self):
         js = build_fill_js(
@@ -469,7 +481,7 @@ class TestBrowserVaultTools:
 
         def fake_eval_secret(task_id, expression):
             secret_exprs.append(expression)
-            return {"success": True, "result": json.dumps({"filled": 1, "submitted": True})}
+            return {"success": True, "result": json.dumps({"filled": 1, "submissionRequested": True})}
 
         with patch("agent.vault_store.get_vault_store", return_value=store), \
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
@@ -477,9 +489,34 @@ class TestBrowserVaultTools:
             out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
 
         assert out["success"] is True
-        assert out["submitted"] is True
-        assert out["next"].startswith("Login form submitted")
+        assert out["submission_requested"] is True
+        assert out["next"].startswith("Login form submission requested")
         assert "const submit = true" in secret_exprs[0]
+
+    def test_login_fill_with_zero_fields_does_not_claim_password_was_filled(self, store):
+        from tools import browser_vault_tool
+
+        meta = _add_login(store, origin="https://example.com")
+        controls = [
+            {"autocomplete": "current-password", "formIndex": 0, "index": 0,
+             "label": "", "name": "pw", "type": "password"},
+        ]
+
+        def fake_eval(task_id, expression):
+            if "location.href" in expression:
+                return {"success": True, "result": "https://example.com/login"}
+            return {"success": True, "result": json.dumps(controls)}
+
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval), \
+             patch.object(browser_vault_tool, "_eval_js_secret",
+                          return_value={"success": True, "result": json.dumps({"filled": 0, "submissionRequested": False})}):
+            out = json.loads(browser_vault_tool.browser_vault_fill(meta.id))
+
+        assert out["success"] is False
+        assert out["filled_fields"] == 0
+        assert "Password filled" not in out["next"]
+        assert "browser_vault_enter_code" not in out["next"]
 
     def test_fill_toctou_navigation_writes_nothing(self, store):
         """P1-2 schedule regression: inspection passes on the allowed origin,

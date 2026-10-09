@@ -552,10 +552,12 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     out = {"success": bool(filled), "filled_fields": int(filled), "backend": backend.name,
            "kind": meta.kind, "origin": page_origin}
     if meta.kind == "login":
-        submitted = bool(parsed.get("submitted")) if isinstance(parsed, dict) else False
-        if submitted:
-            out["submitted"] = True
-            out["next"] = ("Login form submitted. If the site then asks for a verification code, call browser_vault_enter_code with this handle"
+        submission_requested = bool(parsed.get("submissionRequested")) if isinstance(parsed, dict) else False
+        if not filled:
+            out["next"] = "No password field was filled. Re-check the page before attempting to submit it."
+        elif submission_requested:
+            out["submission_requested"] = True
+            out["next"] = ("Login form submission requested. This does not confirm login succeeded. If the site then asks for a verification code, call browser_vault_enter_code with this handle"
                            + (" (a code will be generated automatically)." if meta.has_otp else "."))
         else:
             out["next"] = ("Password filled but the form needs additional interaction before submission. Complete it, then submit. "

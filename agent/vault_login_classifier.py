@@ -298,9 +298,17 @@ def build_fill_js(fills: List[Dict[str, Any]], expected_origin: str, nonce: str 
     payload = json.dumps(
         [{"index": f["index"], "token": f.get("token", "current-password"), "value": f["value"]} for f in fills]
     )
-    return (_FILL_JS_TEMPLATE.replace("__EXPECTED_ORIGIN__", json.dumps(expected_origin))
-            .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce))
-            .replace("__SUBMIT__", json.dumps(submit)))
+    replacements = {
+        "__EXPECTED_ORIGIN__": json.dumps(expected_origin),
+        "__FILLS__": payload,
+        "__NONCE__": json.dumps(nonce),
+        "__SUBMIT__": json.dumps(submit),
+    }
+    return re.sub(
+        r"__EXPECTED_ORIGIN__|__FILLS__|__NONCE__|__SUBMIT__",
+        lambda match: replacements[match.group()],
+        _FILL_JS_TEMPLATE,
+    )
 
 
 _FILL_JS_TEMPLATE = """(() => {
@@ -338,11 +346,11 @@ _FILL_JS_TEMPLATE = """(() => {
   }
   document.querySelectorAll("[data-hermes-vault-slot]").forEach((n) => n.removeAttribute("data-hermes-vault-slot"));
   if (!submit || !passwordForm || typeof passwordForm.requestSubmit !== "function") {
-    return JSON.stringify({ filled, submitted: false });
+    return JSON.stringify({ filled, submissionRequested: false });
   }
   if (!passwordForm.checkValidity()) {
-    return JSON.stringify({ filled, submitted: false, staged: "form_invalid" });
+    return JSON.stringify({ filled, submissionRequested: false, staged: "form_invalid" });
   }
   passwordForm.requestSubmit();
-  return JSON.stringify({ filled, submitted: true });
+  return JSON.stringify({ filled, submissionRequested: true });
 })()"""
