@@ -241,11 +241,15 @@ class _SherpaKwsEngine(_Engine):
                 **layout_args,
             )
         except ModuleNotFoundError as exc:
-            if layout_args["tokens_type"] not in {"ppinyin", "phone+ppinyin"}:
-                raise
-            raise RuntimeError(
-                "sherpa KWS pinyin tokenization needs pypinyin; install the wake-sherpa extra"
-            ) from exc
+            missing = exc.name or ""
+            if (
+                layout_args["tokens_type"] in {"ppinyin", "phone+ppinyin"}
+                and (missing == "pypinyin" or missing.startswith("pypinyin."))
+            ):
+                raise RuntimeError(
+                    "sherpa KWS pinyin tokenization needs pypinyin; install the wake-sherpa extra"
+                ) from exc
+            raise
         # sherpa keyword entries reject spaces in the @display-name; underscore them and
         # map display → profile for match routing.
         self._display_to_profile: Dict[str, str] = {}

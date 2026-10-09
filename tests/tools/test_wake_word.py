@@ -193,13 +193,26 @@ def test_sherpa_engine_uses_resolved_tokenizer_layout(monkeypatch, tmp_path, lay
 
 
 def test_sherpa_engine_explains_missing_pypinyin(monkeypatch, tmp_path):
+    missing = ModuleNotFoundError("No module named 'pypinyin'")
+    missing.name = "pypinyin"
     calls, model_dir = _install_fake_sherpa(
-        monkeypatch, tmp_path, layout="wenetspeech", error=ModuleNotFoundError("pypinyin")
+        monkeypatch, tmp_path, layout="wenetspeech", error=missing
     )
 
     with pytest.raises(RuntimeError, match=r"pypinyin.*wake-sherpa"):
         ww._SherpaKwsEngine({"phrase": "你好", "sherpa": {"model_dir": str(model_dir)}})
     assert calls["spotter"] == []
+
+
+def test_sherpa_engine_preserves_non_pypinyin_import_errors(monkeypatch, tmp_path):
+    missing = ModuleNotFoundError("No module named 'unrelated_tokenizer_dependency'")
+    missing.name = "unrelated_tokenizer_dependency"
+    _, model_dir = _install_fake_sherpa(
+        monkeypatch, tmp_path, layout="wenetspeech", error=missing
+    )
+
+    with pytest.raises(ModuleNotFoundError, match="unrelated_tokenizer_dependency"):
+        ww._SherpaKwsEngine({"phrase": "你好", "sherpa": {"model_dir": str(model_dir)}})
 
 
 def test_sherpa_engine_rejects_unknown_layout_before_creating_spotter(monkeypatch, tmp_path):
