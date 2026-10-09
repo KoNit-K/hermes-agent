@@ -211,7 +211,7 @@ def _ensure_sherpa_model(root: Optional[Path] = None) -> Path:
 
 class _SherpaKwsEngine(_Engine):
     """sherpa-onnx open-vocabulary keyword spotting — any typed phrase, zero training. ``wake_word.phrase``
-    is BPE-tokenized at runtime against the model's vocabulary: DETECTION config, not a cosmetic label."""
+    is tokenized at runtime against the model's vocabulary: DETECTION config, not a cosmetic label."""
 
     feature, section = "wake-sherpa", "sherpa"
     frame_length = 1280  # streaming zipformer accepts any chunk; match capture path.
@@ -233,8 +233,19 @@ class _SherpaKwsEngine(_Engine):
             for prof, p in ww.enrolled_profile_phrases().items():
                 phrase_map.setdefault(p.strip(), prof)
         phrases = list(phrase_map)
-        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"), tokens_type="bpe",
-                            bpe_model=str(d / "bpe.model"))
+        layout_args = _sherpa_tokenization_args(d)
+        try:
+            tokens = text2token(
+                [p.upper() for p in phrases],
+                tokens=str(d / "tokens.txt"),
+                **layout_args,
+            )
+        except ModuleNotFoundError as exc:
+            if layout_args["tokens_type"] not in {"ppinyin", "phone+ppinyin"}:
+                raise
+            raise RuntimeError(
+                "sherpa KWS pinyin tokenization needs pypinyin; install the wake-sherpa extra"
+            ) from exc
         # sherpa keyword entries reject spaces in the @display-name; underscore them and
         # map display → profile for match routing.
         self._display_to_profile: Dict[str, str] = {}

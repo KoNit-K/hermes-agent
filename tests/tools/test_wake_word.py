@@ -122,6 +122,94 @@ def test_sherpa_tokenization_args_reject_assets_that_conflict_with_wenetspeech(t
         _sherpa_tokenization_args(model_dir)
 
 
+def _install_fake_sherpa(monkeypatch, tmp_path, *, layout, error=None):
+    from tools import wake_word_engines as engines
+
+    model_dir = tmp_path / (
+        "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01"
+        if layout == "wenetspeech" else layout
+    )
+    model_dir.mkdir()
+    (model_dir / "tokens.txt").write_text("<blk> 0", encoding="utf-8")
+    for part in ("encoder", "decoder", "joiner"):
+        (model_dir / f"{part}-epoch-1.onnx").write_bytes(b"x")
+    if layout == "bpe":
+        (model_dir / "bpe.model").write_bytes(b"x")
+    elif layout == "phone":
+        (model_dir / "en.phone").write_text("A AH0", encoding="utf-8")
+    elif layout == "ambiguous":
+        (model_dir / "bpe.model").write_bytes(b"x")
+        (model_dir / "en.phone").write_text("A AH0", encoding="utf-8")
+
+    calls = {"text2token": [], "spotter": []}
+    sherpa = types.ModuleType("sherpa_onnx")
+
+    def text2token(phrases, **kwargs):
+        calls["text2token"].append(kwargs)
+        if error:
+            raise error
+        return [["token"] for _ in phrases]
+
+    class Spotter:
+        def __init__(self, **kwargs):
+            calls["spotter"].append(kwargs)
+
+        @staticmethod
+        def create_stream():
+            return object()
+
+    sherpa.text2token = text2token
+    sherpa.KeywordSpotter = Spotter
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", sherpa)
+    monkeypatch.setattr(engines, "_ensure_dep", lambda *args: None)
+    monkeypatch.setattr(
+        engines,
+        "_ww",
+        lambda: types.SimpleNamespace(
+            _get=lambda cfg, key: cfg.get(key),
+            _active_profile_name=lambda: "default",
+            enrolled_profile_phrases=lambda: {},
+            _sensitivity=lambda cfg: 0.5,
+        ),
+    )
+    return calls, model_dir
+
+
+@pytest.mark.parametrize(
+    "layout,expected",
+    [
+        ("bpe", {"tokens_type": "bpe"}),
+        ("phone", {"tokens_type": "phone+ppinyin"}),
+        ("wenetspeech", {"tokens_type": "ppinyin"}),
+    ],
+)
+def test_sherpa_engine_uses_resolved_tokenizer_layout(monkeypatch, tmp_path, layout, expected):
+    calls, model_dir = _install_fake_sherpa(monkeypatch, tmp_path, layout=layout)
+
+    ww._SherpaKwsEngine({"phrase": "hey hermes", "sherpa": {"model_dir": str(model_dir)}})
+
+    assert calls["text2token"][0].items() >= expected.items()
+    assert bool(calls["spotter"]) is True
+
+
+def test_sherpa_engine_explains_missing_pypinyin(monkeypatch, tmp_path):
+    calls, model_dir = _install_fake_sherpa(
+        monkeypatch, tmp_path, layout="wenetspeech", error=ModuleNotFoundError("pypinyin")
+    )
+
+    with pytest.raises(RuntimeError, match=r"pypinyin.*wake-sherpa"):
+        ww._SherpaKwsEngine({"phrase": "你好", "sherpa": {"model_dir": str(model_dir)}})
+    assert calls["spotter"] == []
+
+
+def test_sherpa_engine_rejects_unknown_layout_before_creating_spotter(monkeypatch, tmp_path):
+    calls, model_dir = _install_fake_sherpa(monkeypatch, tmp_path, layout="ambiguous")
+
+    with pytest.raises(RuntimeError, match="supported layouts"):
+        ww._SherpaKwsEngine({"phrase": "hey hermes", "sherpa": {"model_dir": str(model_dir)}})
+    assert calls["spotter"] == []
+
+
 @pytest.mark.parametrize("system,machine,expected", [
     ("win32", "ARM64", "sherpa"),
     ("win32", "AMD64", "openwakeword"),
