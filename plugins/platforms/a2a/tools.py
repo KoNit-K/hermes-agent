@@ -5,6 +5,7 @@ capabilities}}``. Stdlib urllib; wire format is A2A v1.0 ``SendMessage`` (v0.3 r
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import urllib.error
@@ -51,7 +52,8 @@ def _auth_header(auth: dict) -> dict:
     token = auth.get("token")
     if not token:
         token_env = auth.get("token_env")
-        token = os.getenv(token_env, "") if isinstance(token_env, str) and token_env else ""
+        token = _get_scoped_secret(token_env, "") if isinstance(token_env, str) and token_env else ""
+    token = token.strip() if isinstance(token, str) else ""
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
@@ -273,7 +275,10 @@ def a2a_orchestrate(args: dict, **_: Any) -> str:
         return f"Error: no configured peers advertise capability '{capability}'."
     results: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=min(len(matches), _ORCHESTRATE_MAX_WORKERS)) as pool:
-        futures = {pool.submit(_call_peer_sync, name, entry, message, context_id): name for name, entry in matches}
+        futures = {
+            pool.submit(contextvars.copy_context().run, _call_peer_sync, name, entry, message, context_id): name
+            for name, entry in matches
+        }
         for fut in as_completed(futures):
             name = futures[fut]
             try:
