@@ -60,6 +60,11 @@ the closing run's `metadata.completion_evidence`; rejected attempts leave the
 card running so the caller can add evidence and retry. Existing and `local-only`
 cards remain compatible and do not require evidence.
 
+This is a structured-receipt gate, not an independent evidence verifier: it
+checks only that the list is non-empty and that every item has non-empty string
+`kind` and `detail` fields. It does not execute tests, check file existence, or
+verify that receipt text is true.
+
 After publishing, pass `metadata.published_pr` to completion. The first matching
 URL binds the card permanently; retries cannot substitute a green sibling PR.
 CLI `show --json` and `kanban_show` expose the persisted contract.

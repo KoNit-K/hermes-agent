@@ -24,7 +24,7 @@ class CompletionEvidence:
 
 
 def normalize_completion_evidence(value: Any, *, required: bool) -> list[dict[str, str]]:
-    """Validate receipts without accepting free-form placeholders."""
+    """Validate and normalize receipt structure; not the underlying claim's truth."""
     if value is None:
         if required:
             raise CompletionEvidenceError(
