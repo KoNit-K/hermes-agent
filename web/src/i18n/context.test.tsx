@@ -48,7 +48,11 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root?.unmount());
   container?.remove();
-  if (originalLanguage) Object.defineProperty(navigator, "language", originalLanguage);
+  if (originalLanguage) {
+    Object.defineProperty(navigator, "language", originalLanguage);
+  } else {
+    delete (navigator as { language?: string }).language;
+  }
 });
 
 describe("I18nProvider initial locale", () => {
@@ -56,6 +60,20 @@ describe("I18nProvider initial locale", () => {
     setBrowserLanguage("ja-JP");
 
     expect(await renderLocale()).toBe("ja");
+  });
+
+  it.each([
+    ["zh-TW", "zh-hant"],
+    ["zh-HK", "zh-hant"],
+    ["zh-MO", "zh-hant"],
+    ["zh-Hant-TW", "zh-hant"],
+    ["zh-Hant", "zh-hant"],
+    ["zh-CN", "zh"],
+    ["zh-Hans", "zh"],
+  ])("resolves browser locale %s to %s", async (browserLanguage, expectedLocale) => {
+    setBrowserLanguage(browserLanguage);
+
+    expect(await renderLocale()).toBe(expectedLocale);
   });
 
   it("keeps a stored preference ahead of the browser language", async () => {
