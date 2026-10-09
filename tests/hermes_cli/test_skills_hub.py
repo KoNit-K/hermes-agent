@@ -1,4 +1,5 @@
 import json
+import argparse
 from io import StringIO
 from unittest.mock import patch
 
@@ -15,7 +16,9 @@ from hermes_cli.skills_hub import (
     do_publish,
     do_update,
     handle_skills_slash,
+    skills_command,
 )
+from hermes_cli.subcommands.skills import build_skills_parser
 
 
 class _DummyLockFile:
@@ -163,6 +166,37 @@ def test_clawhub_publish_requires_explicit_license_acceptance_before_request(tmp
     assert not success
     assert "--accept-license-terms" in message
     assert requests == []
+
+
+@pytest.mark.parametrize("accept_license_terms", [False, True])
+def test_skills_cli_publish_forwards_license_acceptance(monkeypatch, accept_license_terms):
+    parser = argparse.ArgumentParser()
+    build_skills_parser(parser.add_subparsers(dest="command"), cmd_skills=lambda args: None)
+    command = ["skills", "publish", "sample-skill", "--to", "clawhub"]
+    if accept_license_terms:
+        command.append("--accept-license-terms")
+    args = parser.parse_args(command)
+    published = {}
+    monkeypatch.setattr(
+        "hermes_cli.skills_hub.do_publish", lambda *args, **kwargs: published.update(kwargs)
+    )
+
+    skills_command(args)
+
+    assert published["accept_license_terms"] is accept_license_terms
+
+
+@pytest.mark.parametrize("accept_license_terms", [False, True])
+def test_skills_slash_publish_forwards_license_acceptance(monkeypatch, accept_license_terms):
+    published = {}
+    monkeypatch.setattr(
+        "hermes_cli.skills_hub.do_publish", lambda *args, **kwargs: published.update(kwargs)
+    )
+
+    flag = " --accept-license-terms" if accept_license_terms else ""
+    handle_skills_slash(f"/skills publish sample-skill --to clawhub{flag}")
+
+    assert published["accept_license_terms"] is accept_license_terms
 
 
 def test_clawhub_publish_requires_dedicated_token(tmp_path, monkeypatch):
