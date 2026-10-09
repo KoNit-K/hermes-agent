@@ -210,6 +210,22 @@ def test_sherpa_engine_rejects_unknown_layout_before_creating_spotter(monkeypatc
     assert calls["spotter"] == []
 
 
+def test_ppinyin_tokens_are_accepted_by_wenetspeech_fixture(tmp_path):
+    sherpa_onnx = pytest.importorskip("sherpa_onnx")
+    tokens_path = tmp_path / "tokens.txt"
+    tokens_path.write_text("<blk> 0\nn 1\nǐ 2\nh 3\nǎo 4\n", encoding="utf-8")
+
+    tokenized = sherpa_onnx.text2token(
+        ["你好"], tokens=str(tokens_path), tokens_type="ppinyin"
+    )
+
+    vocabulary = {
+        line.rsplit(maxsplit=1)[0]
+        for line in tokens_path.read_text(encoding="utf-8").splitlines()
+    }
+    assert set(tokenized[0]).issubset(vocabulary)
+
+
 @pytest.mark.parametrize("system,machine,expected", [
     ("win32", "ARM64", "sherpa"),
     ("win32", "AMD64", "openwakeword"),
