@@ -11,6 +11,7 @@ Signal, ...) silently skips the acknowledgement for mid-turn messages.
 """
 
 import importlib
+import asyncio
 import sys
 import types
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
 )
+from gateway.platforms.event import AgentTurnOutcome
 from gateway.session import SessionSource
 
 
@@ -34,6 +36,7 @@ class HookRecordingAdapter(BasePlatformAdapter):
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True, token="***"), Platform.TELEGRAM)
         self.started: list = []
+        self.start_outcomes: list = []
         self.completed: list = []
 
     async def connect(self) -> bool:
@@ -56,6 +59,7 @@ class HookRecordingAdapter(BasePlatformAdapter):
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         self.started.append(getattr(event, "message_id", None))
+        self.start_outcomes.append(getattr(event, "agent_turn_outcome", None))
 
     async def on_processing_complete(self, event, outcome) -> None:
         self.completed.append((getattr(event, "message_id", None), outcome))
@@ -93,6 +97,19 @@ class _RaisingSecondTurnAgent:
         }
 
 
+class _CancellingSecondTurnAgent:
+    calls: list = []
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None, **_kwargs):
+        type(self).calls.append(message)
+        if len(type(self).calls) >= 2:
+            raise asyncio.CancelledError("queued turn cancelled")
+        return {"final_response": "done-1", "messages": [], "api_calls": 1}
+
+
 class _FailedSecondTurnAgent:
     calls: list = []
 
@@ -112,6 +129,38 @@ class _FailedSecondTurnAgent:
             "final_response": "done-1",
             "messages": [],
             "api_calls": 1,
+        }
+
+
+class _ThreeTurnOutcomeAgent:
+    """Queues a third inbound event while the second turn runs."""
+
+    calls: list = []
+    adapter: HookRecordingAdapter | None = None
+    third_event: MessageEvent | None = None
+    second_failed = False
+    third_failed = False
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None, **_kwargs):
+        type(self).calls.append(message)
+        call_number = len(type(self).calls)
+        if call_number == 2:
+            assert type(self).adapter is not None
+            type(self).third_event = MessageEvent(
+                text="turn-c", message_type=MessageType.TEXT, source=_source(), message_id="queued-c",
+            )
+            type(self).adapter._pending_messages[SESSION_KEY] = type(self).third_event
+            failed = type(self).second_failed
+        else:
+            failed = type(self).third_failed if call_number == 3 else False
+        return {
+            "final_response": f"done-{call_number}",
+            "messages": [],
+            "api_calls": 1,
+            "failed": failed,
         }
 
 
@@ -209,12 +258,13 @@ async def test_queued_followup_failure_completes_the_hook(monkeypatch, tmp_path)
     adapter = HookRecordingAdapter()
     runner = _make_runner(adapter)
 
-    adapter._pending_messages[SESSION_KEY] = MessageEvent(
+    event = MessageEvent(
         text="the doomed follow-up",
         message_type=MessageType.TEXT,
         source=_source(),
         message_id="queued-2",
     )
+    adapter._pending_messages[SESSION_KEY] = event
 
     with pytest.raises(RuntimeError):
         await runner._run_agent(
@@ -228,6 +278,29 @@ async def test_queued_followup_failure_completes_the_hook(monkeypatch, tmp_path)
 
     assert adapter.started == ["queued-2"]
     assert adapter.completed == [("queued-2", ProcessingOutcome.FAILURE)]
+    assert event.agent_turn_outcome is AgentTurnOutcome.FAILED
+
+
+@pytest.mark.asyncio
+async def test_queued_cancellation_is_not_reported_as_semantic_success(monkeypatch, tmp_path):
+    _CancellingSecondTurnAgent.calls = []
+    _install_fake_agent(monkeypatch, tmp_path, _CancellingSecondTurnAgent)
+    adapter = HookRecordingAdapter()
+    runner = _make_runner(adapter)
+    event = MessageEvent(
+        text="the cancelled follow-up", message_type=MessageType.TEXT,
+        source=_source(), message_id="queued-cancelled",
+    )
+    adapter._pending_messages[SESSION_KEY] = event
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._run_agent(
+            message="first", context_prompt="", history=[], source=_source(),
+            session_id="sess-hooks-cancelled", session_key=SESSION_KEY,
+        )
+
+    assert event.agent_turn_failed is False
+    assert event.agent_turn_outcome is AgentTurnOutcome.CANCELLED
 
 
 @pytest.mark.asyncio
@@ -257,6 +330,45 @@ async def test_queued_delivered_failure_exposes_semantic_failure(monkeypatch, tm
 
     assert adapter.completed == [("queued-failed", ProcessingOutcome.SUCCESS)]
     assert event.agent_turn_failed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("second_failed", "third_failed"), [(True, False), (False, True)])
+async def test_each_queued_event_keeps_its_own_semantic_turn_result(
+    monkeypatch, tmp_path, second_failed, third_failed,
+):
+    """A terminal recursive result must not overwrite the previous inbound event's result."""
+    _ThreeTurnOutcomeAgent.calls = []
+    _ThreeTurnOutcomeAgent.second_failed = second_failed
+    _ThreeTurnOutcomeAgent.third_failed = third_failed
+    _ThreeTurnOutcomeAgent.third_event = None
+    _install_fake_agent(monkeypatch, tmp_path, _ThreeTurnOutcomeAgent)
+
+    adapter = HookRecordingAdapter()
+    _ThreeTurnOutcomeAgent.adapter = adapter
+    runner = _make_runner(adapter)
+    event_b = MessageEvent(
+        text="turn-b", message_type=MessageType.TEXT, source=_source(), message_id="queued-b",
+    )
+    event_b.record_agent_turn_outcome(AgentTurnOutcome.FAILED)
+    adapter._pending_messages[SESSION_KEY] = event_b
+
+    await runner._run_agent(
+        message="turn-a", context_prompt="", history=[], source=_source(),
+        session_id="semantic-owner", session_key=SESSION_KEY,
+    )
+
+    assert _ThreeTurnOutcomeAgent.calls == ["turn-a", "turn-b", "turn-c"]
+    assert adapter.start_outcomes == [AgentTurnOutcome.UNKNOWN, AgentTurnOutcome.UNKNOWN]
+    assert event_b.agent_turn_failed is second_failed
+    assert event_b.agent_turn_outcome is (
+        AgentTurnOutcome.FAILED if second_failed else AgentTurnOutcome.SUCCEEDED
+    )
+    assert _ThreeTurnOutcomeAgent.third_event is not None
+    assert _ThreeTurnOutcomeAgent.third_event.agent_turn_failed is third_failed
+    assert _ThreeTurnOutcomeAgent.third_event.agent_turn_outcome is (
+        AgentTurnOutcome.FAILED if third_failed else AgentTurnOutcome.SUCCEEDED
+    )
 
 
 @pytest.mark.asyncio

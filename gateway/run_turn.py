@@ -1890,7 +1890,8 @@ class GatewayTurnMixin:
         turn once and close it, and build the sanitized user-facing error reply."""
         # Completion hooks still receive delivery success when this sanitized reply is sent, so expose
         # the independent semantic result on the event rather than overloading ProcessingOutcome.
-        event.agent_turn_failed = True
+        from gateway.platforms.event import AgentTurnOutcome
+        event.record_agent_turn_outcome(AgentTurnOutcome.FAILED)
         # Retain Slack thread/workspace routing so a failed turn cannot leave its status visible.
         await self._hmwa_stop_typing_for_turn(event, source)
         logger.exception("Agent error in session %s", session_key)
@@ -2055,6 +2056,9 @@ class GatewayTurnMixin:
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        from gateway.platforms.event import AgentTurnOutcome
+        # A rewritten/reused event must never retain a result from an earlier attempt.
+        event.record_agent_turn_outcome(AgentTurnOutcome.UNKNOWN)
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         logger.info(
@@ -2109,8 +2113,16 @@ class GatewayTurnMixin:
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 persist_user_display_metadata={"gateway_input_owner": prepared.persistence_owner},
                 message_type=event.message_type,
+                result_event=event,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
+
+            # Normal in-process runs record their own outcome before they can recurse. Keep this
+            # fallback for proxy/test runners that return a result without owning a TurnContext.
+            if event.agent_turn_outcome is AgentTurnOutcome.UNKNOWN and isinstance(agent_result, dict):
+                event.record_agent_turn_outcome(
+                    AgentTurnOutcome.FAILED if agent_result.get("failed") else AgentTurnOutcome.SUCCEEDED
+                )
 
             # A queued (/queue) chain answered the LAST message of the chain, so the outer final
             # send (bracketed by the adapter against this event) must be ledgered under that
@@ -2142,8 +2154,6 @@ class GatewayTurnMixin:
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
                 self._hmwa_classify_turn_failure(agent_result, history, session_entry)
             )
-            # Keep delivery outcome and agent execution outcome separate for platform completion hooks.
-            event.agent_turn_failed = agent_failed_early
             if agent_failed_early and not is_context_overflow_failure:
                 response = self._hmwa_add_failed_turn_notice(response, self._hmwa_failed_turn_notice(agent_result))
             response, session_entry = await self._hmwa_compression_exhaustion_reset(
@@ -3724,6 +3734,9 @@ class GatewayTurnMixin:
         # different profile's adapter, and only that instance holds the per-message reaction state.
         from gateway.run_turn_followup_ack import _followup_cancel_outcome, _run_followup_processing_hook
         _hook_adapter = self._adapter_for_source(next_source) if pending_event is not None else None
+        if pending_event is not None:
+            from gateway.platforms.event import AgentTurnOutcome
+            pending_event.record_agent_turn_outcome(AgentTurnOutcome.UNKNOWN)
         await _run_followup_processing_hook(_hook_adapter, pending_event, "on_processing_start")
         # The re-baseline sits inside the try: a /stop landing on its DB await must still close the marker
         # (the helper's own ``except Exception`` does not catch cancellation).
@@ -3737,19 +3750,22 @@ class GatewayTurnMixin:
                 event_message_id=next_message_id, inbound_message_id=next_inbound_id,
                 channel_prompt=next_channel_prompt, message_type=next_message_type,
                 persist_user_display_kind=next_display_kind,
+                result_event=pending_event,
             )
         except asyncio.CancelledError:
+            from gateway.platforms.event import AgentTurnOutcome
+            if pending_event is not None:
+                pending_event.record_agent_turn_outcome(AgentTurnOutcome.CANCELLED)
             await _run_followup_processing_hook(
                 _hook_adapter, pending_event, "on_processing_complete", _followup_cancel_outcome(_hook_adapter))
             raise
         except BaseException:
+            from gateway.platforms.event import AgentTurnOutcome
+            if pending_event is not None:
+                pending_event.record_agent_turn_outcome(AgentTurnOutcome.FAILED)
             await _run_followup_processing_hook(
                 _hook_adapter, pending_event, "on_processing_complete", ProcessingOutcome.FAILURE)
             raise
-        if pending_event is not None and isinstance(followup_result, dict):
-            # The drained follow-up bypasses base.py's handler path, but its completion hook still
-            # needs the same semantic signal when a sanitized failure reply was produced.
-            pending_event.agent_turn_failed = bool(followup_result.get("failed"))
         await _run_followup_processing_hook(
             _hook_adapter, pending_event, "on_processing_complete", ProcessingOutcome.SUCCESS)
         merged = _preserve_queued_followup_history_offset(result, followup_result)
@@ -4060,6 +4076,7 @@ class GatewayTurnMixin:
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
         persist_user_display_metadata: Optional[dict] = None,
+        result_event: Optional[MessageEvent] = None,
     ) -> Dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
@@ -4084,6 +4101,7 @@ class GatewayTurnMixin:
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
             persist_user_display_metadata=persist_user_display_metadata,
+            result_event=result_event,
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
             turn_ctx, turn_runner, source, event_message_id, disp._native_slack_task_cards,
@@ -4114,6 +4132,11 @@ class GatewayTurnMixin:
 
             # Interrupted OR queued message (/queue)?
             result = turn_ctx.result_holder[0]
+            if result_event is not None and isinstance(result, dict):
+                from gateway.platforms.event import AgentTurnOutcome
+                result_event.record_agent_turn_outcome(
+                    AgentTurnOutcome.FAILED if result.get("failed") else AgentTurnOutcome.SUCCEEDED
+                )
             adapter = self._adapter_for_source(source)
             await self._run_agent_finalize_streaming_tts(turn_ctx, adapter)
             pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)

@@ -32,6 +32,21 @@ class ProcessingOutcome(Enum):
     CANCELLED = "cancelled"
 
 
+class AgentTurnOutcome(Enum):
+    """Semantic state of the agent turn that belongs to one inbound event.
+
+    This intentionally differs from ``ProcessingOutcome``: the latter describes
+    delivery lifecycle, while this records whether the agent actually ran and
+    what it returned.
+    """
+
+    UNKNOWN = "unknown"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    NOT_STARTED = "not_started"
+
+
 @dataclass
 class MessageEvent:
     """Incoming message from a platform — the normalized shape all adapters produce."""
@@ -79,17 +94,24 @@ class MessageEvent:
     internal: bool = False
     # Free-form per-event metadata (e.g. ``whatsapp_from_owner=True``); plugins must ``.get()``.
     metadata: Dict[str, Any] = field(default_factory=dict)
-    # Set by the gateway when agent execution failed before completing a substantive turn. Platform
-    # completion hooks can inspect this independently of ``ProcessingOutcome``, which remains a
-    # delivery lifecycle signal (a sanitized failure reply may be delivered successfully).
-    agent_turn_failed: bool = False
     timestamp: datetime = field(default_factory=datetime.now)
     # May this event resolve gateway commands / control prompts? Proactive plugin events set False
-    # so untrusted payload text stays conversational. Kept last for positional compat.
+    # so untrusted payload text stays conversational. Existing init fields stay in this order.
     allow_gateway_control: bool = True
+    # Compatibility signal for consumers that only need to distinguish a semantic agent failure
+    # from a successfully delivered reply. ``False`` alone is not a success assertion; consult
+    # ``agent_turn_outcome`` when the distinction between success and no result matters.
+    agent_turn_failed: bool = False
+    # Set only by the gateway's turn owner. ``UNKNOWN`` means no semantic result was established.
+    agent_turn_outcome: AgentTurnOutcome = AgentTurnOutcome.UNKNOWN
 
     # Process-local admission receipt, never routing metadata or execution acknowledgement.
     _gateway_accepted: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def record_agent_turn_outcome(self, outcome: AgentTurnOutcome) -> None:
+        """Record this event's own result without changing delivery-hook semantics."""
+        self.agent_turn_outcome = outcome
+        self.agent_turn_failed = outcome is AgentTurnOutcome.FAILED
 
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""

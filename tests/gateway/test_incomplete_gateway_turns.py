@@ -10,7 +10,7 @@ import pytest
 import gateway.run as gateway_run
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
-from gateway.platforms.event import MessageEvent, ProcessingOutcome
+from gateway.platforms.event import AgentTurnOutcome, MessageEvent, MessageType, ProcessingOutcome
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
@@ -85,6 +85,16 @@ def _make_failed_result() -> dict:
     }
 
 
+def _make_success_result() -> dict:
+    return {
+        "final_response": "completed normally",
+        "messages": [],
+        "tools": [],
+        "history_offset": 0,
+        "api_calls": 1,
+    }
+
+
 def _make_runner(adapter: CaptureSlackAdapter) -> gateway_run.GatewayRunner:
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.config = GatewayConfig(
@@ -134,6 +144,22 @@ def _make_event() -> MessageEvent:
         ),
         message_id="m-1",
     )
+
+
+def test_message_event_keeps_the_legacy_positional_tail_and_starts_unknown():
+    """New semantic fields must not rebind old timestamp/control positional arguments."""
+    source = SessionSource(platform=Platform.SLACK, chat_id="C123", chat_type="channel")
+    timestamp = datetime(2026, 10, 9, 12, 0, 0)
+    event = MessageEvent(
+        "hello", MessageType.TEXT, None, None, source, None, "m-legacy", None, None,
+        [], [], [], None, None, None, None, False, None, None, None, None, False, {},
+        timestamp, False,
+    )
+
+    assert event.timestamp is timestamp
+    assert event.allow_gateway_control is False
+    assert event.agent_turn_failed is False
+    assert event.agent_turn_outcome is AgentTurnOutcome.UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -192,3 +218,25 @@ async def test_delivered_failed_turn_exposes_semantic_failure_to_completion_hook
     assert adapter.sent
     assert adapter.processing_hooks[-1] == ("complete", "m-1", ProcessingOutcome.SUCCESS)
     assert event.agent_turn_failed is True
+    assert event.agent_turn_outcome is AgentTurnOutcome.FAILED
+
+
+@pytest.mark.asyncio
+async def test_reused_event_replaces_an_old_failure_with_its_current_turn_result(monkeypatch, tmp_path):
+    """A rewritten /retry event cannot carry a previous attempt's semantic result."""
+    adapter = CaptureSlackAdapter()
+    runner = _make_runner(adapter)
+    runner._run_agent = AsyncMock(return_value=_make_success_result())
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setenv("SLACK_HOME_CHANNEL", "C123")
+    adapter.set_message_handler(runner._handle_message)
+    adapter._keep_typing = lambda *_args, **_kwargs: asyncio.Event().wait()
+
+    event = _make_event()
+    event.record_agent_turn_outcome(AgentTurnOutcome.FAILED)
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    assert event.agent_turn_failed is False
+    assert event.agent_turn_outcome is AgentTurnOutcome.SUCCEEDED

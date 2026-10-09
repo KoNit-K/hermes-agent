@@ -1326,6 +1326,8 @@ class GatewayInboundMixin:
             try:
                 _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
             except TurnLeaseTimeoutError as exc:
+                from gateway.platforms.event import AgentTurnOutcome
+                event.record_agent_turn_outcome(AgentTurnOutcome.NOT_STARTED)
                 # A rejected message, not a completed turn: return before the /goal judge so it
                 # cannot consume the resend notice and enqueue a synthetic continuation loop.
                 logger.error(

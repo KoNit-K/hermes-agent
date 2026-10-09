@@ -29,6 +29,7 @@ from gateway.turn_lease import (
     SessionTurnLeaseRegistry,
     TurnLeaseTimeoutError,
 )
+from gateway.platforms.event import AgentTurnOutcome
 
 
 def _run(coro):
@@ -214,7 +215,8 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
-        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=1)
+        event = _event()
+        response = await asyncio.wait_for(runner._handle_message(event), timeout=1)
     finally:
         assert runner._turn_leases.release(holder) is True
 
@@ -224,6 +226,8 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner.session_store.load_transcript.assert_not_called()
     runner._clear_session_env.assert_called_once_with(session_env_tokens)
     runner._post_turn_goal_continuation.assert_not_awaited()
+    assert event.agent_turn_failed is False
+    assert event.agent_turn_outcome is AgentTurnOutcome.NOT_STARTED
 
 
 # ---------------------------------------------------------------------------
@@ -492,5 +496,4 @@ def test_runner_release_turn_lease_is_token_scoped_and_bare_safe():
         assert runner._release_turn_lease("", 1) is False
 
     _run(scenario())
-
 
