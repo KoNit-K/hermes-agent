@@ -186,10 +186,12 @@ def _install_fake_sherpa(monkeypatch, tmp_path, *, layout, error=None):
 def test_sherpa_engine_uses_resolved_tokenizer_layout(monkeypatch, tmp_path, layout, expected):
     calls, model_dir = _install_fake_sherpa(monkeypatch, tmp_path, layout=layout)
 
-    ww._SherpaKwsEngine({"phrase": "hey hermes", "sherpa": {"model_dir": str(model_dir)}})
-
-    assert calls["text2token"][0].items() >= expected.items()
-    assert bool(calls["spotter"]) is True
+    engine = ww._SherpaKwsEngine({"phrase": "hey hermes", "sherpa": {"model_dir": str(model_dir)}})
+    try:
+        assert calls["text2token"][0].items() >= expected.items()
+        assert bool(calls["spotter"]) is True
+    finally:
+        engine.close()
 
 
 def test_sherpa_engine_explains_missing_pypinyin(monkeypatch, tmp_path):
