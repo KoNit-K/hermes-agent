@@ -1015,7 +1015,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
     supports_code_blocks = True  # Slack mrkdwn renders fenced code blocks
-    # Typing indicator is a text status line (assistant.threads.setStatus): fed live phrases.
+    # Legacy status accepts text; Agent Sessions maps live phrases to lifecycle values.
     supports_status_text = True
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Slack rejects slash commands inside threads; "!" is rewritten to "/" for known commands.
@@ -2720,8 +2720,11 @@ class SlackAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=ts)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """Show a thread status via assistant.threads.setStatus.
-        Needs assistant:write or chat:write scope; auto-clears on reply."""
+        """Show a thread status via the available Slack session API.
+
+        Agent Sessions maps live text to ``processing`` and needs an explicit
+        ``active`` transition; the legacy route keeps its text and clears on reply.
+        """
         if self._suppressed_ignored(chat_id, "typing/status in", level=logging.DEBUG):
             return
         if not self._app:
@@ -2764,7 +2767,7 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _set_thread_status(
         self, chat_id: str, team_id: str, thread_ts: str, status: str, fail_label: str) -> None:
-        """``assistant.threads.setStatus`` (empty ``status`` clears); failures are debug-logged."""
+        """Set status through Agent Sessions or legacy Assistant Threads; debug-log failures."""
         try:
             client = self._get_client(chat_id, team_id=team_id)
             _set_status, is_agent_sessions = _session_status_method(client)
@@ -2772,7 +2775,12 @@ class SlackAdapter(BasePlatformAdapter):
                 status = _agent_sessions_status(status)
             await _set_status(channel_id=chat_id, thread_ts=thread_ts, status=status)
         except Exception as e:
-            logger.debug("[Slack] assistant.threads.setStatus %s: %s", fail_label, e)
+            method_name = (
+                "agents.sessions.setStatus"
+                if _sdk_supports_agent_sessions()
+                else "assistant.threads.setStatus"
+            )
+            logger.debug("[Slack] %s %s: %s", method_name, fail_label, e)
 
     @staticmethod
     def _default_status_text(started: Optional[float]) -> str:
