@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -275,9 +276,16 @@ def test_prune_releases_relative_gitdir_worktree_registration_of_idle_entry(tmp_
     tree = scratch / "lane" / "relative-wt"
     tree.parent.mkdir()
     git("worktree", "add", "-q", "--detach", str(tree), cwd=repo)
-    gitdir = (tree / ".git").read_text(encoding="utf-8").removeprefix("gitdir:").strip()
-    (tree / ".git").write_text(f"gitdir: {os.path.relpath(gitdir, tree)}\\n", encoding="utf-8")
-    assert (tree / ".git").read_text(encoding="utf-8").startswith("gitdir: ..")
+    gitfile = tree / ".git"
+    gitdir = Path(gitfile.read_text(encoding="utf-8").removeprefix("gitdir:").strip())
+    if not gitdir.is_absolute():
+        gitdir = (tree / gitdir).resolve()
+    relative_gitdir = os.path.relpath(gitdir, tree)
+    gitfile.write_text(f"gitdir: {relative_gitdir}\n", encoding="utf-8")
+    assert gitfile.read_text(encoding="utf-8").startswith("gitdir: ..")
+    assert (tree / relative_gitdir).is_dir()
+    subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=tree, check=True,
+                   capture_output=True, stdin=subprocess.DEVNULL)
     ancient = time.time() - 30 * 3600
     for dirpath, dirnames, filenames in os.walk(tree.parent):
         for name in dirnames + filenames:
