@@ -33,12 +33,13 @@ export const REASONING_PICKER_ROWS: ReadonlyArray<{ label: string; value: string
 /** False only when the catalog says the picked model has no reasoning control;
  *  unknown capabilities keep the step (a no-op dial beats hiding a real one). */
 export function pickerOffersReasoning(provider: ModelOptionProvider | undefined, model: string): boolean {
-  return provider?.capabilities?.[model]?.reasoning !== false
+  const capabilities = provider?.capabilities?.[model]
+  return capabilities?.reasoning !== false && capabilities?.reasoning_efforts?.length !== 0
 }
 
 export function reasoningPickerRows(provider: ModelOptionProvider | undefined, model: string) {
   const supported = provider?.capabilities?.[model]?.reasoning_efforts
-  const levels = supported ? REASONING_PICKER_ROWS.filter(row => !row.value || row.value === 'none' || supported.includes(row.value)) : REASONING_PICKER_ROWS
+  const levels = supported ? REASONING_PICKER_ROWS.filter(row => !row.value || supported.includes(row.value)) : REASONING_PICKER_ROWS
   return levels
 }
 

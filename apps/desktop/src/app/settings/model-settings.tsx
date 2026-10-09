@@ -553,7 +553,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
     return mainModel ? row?.capabilities?.[mainModel.model] : undefined
   }, [providers, mainModel])
 
-  const reasoningSupported = mainCaps?.reasoning ?? true
+  const reasoningSupported = (mainCaps?.reasoning ?? true) && mainCaps?.reasoning_efforts?.length !== 0
   const mainReasoningEfforts = mainCaps?.reasoning_efforts
   const fastSupported = mainCaps?.fast ?? false
 
@@ -947,7 +947,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {REASONING_EFFORT_VALUES.filter(value => !mainReasoningEfforts || mainReasoningEfforts.includes(value)).map(value => (
+                    {REASONING_EFFORT_VALUES.filter(value => mainReasoningEfforts == null || mainReasoningEfforts.includes(value)).map(value => (
                       <SelectItem key={value} value={value}>
                         {value === 'none' ? m.reasoningOff : t.shell.modelOptions[value]}
                       </SelectItem>
@@ -1089,7 +1089,10 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
                             </SelectContent>
                           </Select>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                        {(() => {
+                          const caps = providers.find(provider => provider.slug === auxDraft.provider)?.capabilities?.[auxDraft.model]
+                          const supportsReasoning = (caps?.reasoning ?? true) && caps?.reasoning_efforts?.length !== 0
+                          return supportsReasoning ? <div className="flex flex-wrap items-center gap-2 text-xs">
                           <span className="text-muted-foreground">{m.reasoning}</span>
                           <Select
                             onValueChange={value => setAuxDraft(prev => ({ ...prev, reasoningEffort: value }))}
@@ -1103,17 +1106,15 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="__inherit__">{m.inheritMainEffort}</SelectItem>
-                              {REASONING_EFFORT_VALUES.filter(value => {
-                                const caps = providers.find(provider => provider.slug === auxDraft.provider)?.capabilities?.[auxDraft.model]
-                                return !caps?.reasoning_efforts || caps.reasoning_efforts.includes(value)
-                              }).map(value => (
+                              {REASONING_EFFORT_VALUES.filter(value => caps?.reasoning_efforts == null || caps.reasoning_efforts.includes(value)).map(value => (
                                 <SelectItem key={value} value={value}>
                                   {value === 'none' ? m.reasoningOff : t.shell.modelOptions[value]}
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
-                        </div>
+                          </div> : null
+                        })()}
                         <div className="flex flex-wrap items-center gap-2">
                           <Button
                             disabled={!auxDraft.provider || !auxDraft.model || applying}

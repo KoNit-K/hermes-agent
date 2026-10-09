@@ -2,7 +2,7 @@ import type { ModelOptionProvider } from '@hermes/shared/gateway-events'
 import { describe, expect, it } from 'vitest'
 
 import { draftModelNameFromArg } from '../components/activeSessionSwitcher.js'
-import { modelPickerCommand, pickerOffersReasoning, REASONING_PICKER_ROWS } from '../components/modelPicker.js'
+import { modelPickerCommand, pickerOffersReasoning, REASONING_PICKER_ROWS, reasoningPickerRows } from '../components/modelPicker.js'
 
 const provider = (capabilities?: ModelOptionProvider['capabilities']): ModelOptionProvider => ({
   capabilities,
@@ -25,10 +25,16 @@ describe('ModelPicker reasoning step', () => {
     expect(draftModelNameFromArg(modelPickerCommand('gpt-5.6', 'nous', false, 'low'))).toBe('gpt-5.6')
   })
 
-  it('skips the step only when the catalog says the route has no reasoning control', () => {
+  it('skips the step when the route has no reasoning control or declares no accepted parameter', () => {
     expect(pickerOffersReasoning(provider({ 'gpt-5.6': { fast: false, reasoning: false } }), 'gpt-5.6')).toBe(false)
+    expect(pickerOffersReasoning(provider({ 'gpt-5.6': { fast: false, reasoning: true, reasoning_efforts: [] } }), 'gpt-5.6')).toBe(false)
     expect(pickerOffersReasoning(provider({ 'gpt-5.6': { fast: false, reasoning: true } }), 'gpt-5.6')).toBe(true)
     expect(pickerOffersReasoning(provider(undefined), 'gpt-5.6')).toBe(true)
     expect(pickerOffersReasoning(undefined, 'gpt-5.6')).toBe(true)
+  })
+
+  it('does not add an undeclared disable-reasoning value to a declared vocabulary', () => {
+    expect(reasoningPickerRows(provider({ 'gpt-5.6': { fast: false, reasoning: true, reasoning_efforts: ['low', 'high'] } }), 'gpt-5.6'))
+      .toEqual([{ label: 'low', value: 'low' }, { label: 'high', value: 'high' }, { label: 'Keep current effort', value: '' }])
   })
 })

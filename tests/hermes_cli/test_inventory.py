@@ -29,20 +29,38 @@ from hermes_cli.inventory import (
 )
 
 
-def test_capabilities_expose_declared_reasoning_vocabulary(monkeypatch):
-    """Known provider vocabularies reach pickers; unknown models remain unrestricted."""
+def test_capabilities_preserve_declared_reasoning_vocabulary_tristate(monkeypatch):
+    """Only provider declarations constrain pickers; absent declarations stay unrestricted."""
     from hermes_cli import inventory
-    from providers import get_provider_profile
+    from providers.base import ProviderProfile
 
     monkeypatch.setattr(inventory, "_reasoning_catalog_reader", lambda _slug: None)
     monkeypatch.setattr("hermes_cli.models.model_supports_fast_mode", lambda _model: False)
-    profile = get_provider_profile("kilocode")
-    monkeypatch.setattr("providers.get_provider_profile", lambda _slug: profile)
-    rows = [{"slug": "kilocode", "models": ["deepseek/deepseek-v4.1-flash", "new-model"]}]
+
+    class DeclaredProfile(ProviderProfile):
+        def supported_reasoning_efforts(self, model):
+            return {"none": (), "known": ("low", "high")}.get(model)
+
+    profile = DeclaredProfile(name="declared")
+    monkeypatch.setattr("providers.get_provider_profile", lambda slug: profile if slug == "declared" else None)
+    rows = [{"slug": "declared", "models": ["none", "known", "unknown"]}]
     inventory._apply_capabilities(rows)
     caps = rows[0]["capabilities"]
-    assert caps["deepseek/deepseek-v4.1-flash"]["reasoning_efforts"] == ["none", "low", "high", "max"]
-    assert "reasoning_efforts" not in caps["new-model"]
+    assert caps["none"]["reasoning_efforts"] == []
+    assert caps["known"]["reasoning_efforts"] == ["low", "high"]
+    assert "reasoning_efforts" not in caps["unknown"]
+
+
+def test_kilocode_catalog_variant_does_not_restrict_reasoning_efforts(monkeypatch):
+    """Kilo's catalog variants are not evidence of a route-level accepted vocabulary."""
+    from hermes_cli import inventory
+
+    monkeypatch.setattr(inventory, "_reasoning_catalog_reader", lambda _slug: None)
+    monkeypatch.setattr("hermes_cli.models.model_supports_fast_mode", lambda _model: False)
+    rows = [{"slug": "kilocode", "models": ["deepseek/deepseek-v4.1-flash"]}]
+    inventory._apply_capabilities(rows)
+
+    assert "reasoning_efforts" not in rows[0]["capabilities"]["deepseek/deepseek-v4.1-flash"]
 
 
 # ─── load_picker_context ───────────────────────────────────────────────
@@ -697,5 +715,4 @@ def _apply_featured_with_dates(rows, dates: dict[str, str]):
 
     with patch("agent.models_dev.get_model_info", side_effect=_fake_get_model_info):
         inventory._apply_featured(rows)
-
 
