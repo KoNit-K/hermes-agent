@@ -110,7 +110,12 @@ def check_requirements() -> bool:
 
 def validate_config(config) -> bool:
     """True when a topic is configured (config.yaml ``extra`` or env)."""
-    return bool(_extra_or_secret(getattr(config, "extra", {}) or {}, "topic", "NTFY_TOPIC"))
+    configured = bool(_extra_or_secret(getattr(config, "extra", {}) or {}, "topic", "NTFY_TOPIC"))
+    if not configured:
+        logger.warning(
+            "[ntfy] Topic is not configured; set NTFY_TOPIC or platforms.ntfy.topic in config.yaml"
+        )
+    return configured
 
 
 def is_connected(config) -> bool:

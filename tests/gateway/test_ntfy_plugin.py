@@ -84,6 +84,13 @@ class TestNtfyRequirements:
         assert is_connected(PlatformConfig(enabled=True, extra={"topic": "t"})) is True
         assert is_connected(PlatformConfig(enabled=True, extra={})) is False
 
+    def test_missing_topic_reports_configuration_keys_without_value(self, monkeypatch, caplog):
+        monkeypatch.delenv("NTFY_TOPIC", raising=False)
+
+        assert validate_config(PlatformConfig(enabled=True, extra={})) is False
+        assert "NTFY_TOPIC" in caplog.text
+        assert "platforms.ntfy.topic" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # 3. Adapter init
