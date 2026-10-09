@@ -79,6 +79,7 @@ _MAX_TIMEOUT_S = 1800
 _STDERR_CAP_CHARS = 4000
 _AUTO_LAUNCH_READY_TIMEOUT_S = 40.0
 _AUTO_LAUNCH_POLL_INTERVAL_S = 0.2
+_AUTO_LAUNCH_CLEANUP_TIMEOUT_S = 2.0
 
 _TASK_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")  # filesystem-safe task ids
 # Screenshot paths printed by capture_screenshot(): POSIX or Windows drive-letter absolute.
@@ -183,12 +184,14 @@ def _read_browser_cfg() -> dict:
 
 
 def _is_loopback_cdp_endpoint(endpoint: str) -> bool:
-    """Whether an explicit CDP endpoint is safe for Hermes to start a browser for."""
+    """Whether an explicit HTTP loopback endpoint can be served by a new Chrome."""
     try:
-        host = urllib.parse.urlparse(endpoint).hostname
+        parsed = urllib.parse.urlparse(endpoint)
+        port = parsed.port
     except ValueError:
         return False
-    return host in {"127.0.0.1", "localhost", "::1"}
+    return (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+            and port is not None and 1 <= port <= 65535)
 
 
 def _cdp_discovery_url(endpoint: str) -> Optional[str]:
@@ -238,8 +241,29 @@ def _find_auto_launch_chrome(browser_cfg: dict) -> Optional[str]:
     cache_root = Path(get_hermes_home()) / "cache"
     patterns = ("**/chrome-linux*/chrome", "**/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
                 "**/chrome-win*/chrome.exe")
-    found = [path for pattern in patterns for path in cache_root.glob(pattern) if path.is_file()]
-    return str(max(found, key=lambda path: path.stat().st_mtime)) if found else None
+    found = []
+    for pattern in patterns:
+        try:
+            candidates = cache_root.glob(pattern)
+            for path in candidates:
+                try:
+                    if path.is_file():
+                        found.append(path)
+                except OSError as exc:
+                    logger.debug("auto-launch Chrome cache candidate check failed for %s: %s", path, exc)
+        except OSError as exc:
+            logger.debug("auto-launch Chrome cache discovery failed for %s: %s", pattern, exc)
+    newest = None
+    newest_mtime = None
+    for path in found:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError as exc:
+            logger.debug("auto-launch Chrome cache candidate disappeared: %s: %s", path, exc)
+            continue
+        if newest_mtime is None or mtime > newest_mtime:
+            newest, newest_mtime = path, mtime
+    return str(newest) if newest else None
 
 
 def _auto_launch_profile_dir(browser_cfg: dict, session_name: str, windows_binary: bool) -> str:
@@ -280,6 +304,24 @@ def _auto_launch_chrome_argv(binary: str, endpoint: str, browser_cfg: dict, sess
     return argv
 
 
+def _reclaim_auto_launch_process(proc: subprocess.Popen) -> None:
+    """Reap a failed, Hermes-owned auto-launch child without waiting indefinitely."""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            proc.wait(timeout=_AUTO_LAUNCH_CLEANUP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=_AUTO_LAUNCH_CLEANUP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                logger.debug("browser_exec auto-launch child did not exit after kill (pid=%s)",
+                             getattr(proc, "pid", None))
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("browser_exec auto-launch cleanup failed (pid=%s): %s", getattr(proc, "pid", None), exc)
+
+
 def _launch_configured_local_chrome(endpoint: str, browser_cfg: dict, session_name: str) -> bool:
     """Best-effort lazy launch; failure leaves the original endpoint untouched."""
     binary = _find_auto_launch_chrome(browser_cfg)
@@ -302,6 +344,7 @@ def _launch_configured_local_chrome(endpoint: str, browser_cfg: dict, session_na
             break
         time.sleep(_AUTO_LAUNCH_POLL_INTERVAL_S)
     logger.debug("browser_exec auto-launch did not make %s ready", endpoint)
+    _reclaim_auto_launch_process(proc)
     return False
 
 

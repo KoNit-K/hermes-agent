@@ -403,7 +403,7 @@ DEFAULT_CONFIG = {
         # endpoints are never launched; the spawned Chrome receives an isolated session profile.
         "auto_launch": False,
         "auto_launch_chrome_path": "",  # optional binary; BH_CHROME_PATH/CHROME_PATH win
-        "auto_launch_headful": False,  # false = --headless=new, useful on WSL/headless hosts
+        "auto_launch_headful": False,  # non-Windows binaries: false = --headless=new; Windows .exe stays headed
         "auto_launch_proxy": "",  # optional Chrome --proxy-server value
         "auto_launch_user_data_dir": "",  # root for isolated per-session profiles
         # Consent to browse with the user's REAL logins locally: runs on a Hermes-managed SNAPSHOT

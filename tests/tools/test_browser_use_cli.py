@@ -671,9 +671,119 @@ class TestLocalCdpAutoLaunch:
         assert calls[0][1]["stdin"] is subprocess.DEVNULL
         assert calls[0][1]["start_new_session"] is True
 
+    def test_failed_launch_reclaims_owned_child(self, monkeypatch):
+        """A Chrome started by Hermes cannot outlive a failed readiness probe."""
+        calls = []
+
+        class Proc:
+            pid = 42
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                calls.append("terminate")
+
+            def wait(self, timeout):
+                calls.append(("wait", timeout))
+
+        monkeypatch.setattr(bu_cli, "_find_auto_launch_chrome", lambda cfg: "/bin/chrome")
+        monkeypatch.setattr(bu_cli.subprocess, "Popen", lambda *args, **kwargs: Proc())
+        monkeypatch.setattr(bu_cli, "_cdp_endpoint_ready", lambda endpoint: False)
+        monkeypatch.setattr(bu_cli, "_AUTO_LAUNCH_READY_TIMEOUT_S", 0)
+
+        assert bu_cli._launch_configured_local_chrome("http://localhost:9222", {}, "t1") is False
+        assert calls[0] == "terminate"
+        assert calls[1][0] == "wait"
+
+    def test_failed_launch_escalates_when_child_ignores_terminate(self, monkeypatch):
+        """Cleanup has a bounded kill fallback when its owned child ignores TERM."""
+        calls = []
+
+        class Proc:
+            pid = 42
+            waits = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                calls.append("terminate")
+
+            def kill(self):
+                calls.append("kill")
+
+            def wait(self, timeout):
+                self.waits += 1
+                calls.append(("wait", timeout))
+                if self.waits == 1:
+                    raise subprocess.TimeoutExpired("chrome", timeout)
+
+        monkeypatch.setattr(bu_cli, "_find_auto_launch_chrome", lambda cfg: "/bin/chrome")
+        monkeypatch.setattr(bu_cli.subprocess, "Popen", lambda *args, **kwargs: Proc())
+        monkeypatch.setattr(bu_cli, "_cdp_endpoint_ready", lambda endpoint: False)
+        monkeypatch.setattr(bu_cli, "_AUTO_LAUNCH_READY_TIMEOUT_S", 0)
+
+        assert bu_cli._launch_configured_local_chrome("http://localhost:9222", {}, "t1") is False
+        assert calls == ["terminate", ("wait", 2.0), "kill", ("wait", 2.0)]
+
+    def test_failed_launch_reaps_an_early_exit(self, monkeypatch):
+        """An already-exited child is still waited on rather than dropping its handle."""
+        calls = []
+
+        class Proc:
+            pid = 42
+
+            def poll(self):
+                return 1
+
+            def wait(self, timeout):
+                calls.append(("wait", timeout))
+
+        monkeypatch.setattr(bu_cli, "_find_auto_launch_chrome", lambda cfg: "/bin/chrome")
+        monkeypatch.setattr(bu_cli.subprocess, "Popen", lambda *args, **kwargs: Proc())
+        monkeypatch.setattr(bu_cli, "_cdp_endpoint_ready", lambda endpoint: False)
+        monkeypatch.setattr(bu_cli, "_AUTO_LAUNCH_READY_TIMEOUT_S", 1)
+
+        assert bu_cli._launch_configured_local_chrome("http://localhost:9222", {}, "t1") is False
+        assert calls == [("wait", 2.0)]
+
+    def test_cache_discovery_skips_a_candidate_that_disappears(self, monkeypatch, tmp_path):
+        """A vanishing cache entry must preserve the normal connection-failure path."""
+        candidate = tmp_path / "chrome"
+        monkeypatch.setattr(bu_cli, "get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr("hermes_cli.browser_connect.get_chrome_debug_candidates", lambda system: [])
+        monkeypatch.setattr(bu_cli.Path, "glob", lambda self, pattern: [candidate])
+        monkeypatch.setattr(bu_cli.Path, "is_file", lambda self: self == candidate)
+        monkeypatch.setattr(bu_cli.Path, "stat", lambda self: (_ for _ in ()).throw(FileNotFoundError()))
+
+        assert bu_cli._find_auto_launch_chrome({}) is None
+
+    def test_cache_discovery_skips_an_unreadable_directory(self, monkeypatch, tmp_path):
+        """Cache permission errors leave the original CDP connection error intact."""
+        monkeypatch.setattr(bu_cli, "get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr("hermes_cli.browser_connect.get_chrome_debug_candidates", lambda system: [])
+        monkeypatch.setattr(
+            bu_cli.Path, "glob", lambda self, pattern: (_ for _ in ()).throw(PermissionError()),
+        )
+
+        assert bu_cli._find_auto_launch_chrome({}) is None
+
     @pytest.mark.parametrize("url", ["http://127.0.0.1:9222", "http://localhost:9222", "http://[::1]:9222"])
     def test_loopback_cdp_urls_are_eligible(self, url):
         assert bu_cli._is_loopback_cdp_endpoint(url) is True
+
+    @pytest.mark.parametrize("url", [
+        "ws://127.0.0.1:9222/devtools/browser/old-id",
+        "wss://localhost:9222/devtools/browser/old-id",
+        "https://127.0.0.1:9222",
+        "http://cdp.example:9222",
+        "http://127.0.0.1",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:not-a-port",
+    ])
+    def test_non_launchable_cdp_urls_remain_attach_only(self, url):
+        assert bu_cli._is_loopback_cdp_endpoint(url) is False
 
     def test_ipv6_loopback_launch_binds_ipv6_only(self):
         argv = bu_cli._auto_launch_chrome_argv("/usr/bin/google-chrome", "http://[::1]:9222", {}, "default")
