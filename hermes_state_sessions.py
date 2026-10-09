@@ -347,7 +347,22 @@ class SessionSessionsMixin:
 
     def copy_decision_ledger_entries(self, parent_session_id: str, child_session_id: str) -> None:
         """Carry a bounded ledger to a compression child without reinterpreting its text."""
-        self._write_sql("INSERT INTO decision_ledger (session_id, turn_id, kind, text, created_at) SELECT ?, turn_id, kind, text, created_at FROM decision_ledger WHERE session_id = ? ORDER BY id ASC", (child_session_id, parent_session_id))
+        self._write_sql(
+            """INSERT INTO decision_ledger (session_id, turn_id, kind, text, created_at)
+               SELECT ?, parent.turn_id, parent.kind, parent.text, parent.created_at
+               FROM decision_ledger AS parent
+               WHERE parent.session_id = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM decision_ledger AS child
+                     WHERE child.session_id = ?
+                       AND child.turn_id = parent.turn_id
+                       AND child.kind = parent.kind
+                       AND child.text = parent.text
+                       AND child.created_at = parent.created_at
+                 )
+               ORDER BY parent.id ASC""",
+            (child_session_id, parent_session_id, child_session_id),
+        )
 
     def _own_profile_name(self) -> Optional[str]:
         """The profile owning THIS store, from ``db_path`` alone (``<root>/state.db`` → default,
