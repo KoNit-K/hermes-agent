@@ -225,14 +225,14 @@ def test_foreign_profile_poller_requeues_event_owned_through_another_profiles_li
             server._sessions.update(saved)
 
 
-def test_detached_owner_delegation_is_retained_for_resume_when_another_poller_drains():
-    """An unowned delegation completion must wait for its durable owner to resume.
+def test_detached_owner_delegation_is_delivered_once_after_durable_owner_resumes(monkeypatch):
+    """A detached live owner's result waits for, then reaches, its resumed UI.
 
-    The draining session cannot prove ownership, so it must not dispatch the
-    payload.  Keeping it on the shared queue lets a later resumed owner claim
-    it through the existing durable session-key route.
+    The unrelated poller must neither display nor dispatch the event.  Once
+    the durable owner resumes under a new UI id, it alone gets one dispatch.
     """
     import queue
+    import threading
     from types import SimpleNamespace
 
     completion_queue = queue.Queue()
@@ -245,12 +245,30 @@ def test_detached_owner_delegation_is_retained_for_resume_when_another_poller_dr
         "results": [],
     }
     draining_session = {"session_key": "other-session"}
+    resumed_session = {
+        "session_key": "durable-owner",
+        "history_lock": threading.RLock(),
+        "running": False,
+    }
+    dispatched = []
+
+    def record_dispatch(sid, _session, event, text):
+        dispatched.append((sid, event, text))
+
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(server, "_notif_dispatch_event", record_dispatch)
 
     assert server._notif_handle_event(
         "other-ui", draining_session, detached_event, set(), registry,
         lambda _event: (_ for _ in ()).throw(AssertionError("unowned event dispatched")), None,
     ) is True
-    assert completion_queue.get_nowait() == detached_event
+    resumed_event = completion_queue.get_nowait()
+
+    assert server._notif_handle_event(
+        "resumed-ui", resumed_session, resumed_event, set(), registry,
+        lambda _event: "delegation finished", None,
+    ) is True
+    assert dispatched == [("resumed-ui", detached_event, "delegation finished")]
 
 
 def test_detached_owner_ordinary_completion_remains_fail_closed():
