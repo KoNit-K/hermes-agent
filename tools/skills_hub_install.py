@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import hashlib
-import re
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -63,15 +62,6 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
     from tools.skills_hub import _quarantine_dir, ensure_hub_dirs
     ensure_hub_dirs()
     skill_name = _validate_skill_name(bundle.name)
-    integrity = verify_bundle_integrity(bundle)
-    if integrity is False:
-        raise ValueError("Registry integrity check failed: downloaded bundle does not match the published SHA-256")
-    security = bundle.metadata.get("registry_security") if isinstance(bundle.metadata, dict) else None
-    if isinstance(security, dict) and (
-        str(security.get("decision", "")).lower() in {"deny", "block", "reject"}
-        or str(security.get("status", "")).lower() in {"dangerous", "malicious"}
-    ):
-        raise ValueError("Registry security verdict blocks installation")
     # Validate every path before touching disk so a bad member aborts cleanly.
     validated_files = [(_validate_bundle_rel_path(rel_path), content) for rel_path, content in bundle.files.items()]
     dest = _quarantine_dir() / skill_name
@@ -251,34 +241,6 @@ def bundle_content_hash(bundle: SkillBundle) -> str:
     return f"sha256:{h.hexdigest()[:16]}"
 
 
-def bundle_sha256(files: Dict[str, Any]) -> str:
-    """Full canonical SHA-256 for comparison with a registry bundle digest."""
-    h = hashlib.sha256()
-    normalized = {rel_path.replace("\\", "/"): content for rel_path, content in files.items()}
-    for rel_path in sorted(normalized):
-        h.update(rel_path.encode("utf-8"))
-        h.update(b"\x00")
-        content = normalized[rel_path]
-        h.update(content if isinstance(content, bytes) else content.encode("utf-8"))
-    return f"sha256:{h.hexdigest()}"
-
-
-def verify_bundle_integrity(bundle: SkillBundle) -> Optional[bool]:
-    """Compare an authoritative registry digest when one is well formed.
-
-    Missing or malformed registry metadata is advisory and retains the existing
-    local scan path; only a canonical full SHA-256 becomes an enforcement input.
-    """
-    metadata = bundle.metadata if isinstance(bundle.metadata, dict) else {}
-    integrity = metadata.get("registry_integrity")
-    expected = integrity.get("sha256") if isinstance(integrity, dict) else None
-    if not isinstance(expected, str) or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", expected):
-        return None
-    downloaded = metadata.get("download_sha256")
-    actual = downloaded if isinstance(downloaded, str) else bundle_sha256(bundle.files)
-    return actual.lower() == expected.lower()
-
-
 _SOURCE_ID_ALIASES = {"skills.sh": "skills-sh"}
 
 
@@ -335,8 +297,13 @@ def check_for_skill_updates(
             results.append({**row, "status": "unavailable"})
             continue
         current_hash, latest_hash = entry.get("content_hash", ""), bundle_content_hash(bundle)
+        metadata = bundle.metadata if isinstance(bundle.metadata, dict) else {}
+        registry_security = metadata.get("registry_security")
+        registry_version = metadata.get("registry_version")
         results.append({
             **row, "status": "up_to_date" if current_hash == latest_hash else "update_available",
             "current_hash": current_hash, "latest_hash": latest_hash, "bundle": bundle,
+            **({"registry_security": registry_security} if isinstance(registry_security, dict) else {}),
+            **({"registry_version": registry_version} if isinstance(registry_version, str) else {}),
         })
     return results

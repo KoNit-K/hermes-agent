@@ -2,23 +2,30 @@
 
 import time
 import base64
+import hashlib
+import io
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from tools.skills_hub_clawhub import ClawHubSource
-from tools.skills_hub_install import bundle_sha256, quarantine_bundle, verify_bundle_integrity
+from tools.skills_hub_install import quarantine_bundle
 from tools.skills_hub_models import SkillMeta
 
 
 class _MockResponse:
-    def __init__(self, status_code=200, json_data=None, text="", headers=None):
+    def __init__(self, status_code=200, json_data=None, text="", headers=None, body=b""):
         self.status_code = status_code
         self._json_data = json_data
         self.text = text
         self.headers = headers or {}
+        self.body = body
 
     def json(self):
         return self._json_data
+
+    def iter_bytes(self, chunk_size=None):
+        yield self.body
 
 
 class TestClawHubSource(unittest.TestCase):
@@ -219,9 +226,8 @@ class TestClawHubSource(unittest.TestCase):
 
     @patch("tools.skills_hub_clawhub._guarded_http_stream")
     @patch("tools.skills_hub.httpx.get")
-    def test_fetch_preserves_registry_security_and_integrity_metadata(self, mock_get, mock_stream):
+    def test_fetch_preserves_registry_security_metadata_from_json_fallback(self, mock_get, mock_stream):
         files = {"SKILL.md": "# Skill"}
-        expected_hash = bundle_sha256(files)
 
         def side_effect(url, *args, **kwargs):
             if url.endswith("/skills/verified"):
@@ -231,7 +237,7 @@ class TestClawHubSource(unittest.TestCase):
                     "security": {"status": "safe", "passed": True,
                                  "checkedAt": "2026-09-15T00:00:00Z"},
                     "securityAuditUrl": "https://clawhub.ai/audits/verified",
-                    "integrity": {"sha256": expected_hash.removeprefix("sha256:")},
+                    "integrity": {"sha256": "ab" * 32},
                 })
             if url.endswith("/skills/verified/versions/1.0.0"):
                 return _MockResponse(status_code=200, json_data={"files": files})
@@ -245,9 +251,35 @@ class TestClawHubSource(unittest.TestCase):
 
         self.assertEqual(meta.extra["registry_security"]["decision"], "allow")
         self.assertEqual(meta.extra["registry_security"]["status"], "safe")
-        self.assertEqual(bundle.metadata["registry_integrity"]["sha256"], expected_hash)
+        self.assertEqual(bundle.metadata["registry_integrity"]["sha256"], "sha256:" + "ab" * 32)
         self.assertEqual(bundle.metadata["registry_security"]["audit_url"], "https://clawhub.ai/audits/verified")
-        self.assertTrue(verify_bundle_integrity(bundle))
+        self.assertEqual(bundle.metadata["registry_version"], "1.0.0")
+        self.assertNotIn("download_sha256", bundle.metadata)
+
+    @patch("tools.skills_hub_clawhub._guarded_http_stream")
+    @patch("tools.skills_hub.httpx.get")
+    def test_fetch_downloads_real_zip_and_records_archive_digest(self, mock_get, mock_stream):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("SKILL.md", "# Downloaded skill")
+
+        mock_get.return_value = _MockResponse(
+            status_code=200,
+            json_data={"slug": "downloaded", "latestVersion": {"version": "1.0.0"}},
+        )
+        mock_stream.return_value.__enter__.return_value = _MockResponse(
+            status_code=200,
+            headers={"content-length": str(len(archive.getvalue()))},
+            body=archive.getvalue(),
+        )
+
+        bundle = self.src.fetch("downloaded")
+
+        self.assertEqual(bundle.files["SKILL.md"], "# Downloaded skill")
+        self.assertEqual(
+            bundle.metadata["download_sha256"],
+            "sha256:" + hashlib.sha256(archive.getvalue()).hexdigest(),
+        )
 
     def test_nested_payload_keeps_registry_metadata(self):
         payload = self.src._coerce_skill_payload({
@@ -264,42 +296,7 @@ class TestClawHubSource(unittest.TestCase):
 
         self.assertEqual(metadata["registry_integrity"]["sha256"], "sha256:" + "ab" * 32)
 
-    def test_registry_integrity_detects_mismatch(self):
-        from tools.skills_hub_models import SkillBundle
-
-        bundle = SkillBundle(
-            name="verified", files={"SKILL.md": "# Skill"}, source="clawhub",
-            identifier="verified", trust_level="community",
-            metadata={"registry_integrity": {"sha256": "sha256:" + "0" * 64}},
-        )
-
-        self.assertFalse(verify_bundle_integrity(bundle))
-
-    def test_registry_integrity_uses_downloaded_archive_digest(self):
-        from tools.skills_hub_models import SkillBundle
-
-        bundle = SkillBundle(
-            name="verified", files={"SKILL.md": "changed after extraction"}, source="clawhub",
-            identifier="verified", trust_level="community", metadata={
-                "registry_integrity": {"sha256": "sha256:" + "ab" * 32},
-                "download_sha256": "sha256:" + "ab" * 32,
-            },
-        )
-
-        self.assertTrue(verify_bundle_integrity(bundle))
-
-    def test_registry_integrity_fails_open_when_absent_or_malformed(self):
-        from tools.skills_hub_models import SkillBundle
-
-        for integrity in ({}, {"sha256": "not-a-hash"}):
-            bundle = SkillBundle(
-                name="verified", files={"SKILL.md": "# Skill"}, source="clawhub",
-                identifier="verified", trust_level="community",
-                metadata={"registry_integrity": integrity},
-            )
-            self.assertIsNone(verify_bundle_integrity(bundle))
-
-    def test_quarantine_honors_explicit_registry_block_verdict(self):
+    def test_quarantine_keeps_local_scan_path_for_registry_block_verdict(self):
         from tools.skills_hub_models import SkillBundle
 
         bundle = SkillBundle(
@@ -308,8 +305,9 @@ class TestClawHubSource(unittest.TestCase):
             metadata={"registry_security": {"decision": "deny"}},
         )
 
-        with self.assertRaisesRegex(ValueError, "security verdict"):
-            quarantine_bundle(bundle)
+        quarantine_path = quarantine_bundle(bundle)
+
+        self.assertEqual((quarantine_path / "SKILL.md").read_text(), "# Skill")
 
     @patch("tools.skills_hub_clawhub._guarded_http_stream")
     @patch("tools.skills_hub.check_website_access", return_value=None)

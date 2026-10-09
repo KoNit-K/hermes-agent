@@ -145,6 +145,13 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
             verdict = {key: value for key, value in verdict.items() if value is not None}
             if verdict:
                 metadata["registry_security"] = verdict
+            latest = payload.get("latestVersion")
+            version = _first_str(
+                payload.get("version"),
+                latest.get("version") if isinstance(latest, dict) else latest,
+            )
+            if version:
+                metadata["registry_version"] = version
             integrity = payload.get("integrity")
             candidates = (
                 integrity.get("sha256") if isinstance(integrity, dict) else integrity,
@@ -532,12 +539,12 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                     files[fname] = content
         return files
 
-    def _download_zip(self, slug: str, version: str, owner: Optional[str] = None) -> Dict[str, str]:
+    def _download_zip(self, slug: str, version: str, owner: Optional[str] = None) -> _DownloadedFiles:
         """Download the skill ZIP from /download (bounded, streamed) and extract its text files."""
         import io
         import zipfile
 
-        files: Dict[str, str] = {}
+        files = _DownloadedFiles()
         params = {"slug": slug, "version": version}
         if owner:
             params["owner"] = owner
