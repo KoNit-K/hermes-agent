@@ -23,9 +23,10 @@ _GATEWAY_CMD = "python -m hermes_cli.main gateway run"
 _OTHER_CMD = "python -m some_other_thing"
 
 
-def _fake_proc_dir(entries: dict):
-    """Return side_effects that simulate /proc: isdir → True, listdir → pids,
-    open(cmdline) → null-delimited command bytes."""
+def _fake_proc_dir(entries: dict, owner_uids: dict[int, int]):
+    """Return side effects for a deterministic ``/proc`` directory and owners."""
+    real_stat = os.stat
+
     def _isdir(path):
         return str(path) == "/proc"
 
@@ -46,7 +47,15 @@ def _fake_proc_dir(entries: dict):
             return m
         raise FileNotFoundError(path)
 
-    return _isdir, _listdir, _open
+    def _stat(path, *args, **kwargs):
+        path_str = str(path)
+        if path_str.startswith("/proc/"):
+            pid = int(path_str.split("/proc/")[1].split("/")[0])
+            if pid in owner_uids:
+                return SimpleNamespace(st_uid=owner_uids[pid])
+        return real_stat(path, *args, **kwargs)
+
+    return _isdir, _listdir, _open, _stat
 
 
 class TestGatewayProcessOwnership:
@@ -86,12 +95,15 @@ class TestProcFallback:
             12345: _GATEWAY_CMD,
             99999: _OTHER_CMD,
         }
-        _isdir, _listdir, _open = _fake_proc_dir(entries)
+        _isdir, _listdir, _open, _stat = _fake_proc_dir(
+            entries, {12345: os.geteuid()}
+        )
 
         with (
             patch("os.path.isdir", side_effect=_isdir),
             patch("os.listdir", side_effect=_listdir),
             patch("builtins.open", side_effect=_open),
+            patch("hermes_cli.gateway.os.stat", side_effect=_stat),
             patch("hermes_cli.gateway._get_ancestor_pids", return_value=set()),
             patch("subprocess.run") as mock_ps,
         ):
@@ -134,11 +146,9 @@ class TestProcFallback:
             12345: _GATEWAY_CMD,
             23456: _GATEWAY_CMD,
         }
-        _isdir, _listdir, _open = _fake_proc_dir(entries)
-
-        def _stat(path):
-            pid = int(str(path).split("/proc/")[1].split("/")[0])
-            return SimpleNamespace(st_uid=501 if pid == 12345 else 502)
+        _isdir, _listdir, _open, _stat = _fake_proc_dir(
+            entries, {12345: 501, 23456: 502}
+        )
 
         monkeypatch.setattr(gateway_mod.os, "getuid", lambda: 501)
         monkeypatch.setattr(gateway_mod.os, "geteuid", lambda: 501)
