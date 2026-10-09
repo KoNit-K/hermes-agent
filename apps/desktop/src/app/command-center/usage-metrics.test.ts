@@ -10,6 +10,18 @@ describe('cacheHitSummary', () => {
     expect(summary?.hitRate).toBeCloseTo(99.9, 1)
   })
 
+  it('includes cache writes in the prompt-token denominator', () => {
+    const summary = cacheHitSummary({ cache_read_tokens: 800, cache_write_tokens: 100, input_tokens: 100 })
+
+    expect(summary).toEqual({ cachedTokens: 800, hitRate: 80, promptTokens: 1_000 })
+  })
+
+  it('shows a known zero-percent rate when a bucket has only cache writes', () => {
+    const summary = cacheHitSummary({ cache_read_tokens: 0, cache_write_tokens: 100, input_tokens: 900 })
+
+    expect(summary).toEqual({ cachedTokens: 0, hitRate: 0, promptTokens: 1_000 })
+  })
+
   it('keeps cache rate absent when the bucket has no prompt tokens', () => {
     expect(cacheHitSummary({ cache_read_tokens: 0, cache_write_tokens: 0, input_tokens: 0 })).toBeNull()
   })
