@@ -7,13 +7,14 @@ import type { ComputerUseStatus, ComputerUseTarget } from '@/types/hermes'
 
 import { ComputerUsePanel } from './computer-use-panel'
 
-const { getComputerUseStatus, grantComputerUsePermissions } = vi.hoisted(() => ({
+const { getActionStatus, getComputerUseStatus, grantComputerUsePermissions } = vi.hoisted(() => ({
+  getActionStatus: vi.fn(),
   getComputerUseStatus: vi.fn<(target?: ComputerUseTarget) => Promise<ComputerUseStatus>>(),
   grantComputerUsePermissions: vi.fn()
 }))
 
 vi.mock('@/hermes', () => ({
-  getActionStatus: vi.fn(),
+  getActionStatus,
   getComputerUseStatus,
   grantComputerUsePermissions
 }))
@@ -30,9 +31,20 @@ const linuxGuest: ComputerUseStatus = {
 
 const windowsHost: ComputerUseStatus = { ...linuxGuest, platform: 'win32', ready: true }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+
+  const promise = new Promise<T>(nextResolve => {
+    resolve = nextResolve
+  })
+
+  return { promise, resolve }
+}
+
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.useRealTimers()
 })
 
 describe('ComputerUsePanel', () => {
@@ -64,5 +76,69 @@ describe('ComputerUsePanel', () => {
 
     expect(await screen.findByText('Not ready')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Windows host' })).toBeNull()
+  })
+
+  it('polls a Windows-host permission action through its local owner', async () => {
+    const localOwner = { connectionId: 'local' }
+    const permissionStatus = { ...windowsHost, can_grant: true, ready: false }
+    getComputerUseStatus.mockImplementation(target => Promise.resolve(target === 'windows-host' ? permissionStatus : linuxGuest))
+    grantComputerUsePermissions.mockResolvedValue({ ok: true, name: 'computer-use-permissions' })
+    getActionStatus.mockResolvedValue({ name: 'computer-use-permissions', running: false, lines: [], exit_code: 0 })
+
+    render(<ComputerUsePanel onTargetChange={vi.fn()} target="windows-host" />)
+
+    const grantButton = await screen.findByRole('button', { name: 'Grant permissions' })
+    vi.useFakeTimers()
+    fireEvent.click(grantButton)
+    await act(async () => Promise.resolve())
+    await act(async () => vi.advanceTimersByTimeAsync(1500))
+
+    expect(getActionStatus).toHaveBeenCalledWith('computer-use-permissions', 200, localOwner)
+  })
+
+  it('ignores a stale guest refresh after the target changes to Windows host', async () => {
+    const firstGuest = deferred<ComputerUseStatus>()
+    let guestRequests = 0
+    getComputerUseStatus.mockImplementation(target => {
+      if (target === 'windows-host') {
+        return Promise.resolve(windowsHost)
+      }
+
+      guestRequests += 1
+
+      return guestRequests === 1 ? firstGuest.promise : Promise.resolve(linuxGuest)
+    })
+
+    const { rerender } = render(<ComputerUsePanel onTargetChange={vi.fn()} target="guest" />)
+    rerender(<ComputerUsePanel onTargetChange={vi.fn()} target="windows-host" />)
+
+    expect(await screen.findByText('Ready')).toBeTruthy()
+
+    await act(async () => firstGuest.resolve(linuxGuest))
+
+    expect(screen.getByText('Ready')).toBeTruthy()
+  })
+
+  it('does not publish an old permission action refresh after the target changes', async () => {
+    const permissionStatus = { ...linuxGuest, can_grant: true }
+    getComputerUseStatus.mockImplementation(target => Promise.resolve(target === 'windows-host' ? windowsHost : permissionStatus))
+    grantComputerUsePermissions.mockResolvedValue({ ok: true, name: 'computer-use-permissions' })
+    getActionStatus.mockResolvedValue({ name: 'computer-use-permissions', running: false, lines: [], exit_code: 0 })
+
+    const { rerender } = render(<ComputerUsePanel onTargetChange={vi.fn()} target="guest" />)
+    const grantButton = await screen.findByRole('button', { name: 'Grant permissions' })
+    vi.useFakeTimers()
+    fireEvent.click(grantButton)
+    await act(async () => Promise.resolve())
+
+    await act(async () => {
+      rerender(<ComputerUsePanel onTargetChange={vi.fn()} target="windows-host" />)
+      await Promise.resolve()
+    })
+    expect(screen.getByText('Ready')).toBeTruthy()
+
+    await act(async () => vi.advanceTimersByTimeAsync(1500))
+
+    expect(screen.getByText('Ready')).toBeTruthy()
   })
 })

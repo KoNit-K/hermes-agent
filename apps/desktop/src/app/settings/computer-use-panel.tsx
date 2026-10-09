@@ -32,6 +32,10 @@ const WINDOWS_HOST_TARGET: ComputerUseTargetMetadata = {
   description: 'Configure the Windows desktop on this device through Desktop local routing.'
 }
 
+function targetOwner(target: ComputerUseTarget, profile?: ProfileScope): ProfileScope | undefined {
+  return target === 'windows-host' ? { connectionId: 'local' } : profile
+}
+
 // Per-OS one-liner shown when there's no TCC grant flow (Windows/Linux). macOS
 // drives the permission rows instead, so it has no entry here.
 const PLATFORM_NOTE: Record<string, string> = {
@@ -84,10 +88,19 @@ export function ComputerUsePanel({ onConfiguredChange, profile, target, onTarget
   const [loading, setLoading] = useState(true)
   const [granting, setGranting] = useState(false)
   const activeRef = useRef(false)
+  const refreshGenerationRef = useRef(0)
 
   const refresh = useCallback(async () => {
+    const generation = ++refreshGenerationRef.current
+    const selectedTarget = target
+
     try {
       const guest = await getComputerUseStatus('guest', profile)
+
+      if (!activeRef.current || refreshGenerationRef.current !== generation) {
+        return
+      }
+
       let host: ComputerUseStatus | null = null
 
       // A WSL guest cannot inspect the Windows desktop. Probe the forced-local
@@ -103,19 +116,27 @@ export function ComputerUsePanel({ onConfiguredChange, profile, target, onTarget
         }
       }
 
+      if (!activeRef.current || refreshGenerationRef.current !== generation) {
+        return
+      }
+
       const hasWindowsHost = host?.platform === 'win32'
 
       setWindowsHostAvailable(hasWindowsHost)
 
-      if (!hasWindowsHost && target === 'windows-host') {
+      if (!hasWindowsHost && selectedTarget === 'windows-host') {
         onTargetChange('guest')
       }
 
-      setStatus(target === 'windows-host' && hasWindowsHost ? host : guest)
+      setStatus(selectedTarget === 'windows-host' && hasWindowsHost ? host : guest)
     } catch (err) {
-      notifyError(err, 'Could not read Computer Use status')
+      if (activeRef.current && refreshGenerationRef.current === generation) {
+        notifyError(err, 'Could not read Computer Use status')
+      }
     } finally {
-      setLoading(false)
+      if (activeRef.current && refreshGenerationRef.current === generation) {
+        setLoading(false)
+      }
     }
   }, [onTargetChange, profile, target])
 
@@ -129,6 +150,7 @@ export function ComputerUsePanel({ onConfiguredChange, profile, target, onTarget
 
   const grant = useCallback(async () => {
     setGranting(true)
+    const refreshGeneration = refreshGenerationRef.current
 
     try {
       const started = await grantComputerUsePermissions(target, profile)
@@ -153,7 +175,7 @@ export function ComputerUsePanel({ onConfiguredChange, profile, target, onTarget
           break
         }
 
-        const polled = await getActionStatus(started.name, 200)
+        const polled = await getActionStatus(started.name, 200, targetOwner(target, profile))
         upsertDesktopActionTask(polled)
 
         if (!polled.running) {
@@ -161,7 +183,7 @@ export function ComputerUsePanel({ onConfiguredChange, profile, target, onTarget
         }
       }
 
-      if (activeRef.current) {
+      if (activeRef.current && refreshGenerationRef.current === refreshGeneration) {
         await refresh()
         onConfiguredChange?.()
       }
