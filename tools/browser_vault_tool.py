@@ -222,15 +222,14 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[tuple[
         focused = supervisor.focus_page(origin, accept=_TAB_PROBES.get(kind))
     if not focused.get("ok"):
         return None
+    from agent.vault_store import VaultError, normalize_origin
+
     top_level_origin = origin
     if not top_level_origin:
         try:
-            from agent.vault_store import normalize_origin
-
             top_level_origin = normalize_origin(str(focused.get("url") or ""))
-        except Exception:
+        except (VaultError, ValueError):
             return None
-    from agent.vault_store import VaultError, normalize_origin
     from urllib.parse import urlsplit
 
     # An explicit empty/opaque child is a refusal, not a request to use the
@@ -243,11 +242,8 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[tuple[
             or any(c.isspace() or c == "\\" for c in raw_child_origin)
             or parsed_child.path not in {"", "/"} or parsed_child.query or parsed_child.fragment):
         raise VaultError("child frame requires a valid HTTP(S) origin")
-    if ":" in parsed_child.hostname:
-        # normalize_origin predates IPv6 origins and omits their brackets.
-        host = parsed_child.hostname.lower()
-        child_origin = child_origin.replace(f"//{host}", f"//[{host}]", 1)
-    route = focused.get("route") if child_origin != top_level_origin else None
+    # Origin equality removes cross-origin consent, not document routing.
+    route = focused.get("route")
     if route is not None and not isinstance(route, dict):
         return None
     return top_level_origin, child_origin, route
@@ -528,8 +524,7 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     except (VaultError, ValueError):
         return json.dumps({"success": False, "error_type": "invalid_frame_origin",
                            "error": "Refused: the selected frame has no valid HTTP(S) origin. Nothing was resolved or written."})
-    if focused:
-        page_origin, fill_origin, frame_route = focused
+    page_origin, fill_origin, frame_route = focused or (None, None, None)
     page_origin = page_origin or _current_page_origin(effective_task_id)
     fill_origin = fill_origin or page_origin
     if not page_origin:
@@ -549,35 +544,12 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
             }
         )
 
-    # Defense in depth for alternate supervisors and future discovery paths:
-    # non-login values must not cross into an embedded origin, even if a
-    # caller accidentally hands us a routed child document.
-    if meta.kind != "login" and (frame_route is not None or fill_origin != page_origin):
-        return json.dumps({
-            "success": False,
-            "error_type": "cross_origin_non_login_refused",
-            "error": "Refused: payment and address fills are limited to the bound top-level page.",
-        })
+    # Discovery establishes a route, not cross-origin credential authority.
+    from tools.browser_vault_origin_policy import fill_origin_refusal
 
-    # OOPIF membership is only a discovery constraint.  A login password is
-    # resolved only after the user approves this exact relying-party → child
-    # origin pair, once, for this selected document.  No vault metadata or
-    # wildcard relation is an authorization for the transfer.
-    if meta.kind == "login" and frame_route is not None:
-        from tools.approval_prompt import request_elicitation_consent
-
-        decision = request_elicitation_consent(
-            f"Fill login from {page_origin} into embedded frame {fill_origin}",
-            "This one-time action sends the selected vault login password from the saved top-level site "
-            "to this exact embedded origin. Approve only if you recognize both normalized origins.",
-            surface="vault-cross-origin-login", title="Confirm cross-origin login fill?",
-        )
-        if decision != "accept":
-            return json.dumps({"success": False, "error_type": "cross_origin_declined",
-                               "error": "Cross-origin login fill was not approved. Nothing was resolved or written."})
-    if meta.kind == "login" and fill_origin != page_origin and frame_route is None:
-        return json.dumps({"success": False, "error_type": "cross_origin_route_invalid",
-                           "error": "Could not bind the selected cross-origin frame to its current document."})
+    refusal = fill_origin_refusal(meta.kind, page_origin, fill_origin, frame_route)
+    if refusal is not None:
+        return json.dumps(refusal)
 
     # ── Inspect + classify page controls ────────────────────────────────────
     nonce = secrets.token_hex(8)  # binds this fill to THIS inspection's stamps

@@ -232,6 +232,9 @@ def cross_site_pages():
                         if self.path == "/rp" else "")
                 body = ("<!doctype html>" + evil
                         + "<iframe id=idp src='https://idp.test:%d/login'></iframe>" % server.server_port)
+            elif self.path.startswith("/bridge?port="):
+                ipv6_port = int(self.path.split("=", 1)[1])
+                body = f"<iframe src='https://[::1]:{ipv6_port}/login'></iframe>"
             else:
                 body = "<input type=password id=password>"
                 if self.path == "/login-spoof":
@@ -622,3 +625,102 @@ def test_evaluate_runtime_unserializable_value(chrome_cdp, supervisor_registry):
     out = supervisor.evaluate_runtime("Infinity")
     assert out["ok"] is True
     assert out["result"] == "Infinity"
+
+
+@pytest.fixture
+def ipv6_pages(cross_site_pages):
+    """IPv6 loopback RP, with a cross-site bridge back to a same-origin OOPIF."""
+    import socket
+    import threading
+
+    class Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            if self.path == "/same":
+                body = f"<iframe src='https://idp.test:{cross_site_pages}/bridge?port={server.server_port}'></iframe>"
+            elif self.path == "/cross":
+                body = f"<iframe src='https://idp.test:{cross_site_pages}/login'></iframe>"
+            else:
+                body = "<input type=password id=password>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+    with tempfile.TemporaryDirectory(prefix="hermes-ipv6-cert-") as cert_dir:
+        cert, key = Path(cert_dir) / "cert.pem", Path(cert_dir) / "key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                        "-subj", "/CN=localhost", "-keyout", str(key), "-out", str(cert)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        server = Server(("::1", 0), Handler)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert, key)
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server.server_port
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
+@pytest.mark.parametrize(("same_origin", "mapped"), [(False, False), (True, False), (False, True)])
+def test_ipv6_stored_binding_fills_selected_real_oopif(
+    chrome_cdp, supervisor_registry, cross_site_pages, ipv6_pages, tmp_path, same_origin, mapped,
+):
+    from agent.vault_store import VaultStore
+    from tools import browser_vault_tool
+
+    cdp_url, _port = chrome_cdp
+    task_id = "pytest-ipv6-vault"
+    supervisor = supervisor_registry.get_or_start(task_id=task_id, cdp_url=cdp_url)
+    top_origin = (f"https://[::ffff:7f00:1]:{cross_site_pages}" if mapped
+                  else f"https://[::1]:{ipv6_pages}")
+    saved_url = (f"https://[0:0:0:0:0:ffff:127.0.0.1]:{cross_site_pages}/login" if mapped
+                 else f"https://[0:0:0:0:0:0:0:1]:{ipv6_pages}/login")
+    child_origin = top_origin if same_origin else f"https://idp.test:{cross_site_pages}"
+    _navigate(cdp_url, top_origin + ("/rp-idp" if mapped else "/same" if same_origin else "/cross"))
+    deadline = time.monotonic() + 10
+    focused = {}
+    while time.monotonic() < deadline:
+        focused = supervisor.focus_page(top_origin, accept=browser_vault_tool._TAB_PROBES["login"])
+        if focused.get("route"):
+            break
+        time.sleep(.1)
+    assert focused.get("ok") and focused.get("frame_origin") == child_origin, focused
+    route = focused["route"]
+    with supervisor._state_lock:
+        selected = supervisor._frames[route["frame_id"]]
+    assert selected.is_oopif and selected.cdp_session_id == route["frame_session_id"]
+    assert supervisor.evaluate_runtime("location.origin", route=route)["result"] == child_origin
+    # Real encrypted save/reload and the production LocalLoginBackend handle path.
+    store = VaultStore(tmp_path / "ipv6-vault")
+    meta = store.add_item("login", "IPv6 fixture", {"identifier_type": "email", "identifier": "ipv6@example.test", "password": "ipv6-browser-canary"},
+                          origin=saved_url)
+    reloaded = VaultStore(tmp_path / "ipv6-vault")
+    assert reloaded.get_meta(meta.id).origin == top_origin
+    with patch("agent.vault_store.get_vault_store", return_value=reloaded), \
+         patch.object(supervisor, "evaluate_runtime", wraps=supervisor.evaluate_runtime) as evaluation, \
+         patch("tools.approval_prompt.request_elicitation_consent", return_value="accept") as consent:
+        result = json.loads(browser_vault_tool.browser_vault_fill(meta.id, task_id=task_id))
+    assert result.get("success") and result["filled_fields"] == 1, result
+    assert "ipv6-browser-canary" not in json.dumps(result)
+    assert consent.call_count == (0 if same_origin else 1)
+    if not same_origin:
+        assert top_origin in consent.call_args.args[0] and child_origin in consent.call_args.args[0]
+    # focus_page may replace the attached session; verify the actual write route
+    # still names the initially selected frame and document, then read that sink.
+    write_route = evaluation.call_args.kwargs["route"]
+    assert write_route["frame_id"] == route["frame_id"]
+    assert write_route["frame_loader_id"] == route["frame_loader_id"]
+    check = supervisor.evaluate_runtime(
+        "document.querySelector('#password').value === 'ipv6-browser-canary'", route=write_route,
+    )
+    assert check == {"ok": True, "result": True, "result_type": "boolean"}
