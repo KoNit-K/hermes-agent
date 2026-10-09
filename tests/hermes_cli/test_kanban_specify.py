@@ -138,6 +138,31 @@ def test_specify_task_fills_an_empty_body_without_rewrite_opt_in(kanban_home):
     assert specified.payload == {"changed_fields": ["title", "body"]}
 
 
+def test_specify_task_preserves_body_added_while_aux_request_is_in_flight(kanban_home):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="rough", body=None, triage=True)
+
+    def _concurrent_aux_response(*_args, **_kwargs):
+        with kbc.connect() as concurrent_conn:
+            concurrent_conn.execute(
+                "UPDATE tasks SET body = ? WHERE id = ?",
+                ("Human-written requirements", tid),
+            )
+        return jsonlib.dumps({"title": "Refined rough", "body": "Generated specification"}), ""
+
+    with patch.object(spec, "_call_aux", side_effect=_concurrent_aux_response):
+        outcome = spec.specify_task(tid, author="ace")
+
+    assert outcome.ok is True
+    with kbc.connect() as conn:
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+    assert task.title == "Refined rough"
+    assert task.body == "Human-written requirements"
+    specified = next(event for event in events if event.kind == "specified")
+    assert specified.payload == {"changed_fields": ["title"]}
+
+
 def test_specify_task_does_not_promote_empty_body_without_usable_output(kanban_home):
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="rough", body=None, triage=True)

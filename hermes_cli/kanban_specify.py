@@ -1,8 +1,9 @@
 """Kanban triage specifier — flesh out a one-liner into a real spec.
 
 ``hermes kanban specify [task_id | --all]`` asks the auxiliary LLM for a
-tightened title and, only with ``--rewrite-body``, a replacement body for a
-Triage task, then flips it
+tightened title and body for a Triage task. By default it fills only a blank
+body and preserves nonblank text; ``--rewrite-body`` explicitly permits a
+replacement. It then flips the task
 ``triage -> todo`` via ``kanban_db.specify_triage_task``.
 
 Mirrors ``hermes_cli/goals.py``: same aux-client pattern, same "empty config
@@ -196,8 +197,9 @@ def specify_task(
 ) -> SpecifyOutcome:
     """Specify one triage task and promote it to ``todo``.
 
-    The card body is passed through unchanged by default.  Callers must set
-    ``rewrite_body`` explicitly to accept the auxiliary model's body output.
+    By default, the auxiliary body fills a blank card only; nonblank text is
+    preserved at the database write boundary. Callers must set ``rewrite_body``
+    explicitly to replace an existing body.
     Expected failures (not in triage, no aux client, API error, malformed
     reply) surface as ``ok=False`` so an ``--all`` sweep continues.
     """
@@ -241,6 +243,7 @@ def specify_task(
             title=new_title,
             body=new_body,
             author=author or _profile_author(),
+            only_fill_blank_body=not rewrite_body,
         )
     if not ok:
         # Race: promoted/archived between our read and the write.

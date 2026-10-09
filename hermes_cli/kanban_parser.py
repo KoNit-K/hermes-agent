@@ -63,7 +63,7 @@ def _triage_sweep_args(verb: str, Verb: str, noun: str, *, rewrite_body: bool = 
     if rewrite_body:
         args += (_arg(
             "--rewrite-body", action="store_true",
-            help="Replace each card body with auxiliary LLM output (default preserves the existing body)",
+            help="Replace each card body with auxiliary LLM output (default fills blank bodies and preserves nonblank text)",
         ),)
     return args
 
@@ -413,8 +413,8 @@ _SPECS = [
     _cmd("context", [_TASK_ID],
          help="Print the full context a worker sees for a task (title + body + parent results + comments)."),
     _cmd("specify", _triage_sweep_args("specify", "Specify", "specifier", rewrite_body=True),
-         help="Flesh out a triage-column task and promote it to todo. Preserves "
-              "the existing body unless --rewrite-body is supplied. Uses the auxiliary LLM "
+         help="Flesh out a triage-column task and promote it to todo. Fills a blank body "
+              "and preserves nonblank text unless --rewrite-body is supplied. Uses the auxiliary LLM "
               "configured under auxiliary.triage_specifier."),
     _cmd("decompose", _triage_sweep_args("decompose", "Decompose", "decomposer"),
          help="Decompose a triage-column task into a graph of child tasks "
