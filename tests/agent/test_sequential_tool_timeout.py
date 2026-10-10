@@ -38,7 +38,7 @@ def _deterministic_worker_start(monkeypatch):
     generous headroom to reach the dispatch — which is the behavior these
     tests mean to pin.
     """
-    import tools.daemon_pool as daemon_pool
+    from tools import daemon_pool
 
     real_executor = daemon_pool.DaemonThreadPoolExecutor
 
@@ -112,7 +112,7 @@ def _clarify_call(call_id: str = "clarify-1"):
         type="function",
         function=SimpleNamespace(
             name="clarify",
-            arguments='{"question": "Pick one?", "choices": ["A", "B"]}',
+            arguments='{"questions": [{"question": "Pick one?", "choices": ["A", "B"]}]}',
         ),
     )
 
@@ -167,12 +167,23 @@ def test_sequential_tool_timeout_emits_result_and_continues(tmp_path, monkeypatc
 
 
 def test_sequential_tool_timeout_suppresses_late_terminal_event(tmp_path, monkeypatch):
-    import hermes_cli.lifecycle as lifecycle
+    from hermes_cli import lifecycle
     import model_tools
+    from tools import daemon_pool
 
     agent = _make_agent(tmp_path)
+    agent._gateway_session_key = "agent:default:discord:dm:fixture"
     release_first = threading.Event()
-    first_returned = threading.Event()
+    futures = []
+    real_executor = daemon_pool.DaemonThreadPoolExecutor
+
+    class _ObservedExecutor(real_executor):
+        def submit(self, fn, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            futures.append(future)
+            return future
+
+    monkeypatch.setattr(daemon_pool, "DaemonThreadPoolExecutor", _ObservedExecutor)
     dispatch_count = 0
     terminal_events: list[dict] = []
 
@@ -181,7 +192,6 @@ def test_sequential_tool_timeout_suppresses_late_terminal_event(tmp_path, monkey
         dispatch_count += 1
         if dispatch_count == 1:
             release_first.wait()
-            first_returned.set()
             return "late result"
         return "second result"
 
@@ -205,7 +215,9 @@ def test_sequential_tool_timeout_suppresses_late_terminal_event(tmp_path, monkey
                 agent, SimpleNamespace(tool_calls=calls), messages, "task"
             )
             release_first.set()
-            assert first_returned.wait(timeout=1)
+            # Wait for the whole abandoned worker, including its late post-hook,
+            # while the hook observer is still installed.
+            futures[0].result(timeout=5)
     finally:
         release_first.set()
 
@@ -213,6 +225,8 @@ def test_sequential_tool_timeout_suppresses_late_terminal_event(tmp_path, monkey
         ("hung", "tool_timeout"),
         ("next", None),
     ]
+
+    assert all(event["gateway_session_key"] == agent._gateway_session_key for event in terminal_events)
 
 
 def test_sequential_tool_interrupt_hides_lifecycle_cancel_detail(tmp_path, monkeypatch):
@@ -309,11 +323,11 @@ def test_sequential_timeout_does_not_cut_clarify_human_wait(
         lambda: clarify_timeout,
     )
 
-    def _callback(question, choices, multi_select=False):
+    def _callback(questions):
         # Must OUTLAST the 1.0s sequential deadline — the test proves the
         # generic timeout never cuts a human clarify wait.
         time.sleep(1.3)
-        return "A"
+        return {"answers": {"q0": "A"}, "outcome": "submitted"}
 
     agent.clarify_callback = _callback
     terminal_events: list[dict] = []
@@ -343,7 +357,7 @@ def test_sequential_timeout_does_not_cut_clarify_human_wait(
     assert time.monotonic() - started < 10.0
     assert [message["tool_call_id"] for message in messages] == ["clarify-1", "next"]
     payload = json.loads(messages[0]["content"])
-    assert payload["user_response"] == "A"
+    assert payload["responses"][0]["user_response"] == "A"
     assert "timed out" not in messages[0]["content"]
     assert messages[1]["content"] == "second result"
     assert not any(event.get("error_type") == "tool_timeout" for event in terminal_events)
