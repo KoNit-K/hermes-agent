@@ -281,6 +281,10 @@ _CRON_HINT = (
 
 _GOAL_CRON_HINT = (
     "[IMPORTANT: You are running as a scheduled cron job within a bounded goal loop. "
+    "POSITION: Infer progress only from the supplied conversation history and task context. "
+    "With no visible prior turn, begin from that task and context without inventing earlier progress. "
+    "With prior turns, continue from the work they actually record. A fresh cron fire does not "
+    "imply a new goal or a reset turn budget. "
     "This response may be an intermediate goal turn that GoalManager will evaluate, not a final "
     "report immediately delivered to the user. Make useful progress on the goal; do not wrap up "
     "early merely because this is a scheduled run. "

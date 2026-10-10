@@ -1973,9 +1973,11 @@ def _run_agent_with_watchdog(
     _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     # Carry scheduler-scoped ContextVar state (e.g. env passthrough) into the worker thread.
     _cron_context = contextvars.copy_context()
+    _turn_kwargs = {"task_id": task_id}
+    if conversation_history is not None:
+        _turn_kwargs["conversation_history"] = conversation_history
     _cron_future = _cron_pool.submit(
-        _cron_context.run, agent.run_conversation, prompt, task_id=task_id,
-        conversation_history=conversation_history)
+        _cron_context.run, agent.run_conversation, prompt, **_turn_kwargs)
     if worker_state is not None:
         worker_state["future"] = _cron_future
     _inactivity_timeout = False
@@ -2590,7 +2592,9 @@ def run_job(
             session_db=_session_db)
         _audit = _FireAudit(job, job_id, model)
 
-        from cron.scheduler_goal import cron_goal_session_id, goal_prompt_from_job, run_goal_turns
+        from cron.scheduler_goal import (
+            cron_goal_session_id, goal_job_is_cancelled, goal_prompt_from_job, run_goal_turns,
+        )
 
         goal_prompt = goal_prompt_from_job(job)
         if goal_prompt:
@@ -2622,6 +2626,7 @@ def run_job(
             result, final_response, goal_status = run_goal_turns(
                 manager, goal_prompt, initial_prompt=prompt, run_turn=_run_goal_turn,
                 response_from_result=_goal_response,
+                is_cancelled=lambda: goal_job_is_cancelled(job_id, cancel_event),
             )
             if goal_status:
                 final_response = f"{final_response}\n\n{goal_status}".strip()
@@ -3344,9 +3349,9 @@ def _start_owned_run(
     if os.environ.get("_HERMES_CRON_EXTERNAL_WORKER") == execution_id:
         record = get_execution(execution_id)
     else:
-        record = mark_execution_running(
-            execution_id,
-            exclusive_job=exclusive_job,
+        record = (
+            mark_execution_running(execution_id, exclusive_job=True)
+            if exclusive_job else mark_execution_running(execution_id)
         )
         if record is None:
             return None
@@ -3401,7 +3406,7 @@ def _run_one_job_body(
         # Detached workers transition to running while adopting; in-process paths must win the
         # claimed->running CAS here before any user script or agent side effect may begin.
         # The identity plugins read via ctx.current_cron_execution() is bound only on that win.
-        from cron.scheduler_goal import goal_prompt_from_job
+        from cron.scheduler_goal import finish_unstarted_goal_execution, goal_prompt_from_job
 
         is_goal_job = goal_prompt_from_job(job) is not None
         _identity_token = _start_owned_run(
@@ -3409,11 +3414,7 @@ def _run_one_job_body(
         )
         if _identity_token is None:
             logger.warning("Cron job %s lost execution ownership before start; skipping", job["id"])
-            if is_goal_job:
-                finish_execution(
-                    execution_id, success=False,
-                    error="Goal job is already running; execution was not started.",
-                )
+            finish_unstarted_goal_execution(job, execution_id)
             return True
 
         # Bind the firing profile's COMPLETE terminal policy for this fire — agent build, run, delivery
