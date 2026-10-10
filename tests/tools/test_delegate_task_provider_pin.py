@@ -210,18 +210,22 @@ def test_all_provider_pins_do_not_resolve_an_unused_default_route():
 
 
 def test_all_provider_pins_keep_background_batch_metadata_without_default_creds():
-    """Detached dispatch keeps its model label without resolving unused credentials."""
+    """Detached dispatch labels the actual child without resolving unused credentials."""
     parent = _make_mock_parent()
+
+    child = _ok_child()
+    child.model = PIN_CREDS["model"]
+    child.provider = PIN_CREDS["provider"]
 
     def check_background_batch(batch, background):
         assert background is True
-        assert batch.creds == {"model": parent.model, "provider": parent.provider}
+        assert batch.creds == {"model": child.model, "provider": child.provider}
         return '{"status": "built"}'
 
     with (
         patch("tools.delegate_tool._load_config", return_value={"provider": "unavailable-default"}),
         patch("tools.delegate_tool._resolve_delegation_credentials", side_effect=_route_resolver_with_unavailable_default),
-        patch("tools.delegate_tool._build_child_preserving_parent_tools", side_effect=lambda **_kwargs: _ok_child()),
+        patch("tools.delegate_tool._build_child_preserving_parent_tools", return_value=child),
         patch("tools.delegate_tool._run_batch", side_effect=check_background_batch),
     ):
         raw = delegate_task(
