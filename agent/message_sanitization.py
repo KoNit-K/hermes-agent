@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from agent.agent_runtime_helpers_placeholders import _INTERRUPTED_PLACEHOLDER, hidden_interrupt_placeholder_row
 from agent.message_metadata import DB_ROW_SNAPSHOT
@@ -459,19 +459,15 @@ def _looks_like_corrupt_image_rejection(error_body: str) -> bool:
 
 
 __all__ = [
-    "_SURROGATE_RE", "close_interrupted_tool_sequence",
-    "_sanitize_surrogates", "_sanitize_structure_surrogates", "_sanitize_messages_surrogates",
-    "coerce_tool_name",
-    "_escape_invalid_chars_in_json_strings", "_repair_tool_call_arguments",
-    "_strip_non_ascii", "_sanitize_messages_non_ascii", "_sanitize_tools_non_ascii",
-    "_strip_images_from_messages", "_sanitize_structure_non_ascii", "sanitize_outbound_kwargs",
-    "strip_images_for_rejecting_model",
-    # call_id policy owners
-    "deterministic_call_id", "coalesce_tool_call_id", "tool_call_id_variants",
-    "tool_result_id_variants", "uniquify_tool_call_ids", "normalize_provider_tool_call_ids",
-    # reasoning_content policy owners
-    "reasoning_echo_family", "matches_reasoning_echo_family", "needs_reasoning_echo",
-    "stale_thinking_reaches_wire", "apply_reasoning_content_policy", "reapply_reasoning_echo",
+    "_SURROGATE_RE", "_escape_invalid_chars_in_json_strings", "_repair_tool_call_arguments",
+    "_sanitize_messages_non_ascii", "_sanitize_messages_surrogates", "_sanitize_structure_non_ascii",
+    "_sanitize_structure_surrogates", "_sanitize_surrogates", "_sanitize_tools_non_ascii",
+    "_strip_images_from_messages", "_strip_non_ascii", "apply_reasoning_content_policy",
+    "close_interrupted_tool_sequence", "coalesce_tool_call_id", "coerce_tool_name",
+    "deterministic_call_id", "matches_reasoning_echo_family", "needs_reasoning_echo",
+    "normalize_provider_tool_call_ids", "reapply_reasoning_echo", "reasoning_echo_family",
+    "sanitize_outbound_kwargs", "stale_thinking_reaches_wire", "strip_images_for_rejecting_model",
+    "tool_call_id_variants", "tool_result_id_variants", "uniquify_tool_call_ids",
 ]
 
 
@@ -541,16 +537,19 @@ def coalesce_tool_call_id(tc: Any) -> str:
     return ""
 
 
-def uniquify_tool_call_ids(tool_calls: list) -> list:
-    """Ensure every tool call in one assistant turn has a distinct id.
+def uniquify_tool_call_ids(tool_calls: list, taken: Iterable[str] = ()) -> list:
+    """Ensure every tool call in one assistant turn has an id no other call in the session has.
 
-    Some providers reuse one id across a batch; the pre-API sanitizer then keeps only the
-    first call/result pair per id and strict providers reject duplicates. Later collisions
-    get a deterministic ``<id>_d<n>`` suffix (never uuid4 — cache-prefix stability). Mutates
-    entries (SDK models / SimpleNamespace / dicts) in place. Blank ids are left for the
-    deterministic fallback in ``build_assistant_message``.
+    Some providers reuse one id across a batch, and some name every call ``call_0`` turn after
+    turn; the pre-API sanitizer then keeps only the first call/result pair per id, strict
+    providers reject duplicates, and the desktop binds a tool card to the wrong call. ``taken``
+    is the ids already in this session's history: they are never rewritten (prompt cache), so
+    the incoming call is renamed instead. Collisions get a deterministic ``<id>_d<n>`` suffix
+    (never uuid4 — cache-prefix stability). Mutates entries (SDK models / SimpleNamespace /
+    dicts) in place. Blank ids are left for the deterministic fallback in
+    ``build_assistant_message``.
     """
-    seen: set = set()
+    seen: set = set(taken)
     for tc in tool_calls or []:
         # Same coalescing rule as coalesce_tool_call_id, tolerant of non-string ids.
         raw = _tc_field(tc, "call_id") or _tc_field(tc, "id") or ""
@@ -577,8 +576,8 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
             continue
         _fn_name = _tc_field(_tc_field(tc, "function"), "name") or "?"
         logger.warning(
-            "Model reused tool call id %s within one turn; renamed the duplicate to %s (tool=%s) to keep "
-            "call/result pairing lossless.", cid, new_id, _fn_name,
+            "Model reused tool call id %s; renamed the duplicate to %s (tool=%s) to keep call/result "
+            "pairing lossless.", cid, new_id, _fn_name,
         )
     return tool_calls
 
@@ -626,7 +625,7 @@ def _set_provider_tool_id(tc: Any, key: str, value: str) -> None:
 
 
 # -- reasoning_content policy: single owner of strip-vs-re-pad; adapters keep only SYNTAX --
-# Require side (echo-back enforced; replays 400 without the field): the families below. Kimi
+# Require side (echo-back enforced or consumed by the template): the families below. Kimi
 # is host-driven on purpose (aggregators re-exporting kimi reject it); DeepSeek V4 rejects
 # empty-string pads → " ". Strict side (400/422 "Extra inputs are not permitted"): everyone
 # else — Mistral, Cerebras, Groq, SambaNova, … Strip the key entirely, even a one-space pad.
@@ -637,11 +636,13 @@ def _set_provider_tool_id(tc: Any, key: str, value: str) -> None:
 # (2b3a4f0af8 strip for strict providers, b5495db701 re-pad for require-side, 94b3131be7/9a9f8a6d99 kimi
 # pad). The POLICY — which provider direction gets which treatment — lives here as one rule table + apply
 # functions; adapters keep only SYNTAX mapping (e.g. anthropic_adapter turning reasoning_content into a
-# thinking block). Direction table: require-side (echo-back enforced; replays 400 without the field): kimi
+# thinking block). Direction table: require-side (echo-back enforced, or consumed by the template): kimi
 # — provider kimi-coding/kimi-coding-cn, or host api.kimi.com / moonshot.ai / moonshot.cn. Host-driven on
 # purpose: aggregators re-exporting kimi models reject the echo. deepseek — provider "deepseek", model
 # contains "deepseek", or host api.deepseek.com (#15250; V4 rejects empty-string pads, hence the " "
 # single-space pad, #17341). mimo     — provider "xiaomi", model contains "mimo", or host *.xiaomimimo.com.
+# ollama   — provider "ollama-cloud", host ollama.com, or a local ":cloud"/"-cloud" tag (Ollama's /v1 feeds the
+# field back into the template's thinking slot; stripping it drops the model's own CoT mid tool loop).
 # strict side (field rejected with 400/422 "Extra inputs are not permitted"): everyone else — Mistral,
 # Cerebras, Groq, SambaNova, … (#45655). Strip the key entirely, even a single-space pad.
 _REASONING_ECHO_RULES: tuple = (
@@ -649,6 +650,7 @@ _REASONING_ECHO_RULES: tuple = (
     ("kimi", frozenset({"kimi-coding", "kimi-coding-cn"}), frozenset(), (), ("api.kimi.com", "moonshot.ai", "moonshot.cn")),
     ("deepseek", frozenset(), frozenset({"deepseek"}), ("deepseek",), ("api.deepseek.com",)),
     ("mimo", frozenset(), frozenset({"xiaomi"}), ("mimo",), ("api.xiaomimimo.com", "xiaomimimo.com")),
+    ("ollama", frozenset(), frozenset({"ollama-cloud"}), (":cloud",), ("ollama.com",)),
 )
 _REASONING_ECHO_RULE_BY_FAMILY = {rule[0]: rule for rule in _REASONING_ECHO_RULES}
 
@@ -660,14 +662,16 @@ def matches_reasoning_echo_family(family: str, provider: Any, model: Any, base_u
 
     _, raw_providers, lowered_providers, model_subs, hosts = _REASONING_ECHO_RULE_BY_FAMILY[family]
     model_lower = (model or "").lower()
+    if ":" in model_lower and model_lower.endswith("-cloud"):
+        model_lower += ":cloud"  # Ollama's "<size>-cloud" tag (gpt-oss:120b-cloud) == ":cloud"
     return (
         provider in raw_providers or (provider or "").lower() in lowered_providers
         or any(sub in model_lower for sub in model_subs) or any(base_url_host_matches(base_url, host) for host in hosts)
     )
 
 
-def reasoning_echo_family(provider: Any, model: Any, base_url: Any) -> "str | None":
-    """``"kimi"`` / ``"deepseek"`` / ``"mimo"`` (first match in table order) when the
+def reasoning_echo_family(provider: Any, model: Any, base_url: Any) -> str | None:
+    """``"kimi"`` / ``"deepseek"`` / ``"mimo"`` / ``"ollama"`` (first match in table order) when the
     endpoint enforces reasoning_content echo-back, else ``None`` (strip side)."""
     families = (rule[0] for rule in _REASONING_ECHO_RULES)
     return next((f for f in families if matches_reasoning_echo_family(f, provider, model, base_url)), None)
