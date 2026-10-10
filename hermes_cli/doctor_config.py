@@ -309,7 +309,7 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
     """Resolve every routed ``auxiliary.<task>`` block through the real entry point the tasks use and report
     the ones that fail — an unresolvable block otherwise silently runs the task on the main model (#116055)."""
     from hermes_cli.config import read_user_config_raw
-    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.runtime_provider import _loopback_hostname, resolve_runtime_provider
     from utils import base_url_hostname
     aux = read_user_config_raw(config_path).get("auxiliary")
     routed = {name: block for name, block in (aux.items() if isinstance(aux, dict) else ()) if isinstance(block, dict)}
@@ -328,9 +328,13 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
                             f"auxiliary.{task}.provider '{provider_label}' cannot be resolved ({str(exc).splitlines()[0]}); the task "
                             f"silently runs on the main model. Fix the provider name/credentials in auxiliary.{task}.", issues)
             continue
-        if runtime.get("api_key") == "no-key-required":
+        # A keyless loopback server is intentional unless an explicit env credential failed.
+        # A remote placeholder is a configuration warning, not proof of a live 401.
+        if (runtime.get("api_key") == "no-key-required"
+                and (not _loopback_hostname(base_url_hostname(str(runtime.get("base_url") or "")))
+                     or runtime.get("credential_env_unset"))):
             check_warn(f"auxiliary.{task}.provider '{provider_label}' resolved with placeholder credentials",
-                       f"({runtime.get('provider')} @ {runtime.get('base_url')}; no-key-required)")
+                       f"({runtime.get('provider')} @ {runtime.get('base_url')}; no-key-required; endpoint may require authentication)")
             continue
         if not runtime.get("api_key") and not runtime.get("command"):
             check_warn(f"auxiliary.{task}.provider '{provider_label}' resolved without credentials", f"({runtime.get('provider')} @ {runtime.get('base_url')})")

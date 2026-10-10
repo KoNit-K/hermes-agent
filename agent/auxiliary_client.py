@@ -5168,10 +5168,11 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
     # under it, the custom entry wins over alias rewriting. Only for aliases, so entries matching a
     # canonical name (e.g. ``nous``) still defer to the built-in.
     custom_entry = None
+    lookup_overrides = {"explicit_base_url": req.explicit_base_url} if req.explicit_base_url else {}
     if req.original_provider and req.original_provider != provider:
-        custom_entry = _get_named_custom_provider(req.original_provider)
+        custom_entry = _get_named_custom_provider(req.original_provider, **lookup_overrides)
     if custom_entry is None:
-        custom_entry = _get_named_custom_provider(provider)
+        custom_entry = _get_named_custom_provider(provider, **lookup_overrides)
     if not custom_entry:
         return None
     # A per-task/explicit base_url or api_key composes OVER the named entry's defaults: the entry supplies
