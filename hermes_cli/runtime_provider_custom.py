@@ -53,7 +53,7 @@ def _key_env_secret(entry: dict[str, Any], label: str) -> str:
     value = get_secret_str(key_env, "").strip()
     if not value:
         logger.warning("%s: key_env %s is set but the variable is empty/unset — the request will carry the "
-                       "placeholder no-key-required and the endpoint will reject it", label, key_env)
+                       "placeholder no-key-required; the endpoint may require authentication", label, key_env)
     return value
 
 

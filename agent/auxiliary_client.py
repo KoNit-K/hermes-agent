@@ -5183,7 +5183,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
     if custom_key == "no-key-required":
         logger.warning("resolve_provider_client: named custom provider %r has no resolvable "
                        "api_key — request will be sent with placeholder no-key-required "
-                       "and will 401 on auth-required endpoints", custom_entry.get("name") or provider)
+                       "and the endpoint may require authentication", custom_entry.get("name") or provider)
     # Actual's wire protocol takes precedence over persisted task/provider modes.
     entry_api_mode = (req.api_mode or custom_entry.get("api_mode") or "").strip()
     if _is_actual_auxiliary_route(req, custom_base):
