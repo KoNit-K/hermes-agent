@@ -15,6 +15,7 @@ from agent.session_activity import (
     ActivityProvenance, bound_activity_description, normalize_activity_provenance,
 )
 from hermes_startup_watchdog import report_startup_progress
+from hermes_state_ledger import SessionDecisionLedgerMixin
 from hermes_state_errors import SessionActiveWriteGuardError
 from hermes_state_common import (
     _LISTABLE_CHILD_SQL, _RECOVERABLE_END_REASONS,
@@ -324,45 +325,8 @@ _INHERIT_PARENT_ROUTING_SQL = (
 )
 
 
-class SessionSessionsMixin:
+class SessionSessionsMixin(SessionDecisionLedgerMixin):
     """Session rows: create/inherit, lifecycle flags, model_config, listing, deletion."""
-
-    _DECISION_LEDGER_MAX_ENTRIES = 50
-
-    def append_decision_ledger_entry(self, session_id: str, kind: str, text: str, *, turn_id: str = "") -> None:
-        """Persist one explicit, replayable user decision and retain the newest fixed window."""
-        if kind not in {"approval", "denial", "correction", "preference"}:
-            raise ValueError(f"Unsupported decision ledger kind: {kind!r}")
-        if not isinstance(text, str) or not text:
-            return
-        def _append(conn) -> None:
-            conn.execute("INSERT INTO decision_ledger (session_id, turn_id, kind, text, created_at) VALUES (?, ?, ?, ?, ?)", (session_id, turn_id or "", kind, text, time.time()))
-            conn.execute("DELETE FROM decision_ledger WHERE session_id = ? AND id NOT IN (SELECT id FROM decision_ledger WHERE session_id = ? ORDER BY id DESC LIMIT ?)", (session_id, session_id, self._DECISION_LEDGER_MAX_ENTRIES))
-        self._execute_write(_append)
-
-    def get_decision_ledger_entries(self, session_id: str) -> List[Dict[str, str]]:
-        """Return the oldest-to-newest durable decision entries for one session."""
-        rows = self._read_all("SELECT turn_id, kind, text FROM decision_ledger WHERE session_id = ? ORDER BY id ASC", (session_id,))
-        return [{"turn_id": str(row["turn_id"] or ""), "kind": row["kind"], "text": row["text"]} for row in rows]
-
-    def copy_decision_ledger_entries(self, parent_session_id: str, child_session_id: str) -> None:
-        """Carry a bounded ledger to a compression child without reinterpreting its text."""
-        self._write_sql(
-            """INSERT INTO decision_ledger (session_id, turn_id, kind, text, created_at)
-               SELECT ?, parent.turn_id, parent.kind, parent.text, parent.created_at
-               FROM decision_ledger AS parent
-               WHERE parent.session_id = ?
-                 AND NOT EXISTS (
-                     SELECT 1 FROM decision_ledger AS child
-                     WHERE child.session_id = ?
-                       AND child.turn_id = parent.turn_id
-                       AND child.kind = parent.kind
-                       AND child.text = parent.text
-                       AND child.created_at = parent.created_at
-                 )
-               ORDER BY parent.id ASC""",
-            (child_session_id, parent_session_id, child_session_id),
-        )
 
     def _own_profile_name(self) -> Optional[str]:
         """The profile owning THIS store, from ``db_path`` alone (``<root>/state.db`` → default,
