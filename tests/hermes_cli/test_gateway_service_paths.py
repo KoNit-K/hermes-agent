@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 import hermes_cli.gateway as gateway_cli
 
 
@@ -91,3 +93,57 @@ def test_systemd_system_unit_also_keeps_shell_path(monkeypatch, tmp_path):
     assert baked[0] == "/opt/hermes/venv/bin"
     assert "/bin" in baked
 
+
+@pytest.mark.parametrize("system", [False, True])
+def test_systemd_path_preserves_order_and_missing_directories(monkeypatch, tmp_path, system):
+    _stub_systemd_path_builders(monkeypatch)
+    monkeypatch.setattr(gateway_cli, "_system_service_identity",
+                        lambda run_as_user=None: ("alice", "alice", str(tmp_path), 1001))
+    missing = str(tmp_path / "missing tools")
+    monkeypatch.setenv("PATH", f"/usr/bin:{missing}:/opt/hermes/venv/bin:{missing}:   ::/custom/bin")
+    baked = _unit_path_dirs(gateway_cli.generate_systemd_unit(system=system))
+    assert baked == [
+        "/opt/hermes/venv/bin", "/usr/local/sbin", "/usr/local/bin",
+        "/usr/sbin", "/usr/bin", "/sbin", "/bin", missing, "/custom/bin",
+    ]
+
+
+@pytest.mark.parametrize("system", [False, True])
+@pytest.mark.parametrize(("entry", "encoded"), [
+    ('/tools/"quoted"', r'/tools/\"quoted\"'),
+    ("/tools/'single'", "/tools/'single'"),
+    ("/tools/back\\slash\\", r"/tools/back\\slash\\"),
+    ("/tools/%h/%Z/%%", "/tools/%%h/%%Z/%%%%"),
+    ("/tools/line\nRestart=no\rnext\tbin", r"/tools/line\x0aRestart=no\x0dnext\x09bin"),
+    (" /tools/with spaces ", " /tools/with spaces "),
+])
+def test_systemd_path_escapes_unit_syntax(monkeypatch, tmp_path, system, entry, encoded):
+    _stub_systemd_path_builders(monkeypatch)
+    monkeypatch.setattr(gateway_cli, "_system_service_identity",
+                        lambda run_as_user=None: ("alice", "alice", str(tmp_path), 1001))
+    monkeypatch.setenv("PATH", entry)
+    unit = gateway_cli.generate_systemd_unit(system=system)
+    path_lines = [line for line in unit.splitlines() if line.startswith('Environment="PATH=')]
+    assert path_lines == [
+        'Environment="PATH=/opt/hermes/venv/bin:/usr/local/sbin:/usr/local/bin:'
+        f'/usr/sbin:/usr/bin:/sbin:/bin:{encoded}"',
+    ]
+    assert "Restart=no" not in unit.splitlines()
+
+
+@pytest.mark.parametrize("system", [False, True])
+def test_systemd_wsl_path_keeps_curated_interop_only(monkeypatch, tmp_path, system):
+    # Current main avoids persisting arbitrary Windows PATH dirs (#73163).
+    monkeypatch.setattr(gateway_cli, "is_wsl", lambda: True)
+    monkeypatch.setattr(gateway_cli, "_build_service_path_dirs", lambda: ["/opt/hermes/venv/bin"])
+    monkeypatch.setattr(gateway_cli, "_build_user_local_paths", lambda *args: [])
+    monkeypatch.setattr(gateway_cli, "_append_node_dir_for_service", lambda *args: None)
+    monkeypatch.setattr(gateway_cli, "_system_service_identity",
+                        lambda run_as_user=None: ("alice", "alice", str(tmp_path), 1001))
+    monkeypatch.setattr(gateway_cli.shutil, "which", lambda executable:
+                        "/mnt/c/WINDOWS/System32/cmd.exe" if executable == "cmd.exe" else None)
+    monkeypatch.setenv("PATH", "/mnt/c/transient/bin:/home/alice/.local/share/mise/shims")
+    baked = _unit_path_dirs(gateway_cli.generate_systemd_unit(system=system))
+    assert "/mnt/c/transient/bin" not in baked
+    assert "/mnt/c/WINDOWS/System32" in baked
+    assert "/home/alice/.local/share/mise/shims" in baked
