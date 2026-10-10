@@ -8,7 +8,7 @@ This release wires the egress proxy into the Docker backend only. Modal, Daytona
 
 ## What it is
 
-- A managed `iron-proxy` subprocess on the host, lazy-installed into `~/.hermes/bin/iron-proxy`
+- An `iron-proxy` subprocess on the host, with its pinned binary in the PM tool store
 - A local CA at `~/.hermes/proxy/ca.crt` that the sandbox trusts so iron-proxy can MITM TLS and rewrite headers
 - A `proxy.yaml` config at `~/.hermes/proxy/proxy.yaml` listing the upstream hosts you allow and the secrets-transform mapping
 - A `mappings.json` recording which proxy token corresponds to which real env var
@@ -64,8 +64,8 @@ proxy:
   tunnel_port: 9090
 
   # Auto-download the pinned iron-proxy binary on first use.
-  # Hermes currently pins v0.50.0; the release checksum is verified before
-  # installation.
+  # Hermes pins v0.50.0 through PM; both the archive and release checksum
+  # must match the hashes in pm/lock.json. This release has no GPG signature.
   auto_install: true
 
   # Where iron-proxy looks up the real upstream secrets at egress time.
@@ -218,7 +218,7 @@ The CLI subcommand tree:
 
 ```
 hermes egress install                  # download the pinned iron-proxy binary
-hermes egress install --force          # re-download even if a managed copy exists
+hermes egress install --force          # check and repair the managed copy
 
 hermes egress setup                    # interactive wizard
 hermes egress setup --tunnel-port N    # override the tunnel listener port
@@ -279,7 +279,22 @@ Containers already running hold the old tokens and will need to be restarted to 
 
 ## State directory layout
 
-Everything iron-proxy maintains lives in `~/.hermes/proxy/`:
+PM owns the managed binary. Hermes honors an `iron-proxy` executable on
+`PATH` before checking PM selection. If neither exists, `auto_install` requests the pinned package, subject
+to PM's lazy-install policy. Explicit installation checks and repairs managed
+entries without forcing a new download of valid files. See
+[PM security tools](../../reference/package-management.md#optional-security-tools) for hash and signature checks.
+
+The pinned v0.50.0 release has no detached checksum signature. PM emits a
+warning and installs only after verifying its locked SHA-256 hashes and the
+archive entry in `checksums.txt`. This is an explicit exception for v0.50.0,
+not a fallback after download failures and not a replacement signature. A
+present signature is still checked when GPG is available and public-key import
+succeeds; a verification failure aborts installation. Releases outside this exception retain required signature
+assets.
+
+Daemon configuration, credentials, and logs remain profile-scoped under
+`$HERMES_HOME/proxy/` (`~/.hermes/proxy/` by default):
 
 | Path | Mode | Purpose |
 |---|---|---|
