@@ -83,22 +83,18 @@ def test_target_verification_receives_watcher_budget(monkeypatch, tmp_path, mapp
     old_pid = 14980
     entry = {"pid": old_pid, "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"]}
     selected_profiles = {"beta": old_pid} if mapped else {}
-    replays = [] if mapped else [(entry, {old_pid}, entry["argv"])]
-    token = {"profiles": {}, "unmapped": []}
+    replays = [] if mapped else [entry]
+    token = {"profiles": dict(selected_profiles), "unmapped": list(replays)}
     observed = []
     monkeypatch.setattr(status, "_pid_exists", lambda pid: pid == old_pid)
     monkeypatch.setattr(profiles, "get_profile_dir", lambda _name: tmp_path / "beta")
+    monkeypatch.setattr(update_cmd_windows._time, "monotonic", lambda: 10.0)
 
-    def ready(**kwargs):
-        observed.append(kwargs["timeout_s"])
-        return [4242]
+    def poll(targets, deadline, taken):
+        observed.append(deadline - 10.0)
+        return {key: [4242] for key, _probe, _claim_all in targets}
 
-    def replay(*_args, **kwargs):
-        observed.append(kwargs.get("timeout_s", 30.0))
-        return 4242
-
-    monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", ready)
-    monkeypatch.setattr(update_cmd_windows, "_wait_for_unmapped_replay_ready", replay)
+    monkeypatch.setattr(update_cmd_windows, "_poll_until_ready", poll)
     monkeypatch.setattr(gateway_windows, "_write_start_attestation", lambda *_a, **_kw: None)
     monkeypatch.setattr(gateway_windows, "_write_unmapped_start_attestation", lambda *_a: None)
     update_cmd_windows._verify_relaunched_gateways_alive(token, selected_profiles, replays)
