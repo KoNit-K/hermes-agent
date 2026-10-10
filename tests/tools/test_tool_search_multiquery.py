@@ -353,7 +353,7 @@ class TestMultiQuerySearch:
         assert result["queries"] == ["post slack message"]
 
     def test_max_query_cap_respected(self, issue_defs, monkeypatch):
-        import tools.tool_search as tool_search
+        from tools import tool_search
 
         monkeypatch.setattr(tool_search, "_MAX_QUERIES_PER_CALL", 2)
         cfg = tool_search.ToolSearchConfig.from_raw({})
@@ -371,6 +371,47 @@ class TestMultiQuerySearch:
 
 
 class TestBatchedDescribe:
+    def test_alias_describe_requires_target_in_scope(self):
+        from tools import session_search_tool
+        from tools.tool_search import dispatch_tool_describe
+
+        assert session_search_tool.session_search
+        result = json.loads(dispatch_tool_describe(
+            {"names": ["chat_history_lookup"]}, current_tool_defs=[]))
+        assert result["tools"] == {}
+        assert result["not_found"] == ["chat_history_lookup"]
+
+    def test_native_wire_name_outside_scope_does_not_fall_back_to_alias(self):
+        from tools.registry import registry
+        from tools.tool_search import dispatch_tool_describe
+
+        try:
+            _register("chat_history_lookup", "mcp-native-wire-name")
+            result = json.loads(dispatch_tool_describe(
+                {"names": ["chat_history_lookup"]},
+                current_tool_defs=[_td("session_search", "Search sessions.")]))
+            assert result["tools"] == {}
+            assert result["not_found"] == ["chat_history_lookup"]
+        finally:
+            registry.deregister("chat_history_lookup")
+
+    def test_context_notes_alias_keeps_memory_deferral_policy(self, monkeypatch):
+        import model_tools
+        import tools.tool_search as ts
+
+        model_tools.discover_builtin_tools()
+        memory_def = _td("memory", "Manage memory.", {"action": {"type": "string"}}, ["action"])
+        assert ts._resolve_oauth_wire_alias("context_notes") == "memory"
+        _, _, error = ts.resolve_underlying_call({"name": "context_notes", "arguments": {}})
+        assert error is not None  # memory is a direct core tool by default
+        monkeypatch.setattr(ts, "load_config_readonly", lambda: ts.ToolSearchConfig.from_raw({"defer": ["memory"]}))
+        result = json.loads(ts.dispatch_tool_describe(
+            {"names": ["context_notes"]}, current_tool_defs=[memory_def]))
+        assert result["tools"]["context_notes"] == {
+            "description": "Manage memory.", "parameters": memory_def["function"]["parameters"]}
+        assert ts.resolve_underlying_call({"name": "context_notes", "arguments": {"action": "add"}}) == (
+            "memory", {"action": "add"}, None)
+
     def test_oauth_wire_alias_describes_and_calls_session_search(self):
         from tools import session_search_tool
         from tools.tool_search import ToolSearchConfig, dispatch_tool_describe, resolve_underlying_call
@@ -513,7 +554,7 @@ class TestBatchedDescribe:
         assert "not_found" not in result
 
     def test_empty_and_overcap_names_error(self, issue_defs, monkeypatch):
-        import tools.tool_search as tool_search
+        from tools import tool_search
 
         monkeypatch.setattr(tool_search, "_MAX_DESCRIBE_NAMES_PER_CALL", 2)
         cfg = tool_search.ToolSearchConfig.from_raw({})
@@ -521,7 +562,7 @@ class TestBatchedDescribe:
             {}, current_tool_defs=issue_defs, config=cfg))
         assert "error" in json.loads(tool_search.dispatch_tool_describe(
             {"names": []}, current_tool_defs=issue_defs, config=cfg))
-        over = ["n%d" % i for i in range(3)]
+        over = [f'n{i:d}' for i in range(3)]
         parsed = json.loads(tool_search.dispatch_tool_describe(
             {"names": over}, current_tool_defs=issue_defs, config=cfg))
         assert "error" in parsed
