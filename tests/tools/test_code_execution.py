@@ -113,6 +113,18 @@ class TestHermesToolsGeneration(unittest.TestCase):
         for tool in SANDBOX_ALLOWED_TOOLS:
             self.assertIn(f"def {tool}(", src)
 
+    def test_tool_error_raises_and_can_be_caught(self):
+        namespace = {}
+        exec(generate_hermes_tools_module(["write_file"]), namespace)
+        namespace["_call"] = lambda *_: {"error": "Refused numbered read_file content (1| line)"}
+
+        with self.assertRaises(namespace["ToolCallError"]) as caught:
+            namespace["write_file"]("notes.txt", "1| stale")
+
+        self.assertEqual(caught.exception.tool_name, "write_file")
+        self.assertIn("Refused numbered read_file content", str(caught.exception))
+        self.assertEqual(caught.exception.result["error"], "Refused numbered read_file content (1| line)")
+
 
 
 
@@ -419,6 +431,25 @@ raise RuntimeError("deliberate crash")
         self.assertEqual(result["status"], "error")
         self.assertIn("before error", result["output"])
         self.assertIn("RuntimeError", result.get("error", "") + result.get("output", ""))
+
+    def test_ignored_tool_error_fails_the_script(self):
+        """A failed tool call cannot be hidden by ignoring its return value."""
+        def refuse_numbered_content(name, args, **kwargs):
+            if name == "write_file":
+                return json.dumps({"error": "Refused numbered read_file content (1| line)"})
+            return _mock_handle_function_call(name, args, **kwargs)
+
+        with patch("model_tools.handle_function_call", side_effect=refuse_numbered_content):
+            raw = execute_code(
+                code='from hermes_tools import write_file\nwrite_file("notes.txt", "1| stale")',
+                task_id="test-tool-error",
+                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+            )
+
+        result = json.loads(raw)
+        self.assertEqual(result["status"], "error", result)
+        self.assertNotEqual(result.get("exit_code", 1), 0, result)
+        self.assertIn("Refused numbered read_file content", result["output"])
 
 
     def test_shell_quote_helper(self):

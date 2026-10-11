@@ -197,7 +197,7 @@ def generate_hermes_tools_module(enabled_tools: list[str],
     ``transport``: ``"uds"`` (local socket client) or ``"file"`` (file RPC, remote backends)."""
     header = _FILE_TRANSPORT_HEADER if transport == "file" else _UDS_TRANSPORT_HEADER
     return header + "\n".join(
-        f"def {name}({sig}):\n    {doc}\n    return _call({name!r}, {args_expr})\n"
+        f"def {name}({sig}):\n    {doc}\n    return _tool_call({name!r}, {args_expr})\n"
         for name, (sig, doc, args_expr) in sorted(_TOOL_STUBS.items()) if name in set(enabled_tools)
     )
 
@@ -209,6 +209,24 @@ _COMMON_HELPERS = '''\
 # ---------------------------------------------------------------------------
 # Convenience helpers (avoid common scripting pitfalls)
 # ---------------------------------------------------------------------------
+
+class ToolCallError(RuntimeError):
+    """A Hermes tool returned an error result inside ``execute_code``."""
+
+    def __init__(self, tool_name, error, result):
+        self.tool_name = tool_name
+        self.error = error
+        self.result = result
+        super().__init__(f"{tool_name} failed: {error}")
+
+
+def _tool_call(tool_name, args):
+    """Return a successful RPC result or raise a catchable tool failure."""
+    result = _call(tool_name, args)
+    if isinstance(result, dict) and result.get("error"):
+        raise ToolCallError(tool_name, result["error"], result)
+    return result
+
 
 def json_parse(text: str):
     """Parse JSON tolerant of control characters and UTF-8 BOM (strict=False).
@@ -918,6 +936,9 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
         "Limits: 5-minute timeout, max 50 tool calls per call. Stdout over "
         "50KB shows head/tail inline; the FULL text is auto-saved to a file whose path rides in the result.\n\n"
         f"{cwd_note}\n\n"
+        "Tool failures raise `ToolCallError` instead of returning an error dict. "
+        "Catch it with `from hermes_tools import ToolCallError`; its `result` attribute "
+        "contains the original tool result.\n\n"
         "Helpers require imports: `from hermes_tools import json_parse, shell_quote, retry`. "
         "json_parse(text) — tolerant "
         "json.loads for terminal() output; shell_quote(s) — shlex.quote for "
