@@ -147,7 +147,7 @@ export function ClarifyToolPending({
   )
 
   const answeredCount = questions.filter(q => stagedAnswer(q) !== null).length
-  const canConfirm = answeredCount > 0
+  const canConfirm = questions.length > 0 && answeredCount === questions.length
 
   const confirmAll = useCallback(async () => {
     if (!request || !gateway) {
@@ -298,6 +298,7 @@ export function ClarifyToolPending({
           <QuestionBlock
             cursor={ready && keys.activeQuestion === index ? keys.cursorRow : null}
             disabled={disabled}
+            highlightCursor={ready && keys.hasKeyboardCursor}
             key={question.qid}
             onActivate={() => keys.focusQuestion(index)}
             onDraft={value => draftFor(question, value)}
