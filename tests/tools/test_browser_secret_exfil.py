@@ -191,6 +191,10 @@ class TestBrowserSnapshotRedaction:
             _redact_browser_output,
         )
 
+        assert _redact_browser_output({"nested": ["plain value"]}) == {
+            "nested": ["plain value"]
+        }
+
         value: object = "secret-token-AAAAAAAA"
         for _ in range(1_200):
             value = {"nested": value}
