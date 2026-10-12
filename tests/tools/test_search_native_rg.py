@@ -126,3 +126,37 @@ def test_limit_hit_keeps_drained_matches_when_group_kill_is_refused(tree, ops_fa
     monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")))
     result = ops.search(pattern="needle", path=str(tree), limit=2)
     assert not result.error and len(result.matches) == 2, result.to_dict()
+
+
+def test_native_runner_keeps_group_identity_when_rg_exits_before_kill(tree, ops_factory, monkeypatch):
+    """An exited rg can race the post-drain poll; its recorded PGID makes teardown a no-op."""
+    import io
+    import os
+
+    from tools import file_operations_search
+
+    class ExitedRg:
+        pid = 12345
+
+        def __init__(self, *args, **kwargs):
+            self.stdout = io.BytesIO(b"needle\n")
+            self._poll_called = False
+            self.returncode = 0
+
+        def poll(self):
+            self._poll_called = True
+            # Stale observation immediately before process-group teardown.
+
+        def wait(self):
+            return self.returncode
+
+    proc = ExitedRg()
+    monkeypatch.setattr(file_operations_search.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(os, "getpgid", lambda pid: 12345 if not proc._poll_called
+                        else (_ for _ in ()).throw(ProcessLookupError()))
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+
+    result = ops_factory(tree, [])._run_rg_native(["rg", "needle"], 1, timeout=1)
+
+    assert result.stdout == "needle\n"
+    assert result.exit_code == 0
