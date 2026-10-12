@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react'
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
 import { getHermesConfigRecord, type HermesConfigRecord, retainConfigReadOrigin, saveHermesConfig } from '@/hermes'
+import { persistStringRecord, storedStringRecord } from '@/lib/storage'
 
 import { TRANSLATIONS } from './catalog'
 import {
@@ -20,6 +21,21 @@ import type { Locale, Translations } from './types'
 export interface I18nConfigClient {
   getConfig: () => Promise<HermesConfigRecord>
   saveConfig: (config: HermesConfigRecord) => Promise<{ ok: boolean }>
+}
+
+// Config remains authoritative, but its asynchronous read is too late for the
+// initial renderer paint. Keep the last confirmed value scoped to its config
+// owner so one connection/profile cannot borrow another's language hint.
+const LOCALE_HINTS_KEY = 'hermes-desktop-locale-hints-v1'
+
+function localeHint(scopeKey: string | undefined): string | undefined {
+  return scopeKey ? storedStringRecord(LOCALE_HINTS_KEY)[scopeKey] : undefined
+}
+
+function rememberLocaleHint(scopeKey: string | undefined, locale: Locale): void {
+  if (scopeKey) {
+    persistStringRecord(LOCALE_HINTS_KEY, { ...storedStringRecord(LOCALE_HINTS_KEY), [scopeKey]: locale })
+  }
 }
 
 const defaultConfigClient: I18nConfigClient = {
@@ -101,7 +117,7 @@ export function I18nProvider({
   initialLocale,
   scopeKey
 }: I18nProviderProps) {
-  const [locale, setLocaleState] = useState<Locale>(() => normalizeLocale(initialLocale))
+  const [locale, setLocaleState] = useState<Locale>(() => normalizeLocale(initialLocale ?? localeHint(scopeKey)))
   const [isLoadingConfig, setIsLoadingConfig] = useState(false)
   const [isSavingLocale, setIsSavingLocale] = useState(false)
   const [configLoadError, setConfigLoadError] = useState<Error | null>(null)
@@ -150,6 +166,7 @@ export function I18nProvider({
     requestedRef.current = null
     setSaveError(null)
     setIsSavingLocale(false)
+    setLocaleState(normalizeLocale(initialLocale ?? localeHint(scopeKey)))
 
     if (!configClient) {
       return
@@ -188,7 +205,10 @@ export function I18nProvider({
 
           // A saved choice needs no machine probe and always takes precedence.
           if (isSupportedLocaleValue(saved)) {
-            setLocaleState(normalizeLocale(saved))
+            const next = normalizeLocale(saved)
+
+            rememberLocaleHint(scopeKey, next)
+            setLocaleState(next)
 
             return
           }
@@ -259,6 +279,10 @@ export function I18nProvider({
         if (!result.ok) {
           throw new Error('Failed to save language')
         }
+
+        if (generation === scopeGenerationRef.current) {
+          rememberLocaleHint(scopeKey, next)
+        }
       } catch (error) {
         const nextError = toError(error)
 
@@ -276,7 +300,7 @@ export function I18nProvider({
         }
       }
     },
-    [configClient]
+    [configClient, scopeKey]
   )
 
   const value = useMemo<I18nContextValue>(

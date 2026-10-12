@@ -31,9 +31,38 @@ function route(profile: string, connectionId: string | null = null) {
 
 afterEach(() => {
   cleanup()
+  window.localStorage.clear()
   route('default')
   Reflect.deleteProperty(window, 'hermesDesktop')
   vi.restoreAllMocks()
+})
+
+it('uses the last confirmed locale for the first render while config is loading', async () => {
+  let resolveConfig!: (config: HermesConfigRecord) => void
+  const getConfig = vi.fn(
+    () =>
+      new Promise<HermesConfigRecord>(resolve => {
+        resolveConfig = resolve
+      })
+  )
+
+  window.localStorage.setItem(
+    'hermes-desktop-locale-hints-v1',
+    JSON.stringify({ '[null,false,null,null,"default"]': 'ja' })
+  )
+  window.hermesDesktop = { api: getConfig } as never
+
+  render(
+    <I18nProvider>
+      <Probe />
+    </I18nProvider>
+  )
+
+  expect(screen.getByTestId('locale').textContent).toBe('ja')
+  expect(getConfig).toHaveBeenCalledTimes(1)
+
+  await act(async () => resolveConfig({ display: { language: 'zh' } }))
+  expect(screen.getByTestId('locale').textContent).toBe('zh')
 })
 
 // Regression for #113980: exercise the real provider, API origin binding and
