@@ -32,3 +32,16 @@ def test_citation_manager_rejects_unverified_paper_before_bibtex_retrieval():
     assert manager.cite("synthetic paper") is None
     assert manager.verified_papers == {}
     manager.get_bibtex.assert_not_called()
+
+
+def test_citation_manager_returns_and_caches_verified_paper():
+    manager = citation_manager_class()()
+    paper = SimpleNamespace(title="Verified Paper")
+    bibtex = "@article{verified}"
+    manager.search = Mock(return_value=[paper])
+    manager.verify = Mock(return_value=(True, ["Semantic Scholar", "CrossRef"]))
+    manager.get_bibtex = Mock(return_value=bibtex)
+
+    assert manager.cite("verified paper") == bibtex
+    assert manager.verified_papers == {paper.title: paper}
+    manager.get_bibtex.assert_called_once_with(paper)
