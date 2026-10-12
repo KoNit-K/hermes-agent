@@ -7,16 +7,27 @@ and ``model.provider: alibaba-cn`` resolves at runtime.
 
 from typing import Any
 
-from agent.reasoning_effort import dashscope_preserve_thinking_extras
+from agent.reasoning_effort import clamp_effort, dashscope_preserve_thinking_extras
 from providers import register_provider
 from providers.base import ProviderProfile
 
 
 class DashScopeProfile(ProviderProfile):
-    """DashScope compatible-mode: ask the server to keep replayed prior-turn reasoning."""
+    """DashScope compatible-mode reasoning and replay controls."""
 
-    def build_api_kwargs_extras(self, *, model: str | None = None, **context: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-        return dashscope_preserve_thinking_extras(model), {}
+    def build_api_kwargs_extras(
+        self, *, reasoning_config: dict | None = None, model: str | None = None, **context: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        extra_body = dashscope_preserve_thinking_extras(model)
+        effort = str(reasoning_config.get("effort") or "").strip().lower() if isinstance(reasoning_config, dict) else ""
+        if isinstance(reasoning_config, dict) and (
+            reasoning_config.get("enabled") is False or effort in {"none", "false", "disabled"}
+        ):
+            return {**extra_body, "enable_thinking": False}, {"reasoning_effort": "none"}
+        clamped = clamp_effort(effort, ("low", "medium", "high"))
+        if clamped in {"low", "medium", "high"}:
+            return {**extra_body, "enable_thinking": True}, {"reasoning_effort": clamped}
+        return extra_body, {}
 
 
 alibaba = DashScopeProfile(
