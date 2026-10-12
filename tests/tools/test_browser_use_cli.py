@@ -1327,3 +1327,4 @@ class TestExecHybridPrivateUrlRouting:
 
         assert all(len(name) <= 64 for name in daemon_names)
         assert daemon_names[0] != daemon_names[1]
+        assert bu_cli._sidecar_daemon_name("short") == "_local_short"
