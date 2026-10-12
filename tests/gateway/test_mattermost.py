@@ -336,6 +336,7 @@ class TestMattermostWebSocketParsing:
             "event": "posted",
             "data": {"post": json.dumps(post_data), "channel_type": "D"},
         }
+        self.adapter._download_attachments = AsyncMock(return_value=([], []))
 
         await self.adapter._handle_ws_event(event)
 
