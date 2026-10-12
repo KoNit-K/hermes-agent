@@ -555,9 +555,12 @@ class MattermostAdapter(BasePlatformAdapter):
             post = json.loads(data.get("post") or "")
         except (json.JSONDecodeError, TypeError):
             return
-        # Ignore own messages, system posts and redeliveries.
+        # Ignore own messages, peer bots, system posts and redeliveries. Mattermost sends
+        # ``from_bot`` as a post prop, including for DMs that otherwise bypass mention gating.
         sender_id, post_id = post.get("user_id", ""), post.get("id", "")
-        if sender_id == self._bot_user_id or post.get("type") or self._dedup.is_duplicate(post_id):
+        props = post.get("props")
+        from_bot = isinstance(props, dict) and str(props.get("from_bot", "")).lower() == "true"
+        if sender_id == self._bot_user_id or from_bot or post.get("type") or self._dedup.is_duplicate(post_id):
             return
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")

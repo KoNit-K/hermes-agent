@@ -323,6 +323,26 @@ class TestMattermostWebSocketParsing:
 
 
     @pytest.mark.asyncio
+    async def test_ignore_other_bot_dm_posts(self):
+        """A peer bot's DM must not start a turn and echo back indefinitely."""
+        post_data = {
+            "id": "peer_bot_post",
+            "user_id": "peer_bot_id",
+            "channel_id": "chan_dm",
+            "message": "automated status update",
+            "props": {"from_bot": "true"},
+        }
+        event = {
+            "event": "posted",
+            "data": {"post": json.dumps(post_data), "channel_type": "D"},
+        }
+
+        await self.adapter._handle_ws_event(event)
+
+        assert not self.adapter.handle_message.called
+
+
+    @pytest.mark.asyncio
     async def test_leading_space_slash_command_is_command(self):
         """Mattermost mobile suggests leading-space slash commands."""
         post_data = {
