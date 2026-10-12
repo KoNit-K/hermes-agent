@@ -47,7 +47,7 @@ def cmd_proxy_start(args: Any) -> int:
         f"Press Ctrl+C to stop."
     )
     try:
-        asyncio.run(run_server(adapter, host=host, port=port))
+        asyncio.run(run_server(adapter, host=host, port=port, allowed_hosts=getattr(args, "allow_host", [])))
     except KeyboardInterrupt:
         _err("\nproxy: stopped")
     except OSError as exc:
@@ -102,7 +102,7 @@ def cmd_proxy(args: Any) -> int:
         "OAuth-authenticated provider credentials to outbound requests.\n"
         "\n"
         "Subcommands:\n"
-        "  hermes proxy start [--provider nous|xai] [--host 127.0.0.1] [--port 8645]\n"
+        "  hermes proxy start [--provider nous|xai] [--host 127.0.0.1] [--port 8645] [--allow-host HOST]\n"
         "      Run the proxy in the foreground.\n"
         "  hermes proxy status\n"
         "      Show which upstream adapters are ready.\n"

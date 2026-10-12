@@ -11,7 +11,7 @@ import asyncio
 import ipaddress
 import logging
 import signal
-from typing import Optional
+from typing import Iterable, Optional
 from urllib.parse import urlsplit
 
 try:
@@ -98,6 +98,7 @@ def _local_request_error(
     *,
     wildcard: bool,
     allowed_hosts: frozenset,
+    trusted_origin_hosts: frozenset,
 ) -> Optional[str]:
     """Why a request must be refused, or None. The proxy attaches the operator's subscription
     credential to whatever reaches it, so a web page in the operator's browser must not be able
@@ -113,7 +114,13 @@ def _local_request_error(
         return "host_not_allowed"
     if origin is not None:
         scheme, sep, rest = origin.strip().partition("://")
-        if wildcard or not sep or scheme.lower() != "http" or _parse_authority(rest) != target:
+        if (
+            wildcard
+            or not sep
+            or scheme.lower() != "http"
+            or _parse_authority(rest) != target
+            or target[0] not in trusted_origin_hosts
+        ):
             return "origin_not_allowed"
     trusted_sites = _WILDCARD_FETCH_SITES if wildcard else _UNFORGED_FETCH_SITES
     if fetch_site is not None and fetch_site.strip().lower() not in trusted_sites:
@@ -191,7 +198,11 @@ async def _stream_back(request: web.Request, session, upstream_resp) -> web.Stre
     return resp
 
 
-def create_app(adapter: UpstreamAdapter, bound_host: str = DEFAULT_HOST) -> web.Application:
+def create_app(
+    adapter: UpstreamAdapter,
+    bound_host: str = DEFAULT_HOST,
+    allowed_hosts: Optional[Iterable[str]] = None,
+) -> web.Application:
     """Build the aiohttp application bound to a specific upstream adapter.
 
     Every adapter method is synchronous and blocking (the Nous adapter takes the 15s cross-process
@@ -203,7 +214,11 @@ def create_app(adapter: UpstreamAdapter, bound_host: str = DEFAULT_HOST) -> web.
     # The bind address is fixed for the app's lifetime, so derive the Host policy once.
     bound = _canonical_host(bound_host.strip("[]"))
     wildcard = _is_wildcard(bound)
-    allowed_hosts = _LOOPBACK_HOSTS | {bound}
+    trusted_origin_hosts = _LOOPBACK_HOSTS | {bound}
+    extra_hosts = frozenset(
+        _canonical_host(host.strip().strip("[]")) for host in (allowed_hosts or ()) if host.strip()
+    )
+    allowed_hosts = trusted_origin_hosts | extra_hosts
 
     @web.middleware
     async def local_only(request: web.Request, handler):
@@ -213,6 +228,7 @@ def create_app(adapter: UpstreamAdapter, bound_host: str = DEFAULT_HOST) -> web.
             request.headers.get("Sec-Fetch-Site"),
             wildcard=wildcard,
             allowed_hosts=allowed_hosts,
+            trusted_origin_hosts=trusted_origin_hosts,
         )
         if refusal:
             return _json_error(
@@ -276,10 +292,11 @@ async def run_server(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     shutdown_event: Optional[asyncio.Event] = None,
+    allowed_hosts: Optional[Iterable[str]] = None,
 ) -> None:
     """Run the proxy in the current event loop until shutdown_event is set."""
     _require_aiohttp()
-    app = create_app(adapter, bound_host=host)
+    app = create_app(adapter, bound_host=host, allowed_hosts=allowed_hosts)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)

@@ -212,6 +212,8 @@ def build_gateway_parser(
     proxy_start.add_argument("--host", default=None,
         help="Bind address (default: 127.0.0.1). Use 0.0.0.0 to expose on LAN.")
     proxy_start.add_argument("--port", type=int, default=None, help="Bind port (default: 8645)")
+    proxy_start.add_argument("--allow-host", action="append", metavar="HOST",
+        help="Allow a non-browser client Host header (repeatable; browser origins remain refused).")
 
     proxy_subparsers.add_parser("status", help="Show which proxy upstreams are ready")
     proxy_subparsers.add_parser("providers", help="List available proxy upstream providers")

@@ -429,6 +429,41 @@ def test_loopback_proxy_serves_only_local_non_browser_requests(bound, headers, a
     asyncio.run(run())
 
 
+def test_loopback_proxy_allows_an_explicit_non_loopback_host_but_not_its_browser_origin():
+    """#136961: Docker clients can opt in a fixed Host without admitting browser requests."""
+    async def run():
+        captured: dict[str, Any] = {"requests": []}
+        upstream_runner, upstream_base = await _start_runner(_build_fake_upstream(captured))
+        proxy_runner, proxy_base = await _start_runner(
+            create_app(
+                FakeAdapter(f"{upstream_base}/v1"),
+                allowed_hosts={"host.docker.internal"},
+            )
+        )
+        authority = proxy_base.removeprefix("http://")
+        host = f"host.docker.internal:{authority.rsplit(':', 1)[1]}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{proxy_base}/v1/chat/completions", json={}, headers={"Host": host}
+                ) as allowed_response:
+                    await allowed_response.read()
+                async with session.post(
+                    f"{proxy_base}/v1/chat/completions",
+                    json={},
+                    headers={"Host": host, "Origin": f"http://{host}"},
+                ) as browser_response:
+                    await browser_response.read()
+        finally:
+            await proxy_runner.cleanup()
+            await upstream_runner.cleanup()
+        assert allowed_response.status == 200
+        assert browser_response.status == 403
+        assert len(captured["requests"]) == 1
+
+    asyncio.run(run())
+
+
 def _build_sse_upstream(
     frames: list[bytes],
     *,
