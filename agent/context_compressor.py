@@ -1335,17 +1335,22 @@ def _last_assistant_index(messages: list[dict[str, Any]]) -> int:
 
 
 def _pending_tool_round(messages: list[dict[str, Any]]) -> range:
-    """Indices of the tool results the transcript ends with — a round the model has not answered yet; empty when
-    the transcript ends in any other row. /steer rows after the round do not answer it: a steer is delivered
-    after the newest tool result before the next API call, and two can land in one iteration (one when the tool
-    batch ends, one before the request), so every contiguous trailing steer row is skipped."""
-    end = len(messages)
-    while end and messages[end - 1].get("display_kind") == STEER_DISPLAY_KIND:
-        end -= 1
-    start = end
-    while start > 0 and messages[start - 1].get("role") == "tool":
-        start -= 1
-    return range(start, end)
+    """Indices after the newest assistant tool-call row that contain its unread results.
+
+    A tool round remains unread until a later assistant message answers it.  Gateway notices and
+    user rows can arrive between the tool batch and the next request, so treating only contiguous
+    trailing ``tool`` rows as pending lets pressure pruning erase output the model has not seen.
+    The returned range deliberately includes such trailing non-assistant rows: callers use it as an
+    atomic protection span together with the owning tool-call row.
+    """
+    assistant_idx = _last_assistant_index(messages)
+    if assistant_idx < 0 or not messages[assistant_idx].get("tool_calls"):
+        return range(0)
+    start = next(
+        (i for i in range(assistant_idx + 1, len(messages)) if messages[i].get("role") == "tool"),
+        len(messages),
+    )
+    return range(start, len(messages))
 
 
 def _part_text(item: Any) -> Optional[str]:
@@ -1666,6 +1671,9 @@ def _sum_terminal(name, args, content, content_len, line_count):
     cmd = _str_arg(args, "command")
     cmd = cmd if len(cmd) <= 80 else cmd[:77] + "..."
     exit_code = m.group(1) if (m := re.search(r'"exit_code"\s*:\s*(-?\d+)', content)) else "?"
+    output = _json_dict(content).get("output")
+    if isinstance(output, str):
+        line_count = output.count("\n") + 1 if output else 0
     return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
 
 

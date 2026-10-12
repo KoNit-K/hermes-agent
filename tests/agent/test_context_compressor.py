@@ -192,6 +192,15 @@ class TestSummarizeToolResultWebExtract:
         assert summary == "[web_extract] https://example.com/h (500 chars)"
 
 
+def test_terminal_summary_counts_output_lines_not_json_envelope_lines():
+    """Regression for #137105: JSON escapes terminal-output newlines."""
+    content = json.dumps({"output": "first\nsecond\nthird", "exit_code": 0})
+
+    assert _summarize_tool_result("terminal", json.dumps({"command": "probe"}), content) == (
+        "[terminal] ran `probe` -> exit 0, 3 lines output"
+    )
+
+
 class TestSummarizeToolResultSkillTools:
     """`skill_manage` names live at ``operations[i].name`` and `skills_list` has no ``name`` arg at
     all, so the shared ``name=`` stub rendered ``name=?`` for both and dropped the outcome — a failed

@@ -245,8 +245,13 @@ def _image_result(call_id: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("steers", [0, 1, 2], ids=["round_last", "steer_after_round", "two_steers_after_round"])
-def test_mid_turn_compaction_keeps_the_pending_tool_round_verbatim(steers):
+@pytest.mark.parametrize("trailer", [
+    [],
+    [steer_user_row("Also flag any node above 90% cpu.")],
+    [steer_user_row("Also flag any node above 90% cpu."), steer_user_row("And list the racks they sit in.")],
+    [{"role": "user", "content": "[IMPORTANT: Background process proc_x completed (exit code 0).]"}],
+], ids=["round_last", "steer_after_round", "two_steers_after_round", "background_notice_after_round"])
+def test_mid_turn_compaction_keeps_the_pending_tool_round_verbatim(trailer):
     """Regression: compaction after a tool round stubbed the output the model had just asked for.
 
     Lean mode's 10K tail budget puts pass 4's soft ceiling at 15K tokens. Long user messages (no pass
@@ -285,8 +290,7 @@ def test_mid_turn_compaction_keeps_the_pending_tool_round_verbatim(steers):
     ]
     pending = {m["tool_call_id"]: m["content"] for m in msgs[-2:]}
     previous = msgs[-6]
-    for text in ["Also flag any node above 90% cpu.", "And list the racks they sit in."][:steers]:
-        msgs.append(steer_user_row(text))
+    msgs.extend(trailer)
     assert previous["tool_call_id"] == "old_12"
 
     out = c.compress(list(msgs), current_tokens=estimate_messages_tokens_rough(msgs))
