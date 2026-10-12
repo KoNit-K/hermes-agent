@@ -314,9 +314,15 @@ def build_fill_js(fills: list[dict[str, Any]], expected_origin: str, nonce: str 
     return JSON.stringify({ refused: "top_level_origin_changed", found: topLevelOrigin || null });
   }
 """.replace("__EXPECTED_TOP_LEVEL_ORIGIN__", json.dumps(expected_top_level_origin))
-    return (_FILL_JS_TEMPLATE.replace("__EXPECTED_ORIGIN__", json.dumps(expected_origin))
-            .replace("__FILLS__", payload).replace("__NONCE__", json.dumps(nonce))
-            .replace("__TOP_LEVEL_CHECK__", top_level_check))
+    replacements = {
+        "__EXPECTED_ORIGIN__": json.dumps(expected_origin),
+        "__FILLS__": payload,
+        "__NONCE__": json.dumps(nonce),
+        "__TOP_LEVEL_CHECK__": top_level_check,
+    }
+    # Substitute original template tokens once; inserted secrets are literal data.
+    return re.sub(r"__EXPECTED_ORIGIN__|__FILLS__|__NONCE__|__TOP_LEVEL_CHECK__",
+                  lambda match: replacements[match.group()], _FILL_JS_TEMPLATE)
 
 
 _FILL_JS_TEMPLATE = """(() => {

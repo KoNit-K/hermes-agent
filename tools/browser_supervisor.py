@@ -17,7 +17,7 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from tools.browser_supervisor_dialogs import (
@@ -303,7 +303,6 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
 
         async def _focus() -> dict[str, Any]:
             from agent.vault_store import normalize_origin
-            from websockets.exceptions import WebSocketException
             targets = (await self._cdp("Target.getTargets", timeout=timeout)).get("result", {}).get("targetInfos", [])
             candidates = []
             for t in targets:
@@ -324,114 +323,15 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                         await self._cdp("Target.detachFromTarget", {"sessionId": sid}, timeout=timeout)
                         continue
                     if not probe.get("result", {}).get("result", {}).get("value") and allow_oopif:
-                        # A vault form may live in a cross-origin OOPIF. Only
-                        # inspect frame ids returned by THIS top-level page's
-                        # frame tree: arbitrary attached iframe targets must
-                        # never become a credential destination.
-                        tree = await self._cdp("Page.getFrameTree", session_id=sid, timeout=timeout)
-
-                        def _child_ids(node: Dict[str, Any]) -> dict[str, str]:
-                            ids: dict[str, str] = {}
-                            for child in node.get("childFrames") or []:
-                                child_frame = child.get("frame") or {}
-                                frame_id = str(child_frame.get("id") or "")
-                                if frame_id:
-                                    ids[frame_id] = str(child_frame.get("loaderId") or "")
-                                ids.update(_child_ids(child))
-                            return ids
-
-                        top_tree = (tree.get("result") or {}).get("frameTree") or {}
-                        top_frame_id = str((top_tree.get("frame") or {}).get("id") or "")
-                        frame_loaders = _child_ids(top_tree)
-                        # Chrome's top-level Page.getFrameTree omits remote
-                        # OOPIFs on some versions.  Page.frameAttached is
-                        # delivered on the top session before Target attaches
-                        # the OOPIF, so use only its descendants of this exact
-                        # top frame—not every attached iframe target.
-                        with self._state_lock:
-                            all_frames = dict(self._frames)
-
-                        def _belongs_to_selected_page(candidate_id: str) -> bool:
-                            seen = set()
-                            current = all_frames.get(candidate_id)
-                            while current and current.parent_frame_id and current.frame_id not in seen:
-                                seen.add(current.frame_id)
-                                if current.parent_frame_id == top_frame_id:
-                                    return True
-                                current = all_frames.get(current.parent_frame_id)
-                            return False
-
-                        for candidate_id, candidate in all_frames.items():
-                            if _belongs_to_selected_page(candidate_id):
-                                frame_loaders.setdefault(candidate_id, candidate.loader_id)
-                        frame_ids = list(frame_loaders)
-                        child_session = None
-                        child_origin = ""
-                        with self._state_lock:
-                            frames = {fid: self._frames.get(fid) for fid in frame_ids}
-                        for frame_id in frame_ids:
-                            frame = frames.get(frame_id)
-                            if frame is None or not frame.is_oopif or not frame.cdp_session_id:
-                                continue
-                            child_tree = await self._cdp(
-                                "Page.getFrameTree", session_id=frame.cdp_session_id, timeout=timeout,
-                            )
-                            child_root = ((child_tree.get("result") or {}).get("frameTree") or {}).get("frame") or {}
-                            loader_id = str(child_root.get("loaderId") or "")
-                            # Bind the route to the selected OOPIF document;
-                            # missing/changed loader provenance fails closed.
-                            if str(child_root.get("id") or "") != frame_id or not loader_id:
-                                continue
-                            with self._state_lock:
-                                current = self._frames.get(frame_id)
-                                if current is None or current.cdp_session_id != frame.cdp_session_id:
-                                    continue
-                                self._frames[frame_id] = replace(current, loader_id=loader_id)
-                            child_probe = await self._cdp(
-                                "Runtime.evaluate", {"expression": accept, "returnByValue": True},
-                                session_id=frame.cdp_session_id, timeout=timeout,
-                            )
-                            if child_probe.get("result", {}).get("result", {}).get("value"):
-                                # The effective principal can be opaque despite
-                                # an HTTPS location/securityOrigin. Probe in an
-                                # isolated world so page code cannot replace
-                                # self.origin to grant itself vault authority.
-                                try:
-                                    world = await self._cdp(
-                                        "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": "hermes-vault-origin"},
-                                        session_id=frame.cdp_session_id, timeout=timeout,
-                                    )
-                                    origin_probe = await self._cdp(
-                                        "Runtime.evaluate", {"expression": "self.origin", "returnByValue": True,
-                                                             "contextId": world["result"]["executionContextId"]},
-                                        session_id=frame.cdp_session_id, timeout=timeout,
-                                    )
-                                    child_origin = str(origin_probe.get("result", {}).get("result", {}).get("value") or "")
-                                except (KeyError, TypeError, RuntimeError, TimeoutError, WebSocketException):
-                                    # Failed provenance cannot become a request
-                                    # to try another credential destination.
-                                    child_origin = ""
-                                # Even an empty origin selects this document;
-                                # the vault refuses it without sibling fallback.
-                                child_session = frame.cdp_session_id
-                                child_loader_id = loader_id
-                                break
-                        if child_session is None:
-                            await self._cdp("Target.detachFromTarget", {"sessionId": sid}, timeout=timeout)
-                            continue
-                        with self._state_lock:
-                            frame = self._frames.get(frame_id)
-                        if frame is None or frame.cdp_session_id != child_session:
+                        selected = await self._select_child_document(sid, accept, timeout=timeout)
+                        if selected is None:
                             await self._cdp("Target.detachFromTarget", {"sessionId": sid}, timeout=timeout)
                             continue
                         # _page_session_id remains the selected top-level page;
                         # child execution is always explicit and route-bound.
                         with self._state_lock:
                             self._page_session_id = sid
-                        return {"ok": True, "url": url, "frame_origin": child_origin,
-                                "route": {"page_session_id": sid, "frame_id": frame_id,
-                                          "frame_session_id": child_session,
-                                          "frame_loader_id": child_loader_id}}
+                        return {"ok": True, "url": url, **selected}
                 with self._state_lock:
                     self._page_session_id = sid
                 return {"ok": True, "url": url}
