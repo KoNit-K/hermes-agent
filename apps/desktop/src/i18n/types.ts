@@ -2828,6 +2828,7 @@ export interface Translations extends NoticeTranslations {
       cost: string
       manual: string
       preview: string
+      activity: string
       pr: string
       needsInput: string
       working: string
@@ -2915,6 +2916,7 @@ export interface Translations extends NoticeTranslations {
       waitingForAnswer: string
       finishedUnread: string
       backgroundRunning: string
+      liveWork: (subagents: number, background: number) => string
       draftSession: string
       handoffOrigin: (platform: string) => string
       continuationOrigin: string
