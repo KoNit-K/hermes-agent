@@ -37,6 +37,16 @@ class TestCronCommandLifecycle:
         assert "Error: Cron database corrupted and unrepairable:" in captured.err
         assert "Traceback" not in captured.err
 
+    @pytest.mark.parametrize("verb", ["list", "tick", "run"])
+    def test_unrelated_handler_runtime_error_propagates(self, monkeypatch, capsys, verb):
+        def fail(_args):
+            raise RuntimeError("handler bug")
+
+        monkeypatch.setitem(cron_cli._CRON_SUBCOMMANDS, verb, fail)
+        with pytest.raises(RuntimeError, match="handler bug"):
+            cron_command(Namespace(cron_command=verb))
+        assert capsys.readouterr().err == ""
+
     def test_edit_persists_user_owned_inference_pins(self, tmp_cron_dir, capsys):
         job = create_job(prompt="Daily report", schedule="every 1h")
         parser = argparse.ArgumentParser(prog="hermes")

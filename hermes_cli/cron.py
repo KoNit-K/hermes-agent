@@ -990,12 +990,14 @@ _CRON_SUBCOMMANDS["rm"] = _CRON_SUBCOMMANDS["delete"] = _CRON_SUBCOMMANDS["remov
 
 def cron_command(args):
     """Handle cron subcommands."""
+    from cron.jobs import CronStoreError
+
     subcmd = getattr(args, 'cron_command', None)
     handler = _CRON_SUBCOMMANDS.get("list" if subcmd is None else subcmd)
     if handler is not None:
         try:
             return handler(args)
-        except RuntimeError as exc:
+        except CronStoreError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
     print(f"Unknown cron command: {subcmd}\n"
