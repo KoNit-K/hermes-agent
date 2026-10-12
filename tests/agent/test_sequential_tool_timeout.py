@@ -291,16 +291,16 @@ def test_sequential_tool_interrupt_hides_lifecycle_cancel_detail(tmp_path, monke
 
 @pytest.mark.parametrize(
     "clarify_timeout",
-    [resolve_clarify_timeout({}), 0],
-    ids=["default-3600s", "unlimited"],
+    [resolve_clarify_timeout({})],
+    ids=["default-unlimited"],
 )
 def test_sequential_timeout_does_not_cut_clarify_human_wait(
     tmp_path, monkeypatch, clarify_timeout
 ):
     """Clarify waits on a human; the generic sequential deadline must not fire.
 
-    Default ``agent.clarify_timeout`` is 3600s; ``<= 0`` is unlimited. Both
-    outlast ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` (default 420s).
+    Default ``agent.clarify_timeout`` is unlimited and outlasts
+    ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` (default 420s).
     """
     agent = _make_agent(tmp_path)
     monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "1.0")

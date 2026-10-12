@@ -222,13 +222,10 @@ DEFAULT_CONFIG = {
         # Inactivity warning (seconds), once per run before gateway_timeout; no interrupt. 0 = off.
         "gateway_timeout_warning": 900,
         # Max seconds any surface (CLI, TUI/Desktop, messaging gateway) blocks an agent awaiting a
-        # clarify-tool reply; then it unblocks with "[user did not respond within Xm]". 0 or less =
-        # unlimited. Resolved by tools/clarify_gateway.py::resolve_clarify_timeout (a legacy
-        # top-level ``clarify.timeout`` still wins when explicitly set).
-        # 1h because users step away and a shorter value evicted the entry mid-think so a later
-        # button tap hit a dead entry. Tradeoff: a higher value holds the gateway's running-agent
-        # guard longer for a genuinely abandoned prompt — lower it to free the guard sooner. See #32762.
-        "clarify_timeout": 3600,
+        # clarify-tool reply. Zero is unlimited, so a blocking question pauses until it is answered.
+        # Resolved by tools/clarify_gateway.py::resolve_clarify_timeout; a legacy top-level
+        # ``clarify.timeout`` still wins when explicitly set.
+        "clarify_timeout": 0,
         # "Still working" status interval (seconds); 0 = off. Lower = faster feedback, more noise;
         # 180 catches spinning weak-model runs before users /restart.
         "gateway_notify_interval": 180,

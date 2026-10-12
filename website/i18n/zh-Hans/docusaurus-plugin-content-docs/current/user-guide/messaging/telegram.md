@@ -1202,7 +1202,7 @@ telegram:
 
 点击按钮回答，或点击 **Other** 输入自由形式的回复（你发送的下一条消息成为答案）。开放式 `clarify` 调用（无预设选项）跳过按钮，直接捕获你的下一条消息。
 
-通过 `~/.hermes/config.yaml` 中的 `agent.clarify_timeout` 配置响应超时（默认 `3600` 秒；`0` 或更小 = 不限时）。如果你在超时内没有响应，Agent 会以哨兵消息解除阻塞并适应，而不是挂起。
+可通过 `~/.hermes/config.yaml` 中的 `agent.clarify_timeout` 配置可选的响应超时（默认 `0`，即不限时）。默认情况下，Agent 会等待你的回答而不会超时。
 
 ## 推送通知音量
 
