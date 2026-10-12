@@ -571,12 +571,37 @@ def _oauth_wire_namer(anthropic_tools: list[dict[str, Any]]):
 _OAUTH_SYSTEM_REPLACEMENTS = (
     ("Hermes Agent", "Claude Code"), ("Hermes agent", "Claude Code"), ("Nous Research", "Anthropic"),
 )
+# A system block can include paths loaded from user-owned memory and context files. Path
+# components may contain spaces, so protect the span through its next separator rather than
+# deciding from only the adjacent character (#137003).
+_OAUTH_PROTECTED_PATH_PATTERN = re.compile(
+    r"""(?x)(?:~|[A-Za-z]:)?[\\/](?:[^\s\\/]+(?:\s+[^\s\\/]+)*[\\/])+"""
+)
 # The slug is rewritten only as a standalone prose word. Joined to a host, path, repo, mailbox
 # or quoted as an identifier (``hermes-agent.nousresearch.com``, ``~/.hermes/hermes-agent/venv``,
 # ``NousResearch/hermes-agent``, ``skill_view(name='hermes-agent')``) it is an address the model
 # dereferences, and the rewritten form does not exist (#48860). The OPENING quote marks an
 # identifier; a sentence-final ``.`` or a possessive ``'s`` is prose.
 _OAUTH_SLUG_PATTERN = re.compile(r"""(?<![\w./:@'"`-])hermes-agent(?![\w/@-]|\.\w)""")
+
+
+def _apply_oauth_system_replacements(text: str) -> str:
+    """Rebrand prose while leaving filesystem path components dereferenceable."""
+    def rewrite_prose(prose: str) -> str:
+        for old, new in _OAUTH_SYSTEM_REPLACEMENTS:
+            prose = re.sub(
+                rf"(?<!['\"`]){re.escape(old)}(?!['\"`])", new, prose,
+            )
+        return prose
+
+    parts = []
+    start = 0
+    for path_match in _OAUTH_PROTECTED_PATH_PATTERN.finditer(text):
+        parts.append(rewrite_prose(text[start:path_match.start()]))
+        parts.append(path_match.group())
+        start = path_match.end()
+    parts.append(rewrite_prose(text[start:]))
+    return "".join(parts)
 
 
 def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_wire):
@@ -591,8 +616,7 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
     for block in system:
         if isinstance(block, dict) and block.get("type") == "text":
             text = block.get("text", "")
-            for old, new in _OAUTH_SYSTEM_REPLACEMENTS:
-                text = text.replace(old, new)
+            text = _apply_oauth_system_replacements(text)
             text = _OAUTH_SLUG_PATTERN.sub("claude-code", text)
             block["text"] = _apply_oauth_prose_aliases(text)
     for tool in anthropic_tools or []:

@@ -1837,6 +1837,35 @@ def test_oauth_system_prompt_sanitizer_preserves_docs_url():
     assert kwargs["system"][-1]["text"].count("claude-code") == 3  # the caller's block, not the CC prefix
 
 
+def test_oauth_system_prompt_sanitizer_preserves_spaced_path_components():
+    """Regression for #137003: OAuth rebranding must not rename real directories."""
+    kwargs = build_anthropic_kwargs(
+        model="claude-sonnet-4-20250514",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Read /Users/alice/Projects/My Hermes Agent/notes and "
+                    r"C:\Users\alice\Nous Research\runbook. "
+                    "Use skill_view(name='Hermes Agent') for the identifier. "
+                    "Hermes Agent by Nous Research provides the instructions."
+                ),
+            },
+            {"role": "user", "content": "Hi"},
+        ],
+        tools=None,
+        max_tokens=4096,
+        reasoning_config=None,
+        is_oauth=True,
+    )
+
+    system_text = "\n".join(block["text"] for block in kwargs["system"])
+    assert "/Users/alice/Projects/My Hermes Agent/notes" in system_text
+    assert r"C:\Users\alice\Nous Research\runbook" in system_text
+    assert "skill_view(name='Hermes Agent')" in system_text
+    assert "Claude Code by Anthropic provides the instructions." in system_text
+
+
 def test_unsupported_inline_image_subtype_downgrades_to_text_for_anthropic(monkeypatch):
     """Sibling of the Responses guard: a data:image/svg+xml (or bmp/tiff) part forwarded verbatim as
     ``media_type`` 400s the Anthropic request on every replay — it must become a text placeholder
