@@ -8,6 +8,7 @@ normal delete transaction and remains available. Driven through the production e
 """
 
 import argparse
+import sqlite3
 import subprocess
 import sys
 import time
@@ -29,20 +30,32 @@ _HOLDER = (
 )
 
 
-@pytest.fixture
-def state_db(monkeypatch, tmp_path):
+@pytest.fixture(params=["wal", "delete"])
+def state_db(monkeypatch, tmp_path, request):
     import hermes_state
+    import hermes_state_wal
     from hermes_state import SessionDB
 
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(hermes_state, "_default_db_path", lambda: db_path)
+    # Exercise both journal modes on this disposable store, independently of the host's
+    # WAL-reset fallback. This holder keeps an idle connection, not an active transaction.
+    monkeypatch.setattr(hermes_state_wal, "resolve_journal_mode", lambda: request.param)
+    monkeypatch.setattr(hermes_state_wal, "is_sqlite_wal_reset_vulnerable", lambda: False)
     seed = SessionDB(db_path=db_path)
+    assert seed._conn.execute("PRAGMA journal_mode").fetchone()[0] == request.param
+    seed.create_session("fresh", "cli")
+    seed.append_message("fresh", "user", "keep me")
+    seed.end_session("fresh", "done")
     seed.create_session("seed", "cli")
+    seed.append_message("seed", "user", "old message")
     with seed._lock:
         seed._conn.execute(
             "UPDATE sessions SET ended_at=?, started_at=?, last_activity_at=?, message_count=1 WHERE id='seed'",
             (time.time() - 100 * 86400,) * 3,
         )
+        seed._conn.execute("UPDATE messages SET timestamp=? WHERE session_id='seed'",
+                           (time.time() - 100 * 86400,))
         seed._conn.commit()
     seed.close()
     return db_path
@@ -85,8 +98,9 @@ def _sessions_subparsers():
     return nested.choices
 
 
-@pytest.mark.parametrize("action", sorted(sessions_cmd._HELD_STORE_ACTIONS))
+@pytest.mark.parametrize("action", ["optimize", "optimize-storage"])
 def test_store_rewrites_refuse_and_name_the_holder_until_forced(action, state_db, foreign_holder, capsys):
+    assert foreign_holder.poll() is None
     assert sessions_cmd.cmd_sessions(_args(action, force=False)) == 1
     out = capsys.readouterr().out
     assert f"PID {foreign_holder.pid} (" in out
@@ -106,12 +120,19 @@ def test_store_rewrites_refuse_and_name_the_holder_until_forced(action, state_db
 
 def test_prune_deletes_while_a_gateway_holds_the_store(state_db, foreign_holder, capsys):
     # A preview never rewrites anything, so it is answered even while the holder lives.
+    assert foreign_holder.poll() is None
     prune_preview = _args("prune", force=False)
     prune_preview.dry_run = True
     prune_preview.yes = False
     assert sessions_cmd.cmd_sessions(prune_preview) is None
     assert "Refusing" not in capsys.readouterr().out
+    with sqlite3.connect(state_db) as conn:
+        assert conn.execute("SELECT id FROM sessions WHERE id='seed'").fetchone() is not None
     prune_preview.dry_run = False
     prune_preview.yes = True
     assert sessions_cmd.cmd_sessions(prune_preview) is None
     assert "Pruned 1 session(s)." in capsys.readouterr().out
+    assert foreign_holder.poll() is None
+    with sqlite3.connect(state_db) as conn:
+        assert conn.execute("SELECT id FROM sessions ORDER BY id").fetchall() == [("fresh",)]
+        assert conn.execute("SELECT session_id FROM messages").fetchall() == [("fresh",)]
