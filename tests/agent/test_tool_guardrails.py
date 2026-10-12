@@ -232,6 +232,22 @@ def test_identical_call_streak_never_halts_when_hard_stop_disabled_or_for_poller
     assert hard.halt_decision is None
 
 
+def test_blocks_repeated_successful_mutation_before_sixth_call_even_when_results_change():
+    """Regression for #137170: comment IDs make each successful write result distinct."""
+    controller = ToolCallGuardrailController()
+    args = {"task_id": "task-1", "body": "Awaiting a human decision."}
+
+    for comment_id in range(1, 6):
+        assert controller.before_call("kanban_comment", args).action == "allow"
+        controller.after_call("kanban_comment", args, f'{{"success": true, "id": {comment_id}}}', failed=False)
+
+    decision = controller.before_call("kanban_comment", args)
+
+    assert decision.action == "block"
+    assert decision.code == "repeated_successful_call_block"
+    assert decision.count == 5
+
+
 
 
 
