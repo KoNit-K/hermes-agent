@@ -694,6 +694,7 @@ _GREP_SHORT_OPTIONS_WITH_ARG = {"A", "B", "C", "D", "d", "e", "f", "m"}
 _BASH_OPTIONS_WITH_ARG = {"-O", "+O", "-o", "+o", "--init-file", "--rcfile"}
 _BASH_SHORT_OPTION_LETTERS = frozenset("ilrsDcabefhkmnptuvxBCEHPTOo")
 _MAX_DETECTION_COMMAND_CHARS, _MAX_SEPARATOR_FREE_COMMAND_CHARS, _MAX_DETECTION_SEGMENTS = 128_000, 4_096, 25_000
+_MAX_DETECTION_COMMAND_SUBSTITUTION_DEPTH = 256
 _PARSER_LIMIT_DESCRIPTION = "command parser limit exceeded"
 _MALFORMED_EXEC_DESCRIPTION = "command parser limit or malformed executable payload"
 _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION = "stop/restart hermes gateway via shell-spliced verb (kills running agents)"
@@ -708,7 +709,44 @@ def _command_parser_limit_exceeded(command: str) -> bool:
     # Long separator-free input has no compound-command utility and makes every regex inspect one giant token.
     if len(command) > _MAX_SEPARATOR_FREE_COMMAND_CHARS and not any(char in command for char in ";&|\n"):
         return True
+    if _command_substitution_nesting_limit_exceeded(command):
+        return True
     return sum(command.count(char) for char in ";&|\n") >= _MAX_DETECTION_SEGMENTS
+
+
+def _command_substitution_nesting_limit_exceeded(command: str) -> bool:
+    """Bound recursion in shell-aware detection with an explicit shell-context stack."""
+    contexts: list[list[str | int | None]] = [[None, None, 0]]  # closer, quote, ordinary-paren depth
+    index = 0
+    while index < len(command):
+        closer, quote, parens = contexts[-1]
+        char = command[index]
+        if quote != "'" and char == "\\":
+            index += 2
+            continue
+        if char == quote or (quote is None and char in "'\""):
+            contexts[-1][1] = None if quote else char
+        elif quote != "'" and command.startswith("$(", index):
+            contexts.append([")", None, 0])
+            if len(contexts) - 1 > _MAX_DETECTION_COMMAND_SUBSTITUTION_DEPTH:
+                return True
+            index += 1
+        elif quote != "'" and char == "`":
+            if closer == "`":
+                contexts.pop()
+            else:
+                contexts.append(["`", None, 0])
+                if len(contexts) - 1 > _MAX_DETECTION_COMMAND_SUBSTITUTION_DEPTH:
+                    return True
+        elif quote is None and char == "(":
+            contexts[-1][2] = int(parens) + 1
+        elif quote is None and char == ")":
+            if parens:
+                contexts[-1][2] = int(parens) - 1
+            elif closer == ")":
+                contexts.pop()
+        index += 1
+    return False
 
 
 def _backtick_end_from(segment: str, i: int) -> int | None:

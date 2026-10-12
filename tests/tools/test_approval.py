@@ -1231,6 +1231,31 @@ class TestQuotedCommandWordVariants:
         assert any("echo `$(echo rm) -rf ~/.ssh`" in v for v in variants), variants
 
 
+class TestParserWorkLimits:
+    """Parser preflight must bound nesting as well as command length (#137066)."""
+
+    @staticmethod
+    def _nested_substitution(depth: int) -> str:
+        return "$(" * depth + "echo safe" + ")" * depth
+
+    def test_deep_command_substitutions_fail_closed_without_recursion_error(self):
+        command = self._nested_substitution(1_000)
+
+        assert approval_detection._command_parser_limit_exceeded(command) is True
+        assert detect_hardline_command(command) == (True, "command parser limit exceeded")
+        assert detect_dangerous_command(command) == (
+            True,
+            "command parser limit exceeded",
+            "command parser limit exceeded",
+        )
+
+    def test_ordinary_command_substitution_remains_within_parser_budget(self):
+        command = self._nested_substitution(3)
+
+        assert approval_detection._command_parser_limit_exceeded(command) is False
+        assert detect_hardline_command(command) == (False, None)
+
+
 class TestGitDestructiveOps:
     """git reset --hard, push --force, clean -f, branch -D can destroy
     work and rewrite shared history. Not covered by rm/chmod patterns.
