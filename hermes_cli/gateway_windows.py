@@ -195,6 +195,7 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
         proc = subprocess.run(
             [schtasks, *args], capture_output=True, text=False,
             timeout=_SCHTASKS_TIMEOUT_S, creationflags=windows_hide_flags(),
+            check=False,
         )
         return (
             proc.returncode,
@@ -875,7 +876,7 @@ def _start_or_report_running(running_pids: list[int] | None = None) -> None:
     if running_pids:
         _report_already_running(running_pids)
     else:
-        pid = _spawn_detached()
+        _spawn_detached()
         _report_gateway_start("direct spawn")
 
 
@@ -1866,7 +1867,7 @@ def start() -> None:
     # Scheduled Task / Startup entries are only login persistence. The sole
     # ``schtasks /Run`` path is post-update Job Object recovery in
     # ``update_cmd_windows`` (#107002); do not change ordinary start() to /Run.
-    pid = _spawn_detached()
+    _spawn_detached()
     _report_gateway_start("direct spawn")
 
 
