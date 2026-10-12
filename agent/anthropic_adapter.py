@@ -571,11 +571,17 @@ def _oauth_wire_namer(anthropic_tools: list[dict[str, Any]]):
 _OAUTH_SYSTEM_REPLACEMENTS = (
     ("Hermes Agent", "Claude Code"), ("Hermes agent", "Claude Code"), ("Nous Research", "Anthropic"),
 )
-# A system block can include paths loaded from user-owned memory and context files. Path
-# components may contain spaces, so protect the span through its next separator rather than
-# deciding from only the adjacent character (#137003).
+# User-owned paths must remain dereferenceable, including a terminal brand directory.
+# Unquoted spaces are ambiguous: allow the brand plus one prefix word ("My Hermes Agent"),
+# not arbitrary prose up to a later separator. Quote paths with longer spaced components.
+_OAUTH_PATH_TOKEN = r"""[^\s\\/'"`<>|,;:!?()\[\]{}]"""
+_OAUTH_PATH_COMPONENT = (
+    rf"(?:{_OAUTH_PATH_TOKEN}+[ ])?(?:Hermes[ ](?:Agent|agent)|Nous[ ]Research){_OAUTH_PATH_TOKEN}*"
+    rf"|{_OAUTH_PATH_TOKEN}+"
+)
 _OAUTH_PROTECTED_PATH_PATTERN = re.compile(
-    r"""(?x)(?:~|[A-Za-z]:)?[\\/](?:[^\s\\/]+(?:\s+[^\s\\/]+)*[\\/])+"""
+    r"""(?P<quote>['"`])(?:~|[A-Za-z]:)?[\\/][^\r\n]*?(?P=quote)"""
+    rf"|(?:~|[A-Za-z]:)?[\\/](?:{_OAUTH_PATH_COMPONENT})(?:[\\/](?:{_OAUTH_PATH_COMPONENT}))*"
 )
 # The slug is rewritten only as a standalone prose word. Joined to a host, path, repo, mailbox
 # or quoted as an identifier (``hermes-agent.nousresearch.com``, ``~/.hermes/hermes-agent/venv``,
