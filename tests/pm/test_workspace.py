@@ -117,6 +117,24 @@ def test_core_only_generation_carries_no_release_age_cutoff(layout):
     assert "exclude-newer" not in generated and "[tool.uv]" in generated
 
 
+def test_lint_only_plugin_pyproject_becomes_valid_virtual_member(tmp_path):
+    """A lint config is not package metadata until the workspace snapshots it."""
+    import tomllib
+
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "pyproject.toml").write_text(
+        '[tool.ruff]\nline-length = 100\n', encoding="utf-8")
+
+    member = ws._workspace_member(plugin, tmp_path / "workspace", identity=plugin)
+
+    generated = tomllib.loads((member / "pyproject.toml").read_text(encoding="utf-8"))
+    assert generated["project"] == {
+        "name": f"hermes-plugin-{ws._member_key(plugin)}",
+        "version": "0.0.0",
+    }
+
+
 def test_undated_index_failure_names_the_index_not_a_conflict():
     """uv's "has no publish time" is the index omitting upload times (#135589), not a conflict."""
     from pm.workspace import ResolutionConflict, classify_uv_failure
