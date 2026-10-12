@@ -369,6 +369,26 @@ class TestGatewayRuntimeStatus:
         assert payload["start_time"] != 1000.0, "start_time should be overwritten on restart"
 
 
+    def test_write_runtime_status_restamps_home_from_previous_writer(self, tmp_path, monkeypatch):
+        """Regression for #136909: a reloaded state file names its current writer's home."""
+        old_home = tmp_path / "old-home"
+        new_home = tmp_path / "new-home"
+        old_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(old_home))
+        status.write_runtime_status(gateway_state="running")
+        assert status.flush_runtime_status(timeout=2.0)
+
+        old_home.rename(new_home)
+        old_home.symlink_to(new_home, target_is_directory=True)
+        monkeypatch.setenv("HERMES_HOME", str(new_home))
+
+        status.write_runtime_status(gateway_state="running", reload_existing=True)
+        assert status.flush_runtime_status(timeout=2.0)
+
+        payload = status.read_runtime_status()
+        assert payload["hermes_home"] == str(new_home.resolve())
+
+
     def test_runtime_status_running_pid_rejects_pid_reused_by_other_profile(self, monkeypatch):
         """Regression (user report): a stale profile's recycled PID must not be
         reported running just because it now hosts a DIFFERENT profile's gateway.
