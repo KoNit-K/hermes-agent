@@ -204,6 +204,25 @@ def test_bypass_fails_the_gate(tmp_path, origin, case):
     assert not any(line.startswith("::error::forged") for line in res.stdout.splitlines())
 
 
+def test_runner_generated_bytecode_does_not_fail_the_gate(tmp_path, origin):
+    """Rule 17 scans the pin, not files created while validating the pin."""
+    sha = _git(origin, "rev-parse", "HEAD")
+    entry = _entry(tmp_path, "ok.yaml", sha)
+    res = _gate(
+        tmp_path,
+        origin,
+        [entry],
+        hermes_stub=(
+            "#!/bin/sh\n"
+            "for arg; do plugin_dir=$arg; done\n"
+            'mkdir -p "$plugin_dir/__pycache__"\n'
+            'printf "bytecode" > "$plugin_dir/__pycache__/runner.pyc"\n'
+        ),
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert f"PASS: {entry}" in res.stdout
+
+
 def test_one_entry_cannot_skip_or_impersonate_the_others(tmp_path, origin):
     """Plugin code that drains stdin must not consume the remaining entry list,
     and an entry whose parser dies must fail itself rather than inherit the

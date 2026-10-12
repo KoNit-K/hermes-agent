@@ -23,6 +23,8 @@ Exit 0 = clean, 1 = a payload was found (lines on stdout), 2 = bad usage.
 from __future__ import annotations
 
 import io
+import os
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -132,13 +134,38 @@ def _file_problem(path: Path, rel: str) -> str | None:
 
 
 def scan(plugin_dir: Path) -> list[str]:
+    """Scan only the files shipped by the pinned Git revision.
+
+    The catalog workflow validates before it invokes this scanner, and that
+    validation can create ignored ``__pycache__`` files.  Those runner-created
+    files are not part of the reviewed pin, whereas a tracked ``.pyc`` still is.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(plugin_dir), "ls-files", "-z"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return ["could not enumerate the pinned Git content"]
+    if listed.returncode:
+        return ["could not enumerate the pinned Git content"]
+
     findings: list[str] = []
-    for path in sorted(plugin_dir.rglob("*")):
-        if path.is_symlink() or not path.is_file():
+    for rel in sorted(os.fsdecode(name) for name in listed.stdout.split(b"\0") if name):
+        path = plugin_dir / rel
+        if not path.is_relative_to(plugin_dir):
+            findings.append(f"{rel}: tracked path escapes the pinned plugin directory")
             continue
-        if "/.git/" in "/" + path.as_posix():
+        if path.is_symlink():
+            try:
+                path = path.resolve(strict=True)
+            except OSError:
+                findings.append(f"{rel}: symlink target could not be read")
+                continue
+        if not path.is_file():
             continue
-        problem = _file_problem(path, path.relative_to(plugin_dir).as_posix())
+        problem = _file_problem(path, rel)
         if problem:
             findings.append(problem)
     return findings
