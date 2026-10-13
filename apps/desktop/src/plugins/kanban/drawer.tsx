@@ -873,8 +873,9 @@ export function TaskDrawer({
   // Optimistic status change against the task cache; rolls back + toasts on a
   // rejected transition (the backend enforces the workflow).
   const moveMut = useMutation({
-    mutationFn: (status: string) => patchTask(id!, { status }),
-    onMutate: async status => {
+    mutationFn: (patch: Record<string, string>) => patchTask(id!, patch),
+    onMutate: async patch => {
+      const { status } = patch
       await qc.cancelQueries({ queryKey: taskKey(scope, slug, id!) })
       const previous = qc.getQueryData<KanbanTaskDetail>(taskKey(scope, slug, id!))
 
@@ -956,7 +957,24 @@ export function TaskDrawer({
       return
     }
 
-    moveMut.mutate(status)
+    if (status === 'done') {
+      const response = window.prompt('Completion summary for this task. This is stored as the task result.', '')
+      const summary = response?.trim()
+
+      if (!summary) {
+        if (response !== null) {
+          host.notify({ kind: 'error', message: 'Completion summary is required before marking a task done.' })
+        }
+
+        return
+      }
+
+      moveMut.mutate({ result: summary, status, summary })
+
+      return
+    }
+
+    moveMut.mutate({ status })
   }
 
   // The shared Dialog owns the chrome tokens, focus trap, Esc and outside-click

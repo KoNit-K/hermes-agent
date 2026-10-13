@@ -32,6 +32,7 @@ let detail: object
 let client: QueryClient
 let disposeApi: () => void
 let disposeLocales: () => void
+let patches: Record<string, unknown>[]
 
 const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<unknown> => {
   if (path === '/tasks/t_example/attachments' && options?.method === 'POST') {
@@ -41,6 +42,12 @@ const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<un
   }
 
   if (path.startsWith('/tasks/t_example/comments') && options?.method === 'POST') {
+    return { ok: true }
+  }
+
+  if (path === '/tasks/t_example' && options?.method === 'PATCH') {
+    patches.push(options.body as Record<string, unknown>)
+
     return { ok: true }
   }
 
@@ -64,6 +71,7 @@ const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<un
 })
 
 beforeEach(() => {
+  patches = []
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   disposeLocales = registerPluginLocales('kanban', KANBAN_LOCALES)
   disposeApi = bindApi(
@@ -240,6 +248,26 @@ describe('task attachment compatibility', () => {
 })
 
 describe('task modal dialog', () => {
+  it('collects a completion summary before moving a card to done', async () => {
+    vi.stubGlobal('prompt', vi.fn(() => 'Shipped the fix'))
+    openDrawer()
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Todo' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Done' }))
+
+    await waitFor(() => expect(patches).toEqual([{ result: 'Shipped the fix', status: 'done', summary: 'Shipped the fix' }]))
+  })
+
+  it('keeps the task in place when its completion summary is cancelled', async () => {
+    vi.stubGlobal('prompt', vi.fn(() => null))
+    openDrawer()
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Todo' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Done' }))
+
+    await waitFor(() => expect(patches).toEqual([]))
+  })
+
   it('is a modal dialog named by the task title that Esc dismisses', async () => {
     detail = { ...legacyDetail, attachments: [] }
     const onClose = vi.fn()

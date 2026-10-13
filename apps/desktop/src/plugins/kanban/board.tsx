@@ -1199,8 +1199,9 @@ export function KanbanBoardPage() {
   const total = filtered?.columns.reduce((sum, col) => sum + col.tasks.length, 0) ?? 0
 
   const moveMut = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) => patchTask(id, { status }),
-    onMutate: async ({ id, status }) => {
+    mutationFn: ({ id, patch }: { id: string; patch: Record<string, string> }) => patchTask(id, patch),
+    onMutate: async ({ id, patch }) => {
+      const { status } = patch
       await qc.cancelQueries({ queryKey: boardKey(scope, slug, archived) })
       const previous = qc.getQueryData<KanbanBoard>(boardKey(scope, slug, archived))
 
@@ -1258,7 +1259,24 @@ export function KanbanBoardPage() {
       return
     }
 
-    moveMut.mutate({ id, status })
+    if (status === 'done') {
+      const response = window.prompt('Completion summary for this task. This is stored as the task result.', '')
+      const summary = response?.trim()
+
+      if (!summary) {
+        if (response !== null) {
+          host.notify({ kind: 'error', message: 'Completion summary is required before marking a task done.' })
+        }
+
+        return
+      }
+
+      moveMut.mutate({ id, patch: { result: summary, status, summary } })
+
+      return
+    }
+
+    moveMut.mutate({ id, patch: { status } })
   }
 
   const errorMessage = error ? errText(error) : null
