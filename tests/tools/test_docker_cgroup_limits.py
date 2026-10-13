@@ -77,30 +77,79 @@ def test_probe_definitive_cgroup_failure_is_cached(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("driver, backing", [("overlay2", "ext4"), ("btrfs", "xfs")])
+def test_storage_opt_known_unsupported_daemon_skips_create(monkeypatch, driver, backing):
+    """Regression for #137493: local daemon facts can reject quotas without a container."""
+    calls = []
+
+    def _capture(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0,
+            stdout=f'{driver}|/var/lib/docker|[["Backing Filesystem", "{backing}"]]\n',
+            stderr="")
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "run_capture", _capture)
+
+    assert docker_env.DockerEnvironment._storage_opt_supported() is False
+    assert docker_env._storage_opt_ok is False
+    assert calls == [["/usr/bin/docker", "info", "--format", "{{.Driver}}|{{.DockerRootDir}}|{{json .DriverStatus}}"]]
+
+
+@pytest.mark.parametrize("mount_options, expected", [("rw,pquota", True), ("rw,relatime", False)])
+def test_storage_opt_xfs_mount_options_are_decided_without_create(monkeypatch, mount_options, expected):
+    calls = []
+
+    def _capture(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0,
+            stdout='overlay2|/Users/docker|[["Backing Filesystem", "xfs"]]\n',
+            stderr="")
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "run_capture", _capture)
+    monkeypatch.setattr(
+        docker_env.Path,
+        "read_text",
+        lambda *args, **kwargs: f"/dev/sda /Users xfs {mount_options} 0 0\n")
+
+    assert docker_env.DockerEnvironment._storage_opt_supported() is expected
+    assert docker_env._storage_opt_ok is expected
+    assert len(calls) == 1
+    assert calls[0][1] == "info"
+
+
 @pytest.mark.parametrize(
-    "info, create, cached",
+    "create, cached",
     [
-        # `docker info` failing (daemon cold-start) is transient: not "not overlay2".
-        ((1, "", "Cannot connect to the Docker daemon"), None, None),
         # The daemon rejecting --storage-opt is a host property: cached False.
-        ((0, "overlay2\n", ""), (125, "", "Error response from daemon: --storage-opt is "
-                                          "supported only for overlay2 with pquota"), False),
+        ((125, "", "Error response from daemon: --storage-opt is supported only for overlay2 with pquota"), False),
         # A create failure that never reached the storage check (pull error) is transient.
-        ((0, "overlay2\n", ""), (125, "", "Unable to find image 'hello-world:latest'"), None),
+        ((125, "", "Unable to find image 'hello-world:latest'"), None),
     ],
 )
-def test_storage_opt_probe_caches_only_definitive_answers(monkeypatch, info, create, cached):
-    """``_storage_opt_supported`` must not latch disk quota off for the process on a
-    failure that says nothing about pquota support (#116162)."""
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+def test_storage_opt_create_fallback_caches_only_definitive_answers(monkeypatch, create, cached):
+    """A remote or otherwise indeterminate XFS mount still uses the daemon as authority."""
+    calls = []
 
-    def _run(cmd, *a, **k):
-        rc, out, err = info if cmd[1] == "info" else create
+    def _capture(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "info":
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                stdout='overlay2|/remote/docker|[["Backing Filesystem", "xfs"]]\n', stderr="")
+        rc, out, err = create
         return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
 
-    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "run_capture", _capture)
+    monkeypatch.setattr(docker_env, "_xfs_mount_has_pquota", lambda root: None)
+
     assert docker_env.DockerEnvironment._storage_opt_supported() is False
     assert docker_env._storage_opt_ok is cached
+    assert [cmd[1] for cmd in calls] == ["info", "create"]
 
 
 def test_transient_probe_failure_recovers_on_next_spawn(monkeypatch):

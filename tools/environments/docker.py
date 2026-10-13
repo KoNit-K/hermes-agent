@@ -426,6 +426,63 @@ def _resolve_host_user_spec() -> Optional[str]:
 
 _storage_opt_ok: Optional[bool] = None  # cached result across instances
 _cgroup_limits_ok: Optional[bool] = None  # cached result across instances
+_STORAGE_PQUOTA_OPTIONS = {"pquota", "prjquota"}
+
+
+def _storage_fingerprint_from_info(docker: str) -> Optional[dict[str, str]]:
+    """Return the live daemon's storage facts, or ``None`` when they are unavailable."""
+    result = run_capture(
+        [docker, "info", "--format", "{{.Driver}}|{{.DockerRootDir}}|{{json .DriverStatus}}"], timeout=10)
+    if result.returncode != 0:
+        return None
+    try:
+        driver, root, status = result.stdout.strip().split("|", 2)
+        backing = dict(json.loads(status) or []).get("Backing Filesystem", "")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not root.strip():
+        return None
+    return {"driver": driver.strip().lower(), "backing": str(backing).strip().lower(), "root": root.strip()}
+
+
+def _xfs_mount_has_pquota(root_dir: str) -> Optional[bool]:
+    """Return XFS project-quota support for the local mount holding *root_dir*.
+
+    ``None`` means the daemon's root is not on a readable local XFS mount, as
+    with a remote daemon or a Docker Desktop VM.
+    """
+    try:
+        mounts = Path("/proc/mounts").read_text(encoding="utf-8-sig")
+        root = Path(os.path.realpath(root_dir))
+    except OSError:
+        return None
+    best_mount = Path()
+    options: Optional[str] = None
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[2] != "xfs":
+            continue
+        mount_point = Path(fields[1].replace(r"\040", " "))
+        try:
+            matches = root.is_relative_to(mount_point)
+        except ValueError:
+            continue
+        if matches and len(str(mount_point)) >= len(str(best_mount)):
+            best_mount, options = mount_point, fields[3]
+    return None if options is None else bool(_STORAGE_PQUOTA_OPTIONS & set(options.split(",")))
+
+
+def _storage_opt_create_probe(docker: str) -> Optional[bool]:
+    """Ask the daemon only when local storage facts cannot decide quota support."""
+    probe = run_capture([docker, "create", "--storage-opt", "size=1m", "hello-world"], timeout=15)
+    if probe.returncode == 0:
+        if probe.stdout.strip():
+            subprocess.run([docker, "rm", probe.stdout.strip()], capture_output=True, timeout=5,
+                           stdin=subprocess.DEVNULL, check=False)
+        return True
+    if "storage" in (probe.stderr or "").lower():
+        return False
+    return None
 
 
 def _cgroup_limits_available(image: str) -> bool:
@@ -1166,29 +1223,22 @@ class DockerEnvironment(BaseEnvironment):
     @staticmethod
     def _storage_opt_supported() -> bool:
         """Whether ``--storage-opt size=`` works (only overlay2 on XFS with pquota; ext4 errors out).
-        Only definitive answers are cached: a probe that could not run (daemon cold-start,
-        hello-world pull timeout) says nothing about pquota support and is retried next spawn."""
+        Only definitive answers are cached; a daemon probe is the fallback when local mount
+        facts cannot decide (for example, a remote daemon)."""
         global _storage_opt_ok
         if _storage_opt_ok is not None:
             return _storage_opt_ok
         try:
             docker = find_docker() or "docker"
-            result = run_capture([docker, "info", "--format", "{{.Driver}}"], timeout=10)
-            if result.returncode != 0:
+            fingerprint = _storage_fingerprint_from_info(docker)
+            if fingerprint is None:
                 return False  # daemon unreachable etc. is transient; retry next spawn
-            if result.stdout.strip().lower() != "overlay2":
-                _storage_opt_ok = False  # storage driver is a host property
-                return False
-            # Probe with a real create — the fastest reliable check.
-            probe = run_capture([docker, "create", "--storage-opt", "size=1m", "hello-world"], timeout=15)
-            if probe.returncode == 0:
-                _storage_opt_ok = True
-                if probe.stdout.strip():
-                    subprocess.run([docker, "rm", probe.stdout.strip()],
-                                   capture_output=True, timeout=5, stdin=subprocess.DEVNULL, check=False)
-            elif "storage" in (probe.stderr or "").lower():
-                _storage_opt_ok = False  # daemon rejected --storage-opt: a host property
-            # else: pull/daemon failure unrelated to storage-opt; not cached, retried next spawn
+            if fingerprint["driver"] != "overlay2" or fingerprint["backing"] != "xfs":
+                _storage_opt_ok = False
+            elif (pquota := _xfs_mount_has_pquota(fingerprint["root"])) is None:
+                _storage_opt_ok = _storage_opt_create_probe(docker)
+            else:
+                _storage_opt_ok = pquota
         except Exception:
             return False  # TimeoutExpired, missing binary; transient, retried next spawn
         logger.debug("Docker --storage-opt support: %s", _storage_opt_ok)
