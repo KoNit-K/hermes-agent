@@ -14,6 +14,7 @@ import argparse
 
 
 from hermes_cli.subcommands.computer_use import build_computer_use_parser
+from hermes_cli.subcommands.moa import build_moa_parser
 from hermes_cli.subcommands.worktree import build_worktree_parser
 
 
@@ -48,3 +49,27 @@ def test_computer_use_no_action_prints_help(capsys):
     ns = parser.parse_args(["computer-use"])
     ns.func(ns)
     assert "install" in capsys.readouterr().out
+
+
+def test_moa_rm_alias_dispatches_to_delete(monkeypatch):
+    """The advertised ``rm`` spelling must reach the delete handler (#137579)."""
+    from hermes_cli import moa_cmd
+
+    parser, sub = _tree()
+    build_moa_parser(sub)
+    config = {
+        "moa": {
+            "default_preset": "default",
+            "presets": {
+                "default": {"reference_models": [], "aggregator": {}},
+                "review": {"reference_models": [], "aggregator": {}},
+            },
+        }
+    }
+    monkeypatch.setattr(moa_cmd, "load_config", lambda: config)
+    monkeypatch.setattr(moa_cmd, "save_config", lambda saved: None)
+
+    ns = parser.parse_args(["moa", "rm", "review"])
+    ns.func(ns)
+
+    assert "review" not in config["moa"]["presets"]
