@@ -1989,6 +1989,7 @@ def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
         "timeout": "TERMINAL_TIMEOUT",
         "home_mode": "TERMINAL_HOME_MODE",
         "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
+        "local_memory_max_mb": "TERMINAL_LOCAL_MEMORY_MAX_MB",
         "docker_image": "TERMINAL_DOCKER_IMAGE",
         "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
         "singularity_image": "TERMINAL_SINGULARITY_IMAGE",

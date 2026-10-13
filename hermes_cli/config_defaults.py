@@ -296,6 +296,9 @@ DEFAULT_CONFIG = {
 
     "terminal": {
         "backend": "local",
+        # ``auto`` derives a per-worker systemd scope limit from host memory;
+        # a numeric value (MiB) permits a larger or smaller local worker scope.
+        "local_memory_max_mb": "auto",
         "modal_mode": "auto",
         # Remote-backend connection-class failures (SSH host unreachable, Docker daemon down):
         # "warn" = structured degraded tool result with reason + retry hint; "fail" = raise error +

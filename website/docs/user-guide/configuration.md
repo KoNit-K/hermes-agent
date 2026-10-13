@@ -229,6 +229,7 @@ terminal:
   temp_dir: ""      # Session temp root; empty = TMPDIR, else ~/.hermes/cache/terminal
   font_family: ""   # Desktop terminal font; e.g. "MesloLGS NF"
   timeout: 180      # Per-command timeout in seconds
+  local_memory_max_mb: auto  # Local systemd worker scope MemoryMax; integer MiB or auto
   home_mode: auto   # auto | real | profile — subprocess HOME policy
   env_passthrough: []  # Env var names to forward to sandboxed execution (terminal + execute_code)
   sync_back_max_bytes: 2147483648  # Remote backends: refuse to extract a state archive larger than this (bytes)
@@ -248,6 +249,11 @@ load. The managed directory is auto-pruned: artifacts idle for 24 hours (no writ
 anywhere inside them) are swept hourly by gateway housekeeping and once per process
 on CLI-only installs. Set `temp_dir` to an existing absolute path to redirect session
 temp anywhere else; user-set paths are never auto-pruned.
+
+On Linux gateways that use systemd worker scopes, `terminal.local_memory_max_mb`
+controls the scope's `MemoryMax`. Leave it as `auto` to derive the existing
+host-based limit, or set an integer MiB value for workloads such as browser-backed
+verification. A finite parent cgroup `memory.max` remains a hard upper bound.
 
 Independently of `terminal.temp_dir`, every Hermes process (CLI, TUI, gateway, Desktop
 backend, cron) and every child it launches gets `TMPDIR`, `TMP` and `TEMP` pointed at

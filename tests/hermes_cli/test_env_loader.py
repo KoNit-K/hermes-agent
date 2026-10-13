@@ -563,6 +563,21 @@ def test_config_yaml_terminal_omitted_key_does_not_clear_env(tmp_path, monkeypat
     assert os.getenv("TERMINAL_TIMEOUT") == "600"
 
 
+def test_config_yaml_worker_memory_limit_overrides_stale_env(tmp_path, monkeypatch):
+    """The documented worker-scope limit is owned by config.yaml, not .env."""
+    home = _seed_terminal_home(
+        tmp_path, monkeypatch,
+        config_yaml="terminal:\n  local_memory_max_mb: 8192\n",
+        env_text="TERMINAL_LOCAL_MEMORY_MAX_MB=1024\n",
+    )
+
+    monkeypatch.delenv("TERMINAL_LOCAL_MEMORY_MAX_MB", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("TERMINAL_LOCAL_MEMORY_MAX_MB") == "8192"
+
+
 def test_other_profile_home_does_not_bridge_process_config(tmp_path, monkeypatch):
     """Loading a DIFFERENT profile's .env must not re-bridge this process's
     config.yaml — the shared bridge reads the process-global config, so
