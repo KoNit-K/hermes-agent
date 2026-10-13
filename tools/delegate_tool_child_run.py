@@ -21,6 +21,7 @@ from tools.delegate_tool_registry import (
 )
 from tools.delegate_tool_results import (
     _extract_output_tail, _looks_like_error_output, _stringify_tool_content, _summarize_tool_arguments,
+    redact_delegation_result,
 )
 
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
@@ -34,10 +35,10 @@ def _str_or_none(value: Any) -> Optional[str]:
 
 def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: float = 0) -> dict[str, Any]:
     """Result entry for a child that raised, never finished, or was abandoned."""
-    return {
+    return redact_delegation_result({
         "task_index": idx, "status": status, "summary": None, "error": error, "api_calls": 0,
         "duration_seconds": duration, "_child_role": getattr(child, "_delegate_role", None),
-    }
+    })
 
 def _append_missed_steer(entry: dict[str, Any], late_steer: Optional[str]) -> None:
     """Record steer text that won the race with the child's failure/timeout."""
@@ -646,7 +647,7 @@ def _build_result_entry(
         entry["missed_steer"] = _missed_steer
         _miss_note = ("[steer did not land — the subagent finished before it could " f"be delivered: {_missed_steer}]")
         entry["summary"] = f"{summary}\n\n{_miss_note}" if summary else _miss_note
-    return entry
+    return redact_delegation_result(entry)
 
 
 def _is_image_url(ref: str) -> bool:
@@ -775,12 +776,13 @@ class _ChildRun:
     ) -> dict[str, Any]:
         """Shared tail of every failure path: emit ``subagent.complete`` (``status`` defaults to the entry's), note
         the steer text that won the race with the failure, report the worktree."""
+        progress = redact_delegation_result({"preview": preview, "summary": summary})
         _safe_progress(
-            self.child_progress_cb, "subagent.complete", preview=preview, status=status or entry["status"],
-            duration_seconds=entry["duration_seconds"], summary=summary,
+            self.child_progress_cb, "subagent.complete", preview=progress["preview"], status=status or entry["status"],
+            duration_seconds=entry["duration_seconds"], summary=progress["summary"],
         )
         _append_missed_steer(entry, late_steer)
-        return self.attach_worktree(entry)
+        return redact_delegation_result(self.attach_worktree(entry))
 
     def close_steering(self) -> Optional[str]:
         """Close steer acceptance (see ``_merge_late_steer``); returns late steer text, if any."""
@@ -1033,6 +1035,7 @@ class _ChildRun:
             "files_written": sorted({p for tid, paths in _files_written_map.items() if tid == self.child_task_id for p in paths})[:40],
             "output_tail": _extract_output_tail(result, max_entries=8, max_chars=600),
         }
+        redact_delegation_result(complete_kwargs)
         if entry.get("failure_reason"):
             # Classified verdict rides the event so every surface glosses the failure the same way.
             complete_kwargs["failure_reason"] = entry["failure_reason"]

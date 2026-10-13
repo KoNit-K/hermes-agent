@@ -386,7 +386,8 @@ def _run_single_child(
         run.append_sibling_write_reminder(entry)
         run.account_background_processes(entry)
         run.emit_complete(result, entry, duration)
-        return run.attach_worktree(entry)
+        from tools.delegate_tool_results import redact_delegation_result
+        return redact_delegation_result(run.attach_worktree(entry))
     except Exception as exc:
         # Close steer acceptance before any completion callback (see _merge_late_steer).
         _late_pending_steer = run.close_steering()

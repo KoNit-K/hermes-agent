@@ -71,6 +71,22 @@ def test_batch_overflow_trimmed_and_spilled_losslessly(monkeypatch):
             assert os.path.join("cache", "delegation") in path
 
 
+def test_spill_redacts_the_full_child_summary(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setenv("HERMES_HOME", os.path.join(td, ".hermes"))
+        secret = "sk-ant-FAKEDEMO0000000000000000"
+        big = "HEAD_MARKER\n" + secret + "\n" + ("X" * 50_000) + "\nTAIL_MARKER"
+        parent = _FakeParent(context_length=131_000, used_tokens=120_000, max_tokens=8_000)
+        results = [{"task_index": 0, "summary": big, "status": "completed"}]
+        dt._apply_summary_budget(results, parent)
+        path = results[0]["summary_full_path"]
+        with open(path, encoding="utf-8") as fh:
+            spilled = fh.read()
+        assert secret not in results[0]["summary"]
+        assert secret not in spilled
+        assert "sk-ant...0000" in spilled
+
+
 
 
 def test_budget_uses_current_prompt_size_not_the_session_sum():

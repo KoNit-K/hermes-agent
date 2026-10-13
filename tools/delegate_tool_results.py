@@ -10,6 +10,35 @@ from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
+
+def _redact_delegation_value(value: Any) -> Any:
+    """Redact child-derived values before they cross a delegation boundary."""
+    if isinstance(value, str):
+        try:
+            from agent.redact import redact_sensitive_text
+            return redact_sensitive_text(value, force=True)
+        except Exception:
+            logger.warning("Failed to redact delegated child output", exc_info=True)
+            return "[delegated output withheld: redaction failed]"
+    if isinstance(value, list):
+        return [_redact_delegation_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_delegation_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_delegation_value(item) for key, item in value.items()}
+    return value
+
+
+def redact_delegation_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Redact a child result in place without changing its wire shape.
+
+    Parent-owned routing metadata is assembled separately by async_delegation,
+    and does not pass through this child-output scrubber.
+    """
+    for key, value in tuple(result.items()):
+        result[key] = _redact_delegation_value(value)
+    return result
+
 def _stringify_tool_content(content: Any) -> str:
     """Stable text for tool-result content. Some OpenAI-compatible paths return
     content-block lists; observability must never crash on them."""
@@ -178,7 +207,7 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
         from tools.spill_safety import write_text_exclusive
         # Exclusive symlink-refusing create; not private because cache/delegation is bind-mounted read-only into
         # remote backends whose container UID must be able to read it.
-        write_text_exclusive(path, summary, private=False)
+        write_text_exclusive(path, _redact_delegation_value(summary), private=False)
         return str(path)
     except Exception as exc:
         logger.debug("Failed to spill subagent summary to file: %s", exc)
@@ -268,6 +297,9 @@ def _apply_summary_budget(results: list[dict[str, Any]], parent_agent) -> None:
     disk). Per-summary cap = MIN(dynamic headroom budget, static ``delegation.max_summary_chars`` ceiling; 0 =
     disabled); over-cap summaries become head+tail plus a pointer to the spill file."""
     from tools.delegate_tool import _load_config
+    for result in results:
+        if isinstance(result, dict):
+            redact_delegation_result(result)
     summaries = [r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]]
     if not summaries:
         return

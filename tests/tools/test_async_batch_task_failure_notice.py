@@ -36,6 +36,22 @@ def test_failure_notice_reaches_the_queue_while_the_batch_keeps_running_and_form
     assert "consolidated results will still arrive" in text
 
 
+def test_async_completion_redacts_child_output_but_keeps_parent_routing_metadata(monkeypatch):
+    q = queue.Queue()
+    secret = "sk-ant-FAKEDEMO0000000000000000"
+    record = {**_record(), "is_batch": False, "goal": f"parent supplied {secret}", "completed_at": 2.0}
+    result = {"summary": f"child found {secret}", "error": f"child error {secret}", "api_calls": 1}
+    monkeypatch.setattr(ad, "_persist_completion", lambda event, durable_result: None)
+    with patch("tools.process_registry.process_registry") as reg:
+        reg.completion_queue = q
+        ad._push_completion_event(record, result, "completed")
+    event = q.get_nowait()
+    assert secret not in event["summary"]
+    assert secret not in event["error"]
+    assert secret not in result["summary"]
+    assert event["goal"] == f"parent supplied {secret}"
+
+
 def test_notice_is_not_sent_for_a_finished_batch_and_does_not_dedup_against_the_final_result():
     q = queue.Queue()
     with patch.object(ad, "_records", {"deleg_x": _record(status="completed")}), \

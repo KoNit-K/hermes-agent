@@ -14,6 +14,7 @@ ONLY, zero code/prompt text copied (proprietary).
 
 import json
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tools.delegate_tool import (
@@ -164,6 +165,25 @@ def _run(child):
 
 
 class TestRunSingleChildSchemaValidation:
+    def test_child_summary_is_redacted_before_parent_receives_it(self):
+        secret = "sk-ant-FAKEDEMO0000000000000000"
+        entry = _run(_StubChild([f"found key {secret} in config"]))
+        assert secret not in entry["summary"]
+        assert "sk-ant...0000" in entry["summary"]
+
+    def test_finalization_redacts_before_memory_and_stop_hook(self):
+        from tools.delegate_tool_results import _finalize_child_results
+
+        secret = "sk-ant-FAKEDEMO0000000000000000"
+        memory = MagicMock()
+        parent = SimpleNamespace(_memory_manager=memory, session_id="parent", _current_turn_id="turn")
+        child = SimpleNamespace(session_id="child")
+        results = [{"task_index": 0, "status": "completed", "summary": f"found {secret}", "tool_trace": []}]
+        with patch("hermes_cli.plugins.invoke_hook") as hook:
+            _finalize_child_results(results, [{"goal": "task"}], [(0, {"goal": "task"}, child)], parent)
+        assert secret not in memory.on_delegation.call_args.kwargs["result"]
+        assert secret not in hook.call_args.kwargs["child_summary"]
+
     def test_valid_first_try_no_retry(self):
         child = _StubChild(['{"city": "Berlin"}'])
         child._delegate_output_schema = ADDRESS_SCHEMA
