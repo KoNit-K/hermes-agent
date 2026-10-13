@@ -265,6 +265,7 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
         results = []
         rollback_failed = False
         token = _smt._skill_gate_bypass.set(True)
+        scan_token = _smt._defer_security_scan.set(True)
         try:
             for i, op in enumerate(operations):
                 raw = _smt._skill_manage_from({**op, "name": names[i], "operations": None},
@@ -292,7 +293,23 @@ def _skill_manage_batch(operations, default_name: str | None = None, task_id: st
                 # compact success row otherwise hides them and the model never sees a finding.
                 entry.update({k: parsed[k] for k in _ADVISORY_KEYS if parsed.get(k) is not None})
                 results.append(entry)
+            # A package-level scan during each edit rejects a safe remediation while later
+            # operations still hold the content being removed. The outer locks protect this
+            # final candidate through validation and rollback.
+            for nm in dict.fromkeys(names):
+                skill = _smt._find_skill(nm)
+                scan_error = _smt._security_scan_skill(Path(skill["path"])) if skill else None
+                if scan_error:
+                    note, rollback_failed = _rollback(snapshots, _smt._find_skill, results)
+                    return json.dumps({
+                        "success": False,
+                        "error": (f"Security scan blocked final batch candidate for '{nm}': "
+                                  f"{scan_error} — batch aborted, {note}."),
+                        "failed_index": len(operations),
+                        "completed_before_failure": len(results),
+                    }, ensure_ascii=False)
         finally:
+            _smt._defer_security_scan.reset(scan_token)
             _smt._skill_gate_bypass.reset(token)
             if rollback_failed:
                 # Keep the snapshots so the operator can still recover by hand.

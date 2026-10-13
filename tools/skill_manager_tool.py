@@ -64,6 +64,12 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
     return None
 
 
+# A batch holds every target's mutation lock and validates its completed candidate before
+# releasing it.  Individual writes defer their package-wide scan while that transaction runs.
+_defer_security_scan: _ctxvars.ContextVar[bool] = _ctxvars.ContextVar(
+    "defer_security_scan", default=False)
+
+
 # All skills live in ~/.hermes/skills/ (single source of truth)
 HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
@@ -404,7 +410,7 @@ def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label:
     from hermes_constants import mkdir_under_hermes_home
     mkdir_under_hermes_home(target.parent)
     atomic_write_text(target, content, preserve_mode=True, create_mode=0o644)
-    scan_error = _security_scan_skill(skill_dir)
+    scan_error = None if _defer_security_scan.get() else _security_scan_skill(skill_dir)
     if not scan_error:
         return None
     if original is not None:
