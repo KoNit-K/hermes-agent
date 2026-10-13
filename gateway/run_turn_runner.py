@@ -1693,7 +1693,8 @@ class TurnRunner:
         token = set_current_session_key(session_key)
         register_gateway_notify(session_key, self._approval_notify_sync)
         try:
-            api_message = _wrap_current_message_with_observed_context(self._native_image_run_message(), observed_group_context)
+            run_message = self._native_image_run_message()
+            api_message = _wrap_current_message_with_observed_context(run_message, observed_group_context)
             kwargs = {"conversation_history": agent_history, "task_id": ctx.session_id}
             if _accepts_keyword(agent.run_conversation, "turn_author"):
                 # Sent on every transport: a provider gating durable writes needs the bot flag in a DM too.
@@ -1704,7 +1705,9 @@ class TurnRunner:
             if persist_user_message_override is not None:
                 kwargs["persist_user_message"] = persist_user_message_override
             elif observed_group_context:
-                kwargs["persist_user_message"] = ctx.message
+                # Native image turns are content-part lists. Preserve that shape so the
+                # persistence override can replace the API-only observed wrapper.
+                kwargs["persist_user_message"] = run_message
             if ctx.persist_user_display_kind:
                 # Internal self-injected turn: type the persisted user row so UIs render it as a
                 # timeline notice, not a user bubble (stripped from provider payloads downstream).
