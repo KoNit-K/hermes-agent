@@ -1360,16 +1360,18 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         """Send text/markdown: format, split via truncate_message(), retry transient failures."""
-        del metadata
         if not await self._ensure_connected():
             return self._NOT_CONNECTED
         if not content or not content.strip():
             return SendResult(success=True)
 
+        chat_type = metadata.get("chat_type") if metadata else None
+        if chat_type not in self._TEXT_SENDERS:
+            chat_type = self._guess_chat_type(chat_id)
         chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH)
         last_result = SendResult(success=False, error="No chunks")
         for chunk in chunks:
-            last_result = await self._send_chunk(chat_id, chunk, reply_to)
+            last_result = await self._send_chunk(chat_id, chunk, reply_to, chat_type)
             if not last_result.success:
                 return last_result
             reply_to = None  # only reply_to the first chunk
@@ -1377,9 +1379,11 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
     _PERMANENT_SEND_ERRORS = ("invalid", "forbidden", "not found")
 
-    async def _send_chunk(self, chat_id: str, content: str, reply_to: Optional[str] = None) -> SendResult:
+    async def _send_chunk(
+        self, chat_id: str, content: str, reply_to: Optional[str] = None, chat_type: Optional[str] = None,
+    ) -> SendResult:
         last_exc: Optional[Exception] = None
-        sender = self._text_sender(self._guess_chat_type(chat_id))
+        sender = self._text_sender(chat_type or self._guess_chat_type(chat_id))
         if sender is None:
             return SendResult(success=False, error=f"Unknown chat type for {chat_id}")
         for attempt in range(3):

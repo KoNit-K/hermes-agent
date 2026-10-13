@@ -466,6 +466,18 @@ class GatewayStartupMixin:
             if row.get("needs_marker"):
                 content = row.get("marker", RECOVERED_MARKER) + content
             metadata = {"thread_id": row["thread_id"]} if row.get("thread_id") else None
+            if row.get("platform") == Platform.QQBOT.value:
+                from gateway.run import _parse_session_key
+
+                parsed = _parse_session_key(row.get("session_key", ""))
+                chat_type = parsed.get("chat_type") if parsed else None
+                if (
+                    parsed and parsed.get("platform") == Platform.QQBOT.value
+                    and parsed.get("chat_id") == row["chat_id"]
+                    and chat_type in {"c2c", "group", "guild"}
+                ):
+                    metadata = metadata or {}
+                    metadata["chat_type"] = chat_type
             try:
                 result = await adapter.send(chat_id=row["chat_id"], content=content, metadata=metadata)
             except Exception as send_err:

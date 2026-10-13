@@ -388,12 +388,12 @@ class TestGatewayRedeliverySweep:
     """Drive the real GatewayRunner._redeliver_pending_obligations."""
 
     @staticmethod
-    def _runner(adapter=None):
+    def _runner(adapter=None, platform=None):
         from gateway.config import Platform
         from gateway.run import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
-        runner.adapters = {Platform.SLACK: adapter} if adapter else {}
+        runner.adapters = {(platform or Platform.SLACK): adapter} if adapter else {}
         runner._profile_adapters = {}
         runner._active_profile_name = lambda: "default"
         _store = MagicMock()
@@ -428,6 +428,29 @@ class TestGatewayRedeliverySweep:
         runner._async_session_store.clear_resume_pending.assert_awaited_once_with(
             "agent:main:slack:channel:C1"
         )
+
+    @pytest.mark.asyncio
+    async def test_restart_redelivery_uses_qq_group_sender_from_session_key(self):
+        """Regression for #137605: QQ's in-memory route map is empty after a restart."""
+        from gateway.config import Platform, PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.qqbot import QQAdapter
+
+        _record(
+            session_key="agent:main:qqbot:group:G1",
+            platform="qqbot",
+            chat_id="G1",
+        )
+        _orphan("ob-1")
+        adapter = QQAdapter(PlatformConfig(enabled=True, extra={"app_id": "a", "client_secret": "b"}))
+        adapter._ensure_connected = AsyncMock(return_value=True)
+        adapter._send_c2c_text = AsyncMock(return_value=SendResult(success=True))
+        adapter._send_group_text = AsyncMock(return_value=SendResult(success=True))
+        runner = self._runner(adapter, Platform.QQBOT)
+
+        assert await runner._redeliver_pending_obligations() == 1
+        adapter._send_group_text.assert_awaited_once_with("G1", "the final answer", None)
+        adapter._send_c2c_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_startup_redelivery_uses_persisted_transport_owner(self):
