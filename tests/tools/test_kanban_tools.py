@@ -173,6 +173,62 @@ def test_list_filters_tasks(monkeypatch, worker_env):
     assert tenant_ids == [c]
 
 
+def test_orchestrator_model_tools_update_archive_dependencies_and_subscribe(monkeypatch, worker_env):
+    """Regression for #137622: model calls use the same persisted Kanban APIs as the CLI."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_notify as kbn
+    from tools import kanban_tools as kt
+
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alpha")
+        child = kb.create_task(conn, title="child", assignee="alpha")
+
+    updated = json.loads(kt._handle_update({
+        "task_id": child, "title": "renamed", "body": "new body", "priority": 7,
+        "assignee": "beta",
+    }))
+    assert updated["ok"] is True
+    assert updated["task"]["title"] == "renamed"
+    assert updated["task"]["assignee"] == "beta"
+    assert updated["task"]["priority"] == 7
+
+    linked = json.loads(kt._handle_dependency_add({"parent_id": parent, "child_id": child}))
+    assert linked["ok"] is True
+    removed = json.loads(kt._handle_dependency_remove({"parent_id": parent, "child_id": child}))
+    assert removed == {"ok": True, "parent_id": parent, "child_id": child, "removed": True}
+
+    subscribed = json.loads(kt._handle_notify_subscribe({
+        "task_id": child, "platform": "telegram", "chat_id": "123", "thread_id": "456",
+        "delivery_mode": "notify+wake",
+    }))
+    assert subscribed["ok"] is True
+    with kbc.connect_closing() as conn:
+        subs = kbn.list_notify_subs(conn, child)
+    assert len(subs) == 1
+    assert subs[0]["delivery_mode"] == "notify+wake"
+
+    archived = json.loads(kt._handle_archive({"task_id": child}))
+    assert archived == {"ok": True, "task_id": child, "status": "archived"}
+
+
+def test_new_kanban_model_tools_are_orchestrator_only(worker_env):
+    """Dispatcher workers cannot reroute cards or notification destinations."""
+    from tools import kanban_tools as kt
+
+    for handler, args in (
+        (kt._handle_update, {"task_id": worker_env, "title": "nope"}),
+        (kt._handle_archive, {"task_id": worker_env}),
+        (kt._handle_dependency_add, {"parent_id": worker_env, "child_id": worker_env}),
+        (kt._handle_dependency_remove, {"parent_id": worker_env, "child_id": worker_env}),
+        (kt._handle_notify_subscribe, {"task_id": worker_env, "platform": "telegram", "chat_id": "1"}),
+    ):
+        result = json.loads(handler(args))
+        assert "orchestrator-only" in result["error"]
+
+
 def test_complete_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({

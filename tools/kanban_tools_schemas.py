@@ -559,3 +559,67 @@ KANBAN_LINK_SCHEMA = _schema(
     },
     ["parent_id", "child_id"],
 )
+
+KANBAN_UPDATE_SCHEMA = _schema(
+    "kanban_update",
+    "Update a task's title, body, priority, or assignee. At least one field is required. "
+    "Orchestrator-only: dispatched workers cannot reroute or rewrite board cards.",
+    {
+        "task_id": _prop("string", "Task id to update."),
+        "title": _prop("string", "Replacement title."),
+        "body": _prop("string", "Replacement body."),
+        "priority": _prop("integer", "Replacement priority."),
+        "assignee": _prop("string", "Replacement assignee profile; use an empty string to unassign."),
+        "reclaim": _prop("boolean", "Release an active claim before reassignment when needed."),
+        "reason": _prop("string", "Reason recorded when reclaiming an active assignment."),
+    },
+    ["task_id"],
+)
+
+KANBAN_ARCHIVE_SCHEMA = _schema(
+    "kanban_archive",
+    "Archive one task. Archiving a running task releases its claim and stops its local worker. "
+    "Orchestrator-only.",
+    {"task_id": _prop("string", "Task id to archive.")},
+    ["task_id"],
+)
+
+KANBAN_DEPENDENCY_ADD_SCHEMA = _schema(
+    "kanban_dependency_add",
+    "Add a parent-to-child dependency edge. Cycles, self-links, and a foreign running child are rejected. "
+    "Orchestrator-only.",
+    {
+        "parent_id": _prop("string", "Parent task id."),
+        "child_id": _prop("string", "Child task id."),
+    },
+    ["parent_id", "child_id"],
+)
+
+KANBAN_DEPENDENCY_REMOVE_SCHEMA = _schema(
+    "kanban_dependency_remove",
+    "Remove a parent-to-child dependency edge and immediately re-evaluate the child. Orchestrator-only.",
+    {
+        "parent_id": _prop("string", "Parent task id."),
+        "child_id": _prop("string", "Child task id."),
+    },
+    ["parent_id", "child_id"],
+)
+
+KANBAN_NOTIFY_SUBSCRIBE_SCHEMA = _schema(
+    "kanban_notify_subscribe",
+    "Subscribe a gateway destination to a task's terminal-event notifications. Orchestrator-only.",
+    {
+        "task_id": _prop("string", "Task id to subscribe to."),
+        "platform": _prop("string", "Gateway platform name."),
+        "chat_id": _prop("string", "Destination chat id."),
+        "thread_id": _prop("string", "Optional destination thread id."),
+        "user_id": _prop("string", "Optional user id for active wake routing."),
+        "user_id_alt": _prop("string", "Optional platform-specific alternate user id."),
+        "chat_type": {"type": "string", "enum": ["dm", "group", "channel", "thread"], "description": "Destination chat type."},
+        "notifier_profile": _prop("string", "Owning gateway profile; defaults to the current profile."),
+        "delivery_mode": {"type": "string", "enum": ["notify", "notify+wake", "wake"], "description": "Delivery behavior."},
+        "parent_chat_id": _prop("string", "Optional parent channel routing id."),
+        "guild_id": _prop("string", "Optional Discord guild routing id."),
+    },
+    ["task_id", "platform", "chat_id"],
+)

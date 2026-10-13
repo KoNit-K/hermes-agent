@@ -24,7 +24,9 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
+    KANBAN_SCHEDULE_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA, KANBAN_UPDATE_SCHEMA,
+    KANBAN_ARCHIVE_SCHEMA, KANBAN_DEPENDENCY_ADD_SCHEMA, KANBAN_DEPENDENCY_REMOVE_SCHEMA,
+    KANBAN_NOTIFY_SUBSCRIBE_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -1288,10 +1290,90 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+@_kanban_handler("kanban_update")
+def _handle_update(args: dict, **kw) -> str:
+    _reject_delegated_child_mutation("kanban_update")
+    _require_orchestrator_tool("kanban_update")
+    tid = str(args.get("task_id") or "")
+    _check(tid, "task_id is required")
+    fields = ("title", "body", "priority", "assignee")
+    _check(any(field in args for field in fields),
+           "provide at least one of: title, body, priority, assignee")
+    with _board(args.get("board")) as (kb, conn):
+        _existing_task(kb, conn, tid)
+        edit_fields = {field: args[field] for field in ("title", "body", "priority") if field in args}
+        if edit_fields:
+            _check(kb.edit_task(conn, tid, **edit_fields), f"could not update {tid}")
+        if "assignee" in args:
+            _check(kb.reassign_task(conn, tid, args["assignee"] or None,
+                                    reclaim_first=bool(args.get("reclaim")), reason=args.get("reason")),
+                   f"could not reassign {tid}")
+        return _ok(task=_fields(kb.get_task(conn, tid), _TASK_FIELDS))
+
+
+@_kanban_handler("kanban_archive")
+def _handle_archive(args: dict, **kw) -> str:
+    _reject_delegated_child_mutation("kanban_archive")
+    _require_orchestrator_tool("kanban_archive")
+    tid = str(args.get("task_id") or "")
+    _check(tid, "task_id is required")
+    with _board(args.get("board")) as (kb, conn):
+        _check(kb.archive_task(conn, tid), f"could not archive {tid}")
+        return _ok(task_id=tid, status="archived")
+
+
+def _dependency(args: dict, *, remove: bool) -> str:
+    tool_name = "kanban_dependency_remove" if remove else "kanban_dependency_add"
+    _reject_delegated_child_mutation(tool_name)
+    _require_orchestrator_tool(tool_name)
+    parent_id, child_id = args.get("parent_id"), args.get("child_id")
+    _check(parent_id and child_id, "both parent_id and child_id are required")
+    with _board(args.get("board")) as (kb, conn):
+        if remove:
+            _check(kb.unlink_tasks(conn, parent_id, child_id), f"no such dependency: {parent_id} -> {child_id}")
+            return _ok(parent_id=parent_id, child_id=child_id, removed=True)
+        gated = kb.link_tasks(conn, parent_id, child_id)
+        return _ok(parent_id=parent_id, child_id=child_id, gated=gated)
+
+
+@_kanban_handler("kanban_dependency_add")
+def _handle_dependency_add(args: dict, **kw) -> str:
+    return _dependency(args, remove=False)
+
+
+@_kanban_handler("kanban_dependency_remove")
+def _handle_dependency_remove(args: dict, **kw) -> str:
+    return _dependency(args, remove=True)
+
+
+@_kanban_handler("kanban_notify_subscribe")
+def _handle_notify_subscribe(args: dict, **kw) -> str:
+    _reject_delegated_child_mutation("kanban_notify_subscribe")
+    _require_orchestrator_tool("kanban_notify_subscribe")
+    tid = str(args.get("task_id") or "")
+    _check(tid, "task_id is required")
+    with _board(args.get("board")) as (kb, conn):
+        _existing_task(kb, conn, tid)
+        from hermes_cli import kanban_db_notify as kbn
+        metadata = {key: args[key] for key in ("parent_chat_id", "guild_id") if args.get(key)}
+        kbn.add_notify_sub(
+            conn, task_id=tid, platform=args["platform"], chat_id=args["chat_id"],
+            thread_id=args.get("thread_id"), user_id=args.get("user_id"),
+            user_id_alt=args.get("user_id_alt"), chat_type=args.get("chat_type"),
+            notifier_profile=args.get("notifier_profile") or _persisted_identity(),
+            delivery_mode=args.get("delivery_mode"), delivery_metadata=metadata or None,
+        )
+        return _ok(task_id=tid, platform=args["platform"], chat_id=args["chat_id"],
+                   thread_id=args.get("thread_id") or "")
+
+
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
 # kanban_list / kanban_unblock route the board and are hidden from task workers.
-_ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
+_ORCHESTRATOR_TOOLS = frozenset({
+    "kanban_list", "kanban_unblock", "kanban_update", "kanban_archive",
+    "kanban_dependency_add", "kanban_dependency_remove", "kanban_notify_subscribe",
+})
 _TOOLS = (
     ("kanban_show", KANBAN_SHOW_SCHEMA, _handle_show, "📋"),
     ("kanban_list", KANBAN_LIST_SCHEMA, _handle_list, "📋"),
@@ -1307,7 +1389,12 @@ _TOOLS = (
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
-    ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
+    ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
+    ("kanban_update", KANBAN_UPDATE_SCHEMA, _handle_update, "✏️"),
+    ("kanban_archive", KANBAN_ARCHIVE_SCHEMA, _handle_archive, "🗄️"),
+    ("kanban_dependency_add", KANBAN_DEPENDENCY_ADD_SCHEMA, _handle_dependency_add, "🔗"),
+    ("kanban_dependency_remove", KANBAN_DEPENDENCY_REMOVE_SCHEMA, _handle_dependency_remove, "🔓"),
+    ("kanban_notify_subscribe", KANBAN_NOTIFY_SUBSCRIBE_SCHEMA, _handle_notify_subscribe, "🔔"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
     _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
