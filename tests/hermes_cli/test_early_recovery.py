@@ -70,6 +70,21 @@ def test_failed_repair_keeps_marker_and_stops_at_retry_limit(tmp_path, monkeypat
     assert "hermes pm repair" in output.err
 
 
+def test_automatic_repair_records_attempt_before_an_uncatchable_interruption(tmp_path, monkeypatch):
+    """A killed repair must not reset the next launch's retry budget (#123860)."""
+    root = _project(tmp_path)
+    marker = root / ".update-incomplete"
+    marker.write_text('{"attempts": 0}', encoding="utf-8")
+
+    def interrupted(project):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(recovery, "repair_dependencies", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        er.recover_if_needed(root, argv=[])
+    assert er._read_marker_attempts(marker) == 1
+
+
 def test_recovery_obeys_live_owner_and_single_flight(tmp_path, monkeypatch):
     root = _project(tmp_path)
     marker = root / ".update-incomplete"

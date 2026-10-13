@@ -1412,6 +1412,12 @@ def recover_if_needed(project_root: Path | None = None, argv: list[str] | None =
             return False
         from pm.recovery import repair_dependencies
 
+        # Persist before starting the repair: a SIGKILL ends this process without
+        # reaching the exception handler below, but must still consume an
+        # automatic retry so the next launch cannot rebuild forever.
+        if not explicit:
+            for marker in markers:
+                _count_failed_attempt(marker)
         print("hermes: repairing the recorded dependency environment...", file=sys.stderr)
         repair_dependencies(root)
         for marker in markers:
@@ -1424,8 +1430,9 @@ def recover_if_needed(project_root: Path | None = None, argv: list[str] | None =
 
         if isinstance(exc, PermissionError) and install_state_permission_message(root, exc):
             raise  # The bootstrap or PM CLI reports the access error once.
-        for marker in markers:
-            _count_failed_attempt(marker)
+        if explicit:
+            for marker in markers:
+                _count_failed_attempt(marker)
         print(f"hermes: dependency repair failed: {exc}; run `hermes pm repair`", file=sys.stderr)
         return False
     finally:
