@@ -127,6 +127,37 @@ class TestClassification:
         assert not assembled.activated
         assert {td["function"]["name"] for td in assembled.tool_defs} == names
 
+    def test_direct_override_keeps_plugin_tool_and_toolset_visible(self):
+        """Regression for #135762: local-model users can bypass the bridge per plugin toolset."""
+        from tools.registry import registry
+        from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+
+        direct_name = "issue_135762_direct_plugin_tool"
+        sibling_name = "issue_135762_deferred_plugin_tool"
+        toolset = "issue-135762-plugin"
+        for name in (direct_name, sibling_name):
+            registry.register(
+                name=name,
+                handler=lambda args, **kw: "{}",
+                schema=_td(name, "Plugin capability")["function"],
+                toolset=toolset,
+            )
+
+        by_name = assemble_tool_defs(
+            [_td(direct_name), _td(sibling_name)],
+            config=ToolSearchConfig.from_raw({
+                "enabled": "on", "defer": [direct_name], "direct": [direct_name],
+            }),
+        )
+        assert direct_name in {td["function"]["name"] for td in by_name.tool_defs}
+        assert sibling_name not in {td["function"]["name"] for td in by_name.tool_defs}
+
+        by_toolset = assemble_tool_defs(
+            [_td(direct_name), _td(sibling_name)],
+            config=ToolSearchConfig.from_raw({"enabled": "on", "direct": [toolset]}),
+        )
+        assert {td["function"]["name"] for td in by_toolset.tool_defs} >= {direct_name, sibling_name}
+
     def test_core_working_set_never_defers_even_with_mcp_active(self):
         """The bridge activates for MCP, but working-set core tools (terminal,
         files, memory...) stay direct — the deferral set is the CURATED list,

@@ -2013,8 +2013,9 @@ DEFAULT_CONFIG = {
             # Range 200..60000.
             "listing_max_tokens": 4000,
             # Tools replaced by the bridge by default. This list intentionally includes cold,
-            # event-triggered built-ins; an explicit list replaces it wholesale and [] keeps every
-            # tool eager. The runtime fallback in tools/tool_search.py derives from this value.
+            # event-triggered built-ins; an explicit list replaces it wholesale. MCP and plugin
+            # tools still defer automatically unless named by ``direct`` below. The runtime fallback
+            # in tools/tool_search.py derives from this value.
             "defer": [
                 "computer_use", "session_search", "image_generate",
                 "todo_list", "process_manage", "cronjob_manage", "browser_vault",
@@ -2023,6 +2024,9 @@ DEFAULT_CONFIG = {
                 "show_tip", "desktop_project", "close_terminal",
                 "set_theme", "read_terminal", "read_window_below", "focus_pane",
             ],
+            # Tool names or toolset names that always stay directly callable, even when plugin
+            # and MCP tools would otherwise defer. Empty by default.
+            "direct": [],
         },
         # Remote connector discovery/lifecycle through the Nous tool gateway.
         # The flag is the user's off switch; availability additionally requires
