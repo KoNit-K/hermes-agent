@@ -1208,7 +1208,7 @@ function Resolve-HermesUpdateOutcome($StepResult) {
 # (finished_at set) -- with outcome success | partial (the user still has to
 # act) | interrupted (Ctrl-C after the code moved). A reconciled "interrupted"
 # record keeps finished_at null, so it never matches.
-function Get-CommittedReceiptOutcome {
+function Get-CompletedUpdateReceipt {
     $root = $HermesHome
     # hermes_constants.get_default_hermes_root: a <root>\profiles\<name> home files under <root>
     $parent = Split-Path -Parent $root
@@ -1218,9 +1218,24 @@ function Get-CommittedReceiptOutcome {
     try { $receipt = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { return $null }
     if ($null -eq $receipt -or -not $script:UpdateCorrelation) { return $null }
     if ([string]$receipt.correlation_id -cne $script:UpdateCorrelation -or -not $receipt.finished_at) { return $null }
+    return $receipt
+}
+
+function Get-CommittedReceiptOutcome {
+    $receipt = Get-CompletedUpdateReceipt
+    if ($null -eq $receipt) { return $null }
     $outcome = [string]$receipt.outcome
     if ($outcome -cin @('success', 'partial', 'interrupted')) { return $outcome }
     return $null
+}
+
+function Test-ReceiptHasNoGatewayRestartObligation {
+    # Only a completed receipt for THIS invocation can suppress the Desktop's
+    # legacy cold-start. Missing, stale, or malformed receipts fail open so an
+    # existing local gateway is still restored after an update.
+    $receipt = Get-CompletedUpdateReceipt
+    if ($null -eq $receipt -or $null -eq $receipt.plan -or $null -eq $receipt.plan.runtimes) { return $false }
+    return @($receipt.plan.runtimes).Count -eq 0
 }
 
 function Set-InstallRootCurrentDirectory([string]$Root) {
@@ -1712,7 +1727,7 @@ try {
     # all-profile fleet after the update -- also when a follow-up above failed:
     # the code is committed and the gateways must not stay down. A remote-served
     # Desktop must stay passive: its -NoGateway hand-off owns no local poller.
-    if (-not $NoGateway) {
+    if (-not $NoGateway -and -not (Test-ReceiptHasNoGatewayRestartObligation)) {
         $gatewayFailure = $null
         try {
             # Resolve again after update: PM may have published a new generation,
@@ -1727,6 +1742,8 @@ try {
         if ($gatewayFailure) {
             Add-Followup "gateway start: $gatewayFailure" "it could not restart every messaging gateway. Run `hermes gateway start --all` in a terminal." -Manual
         }
+    } elseif (-not $NoGateway) {
+        Write-HandoffLog "skipping gateway cold-start: this update's receipt planned no runtimes"
     }
 
     exit $finalCode

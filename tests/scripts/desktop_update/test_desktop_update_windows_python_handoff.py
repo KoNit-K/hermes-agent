@@ -21,6 +21,15 @@ def main():
         print('--keep-stash'); return 0
     with Path(os.environ['HANDOFF_CALLS']).open('a') as stream:
         stream.write(json.dumps({'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')
+    if sys.argv[1:] and sys.argv[1] == 'update' and os.environ.get('HANDOFF_EMPTY_RUNTIME_PLAN'):
+        receipt = Path(os.environ['HERMES_HOME']) / 'logs' / 'update_receipts' / 'latest.json'
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps({
+            'correlation_id': os.environ['HERMES_UPDATE_CORRELATION_ID'],
+            'finished_at': '2026-10-15T00:00:00Z',
+            'outcome': 'success',
+            'plan': {'runtimes': []},
+        }))
     print('Desktop build failed')  # no warning-driven second build on PM
     if sys.argv[1:] == ['gateway', 'start', '--all']:
         return int(os.environ.get('GATEWAY_EXIT', '0'))
@@ -36,11 +45,12 @@ if __name__ == '__main__':
 
 @pytest.mark.platforms('windows')
 @pytest.mark.parametrize(
-    ('code', 'no_gateway', 'gateway_code'),
-    [(0, False, 0), (1, False, 0), (2, False, 0), (0, True, 0), (0, False, 1)],
+    ('code', 'no_gateway', 'gateway_code', 'empty_runtime_plan'),
+    [(0, False, 0, False), (1, False, 0, False), (2, False, 0, False),
+     (0, True, 0, False), (0, False, 1, False), (0, False, 0, True)],
 )
 def test_pm_handoff_reports_update_and_gateway_results(
-    tmp_path: Path, code: int, no_gateway: bool, gateway_code: int,
+    tmp_path: Path, code: int, no_gateway: bool, gateway_code: int, empty_runtime_plan: bool,
 ) -> None:
     install = tmp_path / 'checkout with spaces'
     publish_fixture_launcher(install, CLI)
@@ -56,14 +66,15 @@ def test_pm_handoff_reports_update_and_gateway_results(
         cwd=tmp_path, env={**os.environ, 'HERMES_HOME': str(home),
                           'HERMES_RUNTIME_DIR': str(tmp_path / 'empty-store'),
                           'HANDOFF_CALLS': str(calls), 'HANDOFF_EXIT': str(code),
-                          'GATEWAY_EXIT': str(gateway_code)},
+                          'GATEWAY_EXIT': str(gateway_code),
+                          'HANDOFF_EMPTY_RUNTIME_PLAN': '1' if empty_runtime_plan else ''},
         capture_output=True, text=True, timeout=120,
         check=False,
     )
     assert result.returncode == code, result.stdout + result.stderr
     expected = [{'argv': ['update', '--yes'] + ([] if no_gateway else ['--gateway'])
                  + ['--branch', 'main', '--keep-stash'], 'cwd': str(install)}]
-    if code == 0 and not no_gateway:
+    if code == 0 and not no_gateway and not empty_runtime_plan:
         expected.append({'argv': ['gateway', 'start', '--all'], 'cwd': str(install)})
     assert [json.loads(line) for line in calls.read_text(encoding='utf-8-sig').splitlines()] == expected
     receipt = json.loads((home / '.hermes-update-result.json').read_text(encoding='utf-8-sig'))
