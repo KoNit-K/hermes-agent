@@ -18,6 +18,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from agent.secret_scope import get_secret_str, serves_routed_profile
 from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 from utils import atomic_json_write
 
@@ -61,7 +62,7 @@ def resolve_copilot_token() -> tuple[str, str]:
     """
     any_env_var_set = False
     for env_var in COPILOT_ENV_VARS:
-        val = os.getenv(env_var, "").strip()
+        val = get_secret_str(env_var, "").strip()
         if not val:
             continue
         any_env_var_set = True
@@ -76,6 +77,10 @@ def resolve_copilot_token() -> tuple[str, str]:
         logger.debug("Copilot env var(s) set but none held a supported token; skipping `gh auth "
                      "token` fallback to honor explicit env-var intent (and avoid the subprocess "
                      "cost on cold start, #60800).")
+        return "", ""
+    if serves_routed_profile():
+        logger.debug("No Copilot token is configured for the routed profile; skipping global `gh auth "
+                     "token` fallback to preserve profile credential isolation (#138553).")
         return "", ""
     token = _try_gh_cli_token()
     if token:
