@@ -1054,6 +1054,7 @@ export interface CronJobSchedule {
 }
 
 export interface CronJobUpdates {
+  base_url?: null | string
   deliver?: string
   enabled?: boolean
   model?: null | string
