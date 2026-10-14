@@ -1049,7 +1049,10 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
     ) -> tuple[bool, Optional[str], Optional[str]]:
         """Drain gate, user-defined quick commands (exec/alias) and plugin slash commands →
         ``(handled, result, command)``; an alias quick command rewrites ``command``."""
-        if self._draining:
+        # An internal wake received its producer receipt before this task reached
+        # the runner. Let that admitted work finish the drain; rejecting it here
+        # would make the producer treat a discarded wake as delivered (#138123).
+        if self._draining and not getattr(event, "internal", False):
             return True, t("gateway.busy.drain_rejected_new_work", action=self._status_action_gerund()), command
 
         # User-defined quick commands (bypass agent loop, no LLM call)

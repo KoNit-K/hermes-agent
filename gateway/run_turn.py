@@ -3724,7 +3724,10 @@ class GatewayTurnMixin:
                         pending_event = None
                         pending = None
 
-        if self._draining and (pending_event or pending):
+        # A producer received an admission receipt for internal wakes before the
+        # restart drain began. Preserve that obligation by running the wake;
+        # externally queued follow-ups remain deliberately discarded.
+        if self._draining and (pending_event or pending) and not getattr(pending_event, "internal", False):
             logger.info(
                 "Discarding pending follow-up for session %s during gateway %s",
                 session_key or "?", self._status_action_label(),

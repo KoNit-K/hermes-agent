@@ -17,6 +17,41 @@ from tests.gateway.restart_test_helpers import make_restart_runner, make_restart
 
 
 @pytest.mark.asyncio
+async def test_restart_drain_runs_internal_wake_admitted_before_the_gate():
+    """Regression for #138123: an admission receipt must not become a dropped wake."""
+    runner, _adapter = make_restart_runner()
+    runner._draining = True
+    source = make_restart_source()
+    internal = MessageEvent(text="completed", message_type=MessageType.TEXT, source=source, internal=True)
+    external = MessageEvent(text="hello", message_type=MessageType.TEXT, source=source)
+
+    assert await runner._hm_dispatch_quick_and_plugin_commands(internal, source, None) == (False, None, None)
+    handled, _reply, _command = await runner._hm_dispatch_quick_and_plugin_commands(external, source, None)
+    assert handled is True
+
+
+@pytest.mark.asyncio
+async def test_restart_drain_keeps_admitted_internal_pending_wake():
+    """An admitted internal follow-up must drain after the active turn finishes."""
+    runner, adapter = make_restart_runner()
+    runner._draining = True
+    source = make_restart_source()
+    session_key = build_session_key(source)
+    internal = MessageEvent(text="completed", message_type=MessageType.TEXT, source=source, internal=True)
+    external = MessageEvent(text="hello", message_type=MessageType.TEXT, source=source)
+
+    adapter._pending_messages[session_key] = internal
+    pending_event, pending = await runner._run_agent_drain_pending({"interrupted": False}, adapter, source, session_key)
+    assert pending_event is internal
+    assert pending == "completed"
+
+    adapter._pending_messages[session_key] = external
+    pending_event, pending = await runner._run_agent_drain_pending({"interrupted": False}, adapter, source, session_key)
+    assert pending_event is None
+    assert pending is None
+
+
+@pytest.mark.asyncio
 async def test_restart_command_while_busy_requests_drain_without_interrupt(monkeypatch):
     # Ensure INVOCATION_ID is NOT set — systemd sets this in service mode,
     # which changes the restart call signature.
