@@ -15,6 +15,7 @@ from hermes_cli.tools_config import (
     _apply_toolset_change,
     _checklist_toolset_keys,
     _get_platform_tools,
+    _platform_toolsets_explicitly_saved,
     _run_post_setup,
     _save_platform_tools,
     _toolset_has_keys,
@@ -24,6 +25,15 @@ from hermes_cli.tools_config import (
     tools_command,
 )
 
+
+
+
+def test_discord_toolsets_require_explicit_opt_in_only_without_a_saved_selection():
+    """Regression for #138449: the Discord composite keeps these toolsets default-off."""
+    assert not _platform_toolsets_explicitly_saved({}, "discord")
+    assert _platform_toolsets_explicitly_saved(
+        {"platform_toolsets": {"discord": ["hermes-discord"]}}, "discord"
+    )
 
 
 

@@ -300,6 +300,27 @@ async def test_connect_clears_previous_fatal_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_connect_reports_default_off_discord_tools(monkeypatch, caplog):
+    """Regression for #138449: a connected bot explains the Discord tool opt-in."""
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
+    monkeypatch.setattr(discord_platform.Intents, "default", lambda: SimpleNamespace(
+        message_content=False, dm_messages=False, guild_messages=False, members=False, voice_states=False,
+    ))
+    monkeypatch.setattr(discord_platform.commands, "Bot", FakeBot)
+    monkeypatch.setattr(adapter, "_resolve_allowed_usernames", AsyncMock())
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", dict)
+
+    with caplog.at_level("INFO", logger="plugins.platforms.discord.adapter"):
+        assert await adapter.connect() is True
+
+    assert "Discord tools are disabled by default" in caplog.text
+    assert "hermes tools" in caplog.text
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_connect_timeout_cancels_bot_task(monkeypatch):
     """Regression: connect() timeout must cancel _bot_task so the zombie
     Discord client cannot fire on_message after the adapter is discarded.

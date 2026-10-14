@@ -1654,6 +1654,13 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
             # _mark_connected() clears a prior fatal stamp; a bare ``_running = True`` left a transient
             # startup failure reported as ``fatal`` for the life of the process (#102554).
             self._mark_connected()
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.tools_config import _platform_toolsets_explicitly_saved
+            if not _platform_toolsets_explicitly_saved(load_config_readonly(), "discord"):
+                logger.info(
+                    "[%s] Discord tools are disabled by default; run 'hermes tools' to enable "
+                    "the discord or discord_admin toolset for Discord.", self.name,
+                )
             self._start_liveness_probe()
             # Plugin-registered native handlers (discord.py Bot — add_listener()/event hooks).
             self._wire_plugin_handlers(self._client)

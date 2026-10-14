@@ -360,19 +360,19 @@ The single `video_generate` tool covers both modalities — pass `image_url` to 
 
 ## `discord` toolset
 
-Registered on the `hermes-discord` platform toolset (gateway only). Uses the same bot token as the messaging adapter.
+Available only on the Discord gateway and uses the same bot token as the messaging adapter. This toolset is default-off: run `hermes tools` and enable it for Discord, which saves an explicit `platform_toolsets.discord` selection.
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `discord` | Read and participate in a Discord server. Actions include `search_members`, `fetch_messages`, `send_message`, `react`, `fetch_channel`, `list_channels`, and more. | `DISCORD_BOT_TOKEN` |
+| `discord` | Read and participate in a Discord server with `fetch_messages`, `search_members`, and `create_thread`. | `DISCORD_BOT_TOKEN` |
 
 ## `discord_admin` toolset
 
-Registered on the `hermes-discord` platform toolset. Moderation actions require the bot to hold the matching Discord permissions.
+Available only on the Discord gateway. This toolset is default-off: run `hermes tools` and enable it for Discord, which saves an explicit `platform_toolsets.discord` selection. Actions still require the bot to hold matching Discord permissions.
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `discord_admin` | Manage a Discord server via the REST API: list guilds/channels/roles, create/edit/delete channels, manage role grants, timeouts, kicks, and bans. | `DISCORD_BOT_TOKEN` + bot permissions |
+| `discord_admin` | Manage a Discord server via the REST API: list guilds/channels/roles, inspect servers/channels/members, list or change pins, delete messages, and add or remove roles. | `DISCORD_BOT_TOKEN` + bot permissions |
 
 ## `hermes-yuanbao` toolset
 
