@@ -3,6 +3,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import requests
 
 from tools.browser_camofox import (
     camofox_click,
@@ -108,6 +109,30 @@ class TestCamofoxNavigate:
         result = json.loads(camofox_navigate("https://example.com", task_id="t_err"))
         assert result["success"] is False
         assert "Cannot connect" in result["error"]
+
+    def test_recovers_from_gone_cached_tab(self, monkeypatch):
+        """A 410 stale tab is replaced so subsequent navigation can proceed (#80276)."""
+        from tools import browser_camofox as mod
+
+        session = {
+            "user_id": "hermes_test123",
+            "tab_id": "gone-tab",
+            "session_key": "task_test",
+            "managed": True,
+            "adopt_existing_tab": False,
+        }
+        gone = requests.HTTPError("410 Gone")
+        gone.response = MagicMock(status_code=410)
+
+        with patch.object(mod, "_get_session", return_value=session), \
+             patch.object(mod, "_post", side_effect=[gone, {"tabId": "fresh-tab"}]) as mock_post, \
+             patch.object(mod, "get_vnc_url", return_value=None):
+            result = json.loads(camofox_navigate("https://example.com", task_id="t_gone"))
+
+        assert result["success"] is True
+        assert session["tab_id"] == "fresh-tab"
+        assert mock_post.call_args_list[0].args[0] == "/tabs/gone-tab/navigate"
+        assert mock_post.call_args_list[1].args[0] == "/tabs"
 
 
 # ---------------------------------------------------------------------------
