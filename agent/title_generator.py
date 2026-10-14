@@ -50,6 +50,11 @@ _PASTE_PREVIEW_LABEL = "\n\nPasted content:\n"
 _ATTACHMENT_REF_RE = re.compile(r"@(?:file|folder):\S+")
 # Footers the @-reference expander appends below the typed text (agent/context_references.py).
 _CONTEXT_FOOTER_RE = re.compile(r"\n+--- (?:Context Warnings|Attached Context) ---\n.*", re.DOTALL)
+# Gateway adapters retain this marker for an event that has no typed text. It can be batched with a
+# voice-note transcript, but is machinery rather than a topic for either title path.
+_EMPTY_CONTENT_PLACEHOLDER_RE = re.compile(
+    r"^\s*(?:\[[^\]\r\n]+\]\s*)?\(The user sent a message with no text content\)\s*$"
+)
 # Cap on the instant derived title; a raw fragment reads worse the longer it runs.
 MAX_DERIVED_TITLE_CHARS = 48
 # Answer-shaped guard: a tiny model sometimes answers instead of titling; longer is rejected, not truncated.
@@ -304,6 +309,14 @@ def _summarize_user_message(user_message: str) -> str:
     return strip_control_wrappers(user_message if described is None else described)
 
 
+def _titleable_message(user_message: str) -> str:
+    """Drop gateway empty-content events before deriving or generating a session title."""
+    message = _summarize_user_message(user_message)
+    return "\n".join(
+        line for line in message.splitlines() if not _EMPTY_CONTENT_PLACEHOLDER_RE.fullmatch(line)
+    ).strip()
+
+
 def build_title_input(user_message: str, title_preview: str | None = None) -> str:
     """Combine the opening text with a bounded Desktop-generated paste preview.
 
@@ -312,7 +325,7 @@ def build_title_input(user_message: str, title_preview: str | None = None) -> st
     Keep enough of a separately typed request to preserve a useful instruction,
     then spend the remaining title budget on the beginning of the pasted topic.
     """
-    message = _summarize_user_message(user_message)
+    message = _titleable_message(user_message)
     preview = title_preview.strip() if isinstance(title_preview, str) else ""
     if not preview:
         return message[:MAX_TITLE_INPUT_CHARS]
@@ -332,12 +345,13 @@ def build_title_input(user_message: str, title_preview: str | None = None) -> st
 
 def is_titleable_user_message(user_message: str) -> bool:
     """False for machine-authored openers and turns that reduce to nothing once scaffolding is stripped."""
+    message = _titleable_message(user_message) if isinstance(user_message, str) else ""
     return (isinstance(user_message, str) and bool(user_message.strip()) and not user_message.lstrip().startswith(_MACHINE_PREFIXES)
-            and bool(_summarize_user_message(user_message).strip())
+            and bool(message)
             # An attachment-only opener (manual attach, no paste preview) is a
             # file drop, not a request: deriving its "title" from the message
             # names the session after the truncated file path (#92068).
-            and not _attachment_only_opener(user_message))
+            and not _attachment_only_opener(message))
 
 
 def derive_title(user_message: str, title_preview: str | None = None) -> Optional[str]:

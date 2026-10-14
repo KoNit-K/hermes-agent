@@ -56,6 +56,16 @@ class TestGenerateTitle:
             assert "---" not in title_input and "@file:" not in title_input
             assert derive_title(ref + footer, preview).startswith("Quarterly incident analysis")
 
+    def test_discord_empty_content_placeholder_does_not_reach_title_input(self):
+        """Regression for #138573: a voice-note transcript must outrank Discord's empty-text marker."""
+        placeholder = "(The user sent a message with no text content)"
+        transcript = "Please review the Google Analytics setup for missplan.es"
+        batched = f"{transcript}\n\n[ClawPrime] {placeholder}"
+
+        assert build_title_input(batched) == transcript
+        assert derive_title(batched) == derive_title(transcript)
+        assert is_titleable_user_message(placeholder) is False
+
     def test_manual_attachment_only_opener_yields_no_path_title(self):
         """#92068: the manual-attach path (composer attach chip / hand-typed
         ``@file:``) sends NO Desktop paste preview, so the build_title_input
