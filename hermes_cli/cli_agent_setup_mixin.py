@@ -655,6 +655,7 @@ class CLIAgentSetupMixin:
                 verbose_logging=self.verbose, quiet_mode=not self.verbose,
                 tool_progress_mode=getattr(self, "tool_progress_mode", "all"),
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
+                preloaded_skills_prompt=getattr(self, "preloaded_skills_prompt", None),
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config, service_tier=self.service_tier,
                 request_overrides=request_overrides, providers_allowed=self._providers_only,

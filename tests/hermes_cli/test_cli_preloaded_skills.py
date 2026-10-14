@@ -31,7 +31,7 @@ def _capture_real_finalize():
 
 _REAL_FINALIZE = _capture_real_finalize()
 
-def test_main_applies_preloaded_skills_to_system_prompt(monkeypatch):
+def test_main_keeps_preloaded_skills_separate_from_ephemeral_prompt(monkeypatch):
     import cli as cli_mod
 
     created = {}
@@ -55,7 +55,8 @@ def test_main_applies_preloaded_skills_to_system_prompt(monkeypatch):
     # init via finalize_preloaded_skills() (startup-latency change). Drive
     # the finalize explicitly — the same call _init_agent makes.
     _real_finalize(cli_obj)
-    assert cli_obj.system_prompt == "base prompt\n\nskill prompt"
+    assert cli_obj.system_prompt == "base prompt"
+    assert cli_obj.preloaded_skills_prompt == "skill prompt"
     assert cli_obj.preloaded_skills == ["hermes-agent-dev", "github-auth"]
 
 def test_main_raises_for_unknown_preloaded_skill(monkeypatch):

@@ -754,6 +754,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     stable_parts.extend(_alibaba_identity_part(agent))
     # Pinned skills are per-agent constants (resolved once), so they live in the stable prefix.
     stable_parts.extend(_auto_load_parts(agent))
+    # Explicit startup skills are resolved before construction and cannot change
+    # during the session, so keep them in the reusable stable prefix too.
+    stable_parts.append(getattr(agent, "preloaded_skills_prompt", None))
     # Coding posture: the operating brief stays in the stable prefix. The
     # environment block contains the current cwd/backend and belongs after
     # project context, not ahead of a large shared AGENTS.md block.

@@ -232,6 +232,21 @@ def _prompt_parts(agent):
         return build_system_prompt_parts(agent)
 
 
+def test_preloaded_skills_are_stable_before_context_and_volatile():
+    agent = _make_agent(
+        preloaded_skills_prompt="EXPLICIT CLI SKILL",
+        ephemeral_system_prompt="EPHEMERAL PERSONALITY",
+    )
+
+    parts = _prompt_parts(agent)
+    rendered = "\n\n".join(parts.values())
+
+    assert "EXPLICIT CLI SKILL" in parts["stable"]
+    assert parts["stable"].endswith("EXPLICIT CLI SKILL")
+    assert rendered.count("EXPLICIT CLI SKILL") == 1
+    assert "EPHEMERAL PERSONALITY" not in rendered
+
+
 def _init_code_repo(path):
     """A git repo that actually holds code — the coding posture requires a source
     file (or manifest), not a bare ``.git`` (a prose/notes repo stays general)."""
