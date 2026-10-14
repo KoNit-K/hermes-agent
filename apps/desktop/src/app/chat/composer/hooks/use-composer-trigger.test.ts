@@ -174,6 +174,21 @@ describe('useComposerTrigger — free-text slash arguments', () => {
     expect(hook.result.current.trigger).not.toBeNull()
   })
 
+  it('opens argument options when a completed bare command carries a trailing space', () => {
+    // The backend adds this space to an exact completion so its menu remains
+    // visible. It is separator whitespace, not an argument.
+    const editor = mountEditor('/person')
+    const personality = item('/personality ', 'Commands')
+    const { hook } = mountTrigger(editor, [personality])
+
+    act(() => hook.result.current.refreshTrigger())
+    act(() => hook.result.current.replaceTriggerWithChip(personality))
+
+    expect(composerPlainText(editor)).toBe('/personality ')
+    expect(editor.querySelector('[data-slash-kind]')).toBeNull()
+    expect(hook.result.current.trigger).not.toBeNull()
+  })
+
   it('does not seal a multi-word /goal into a chip when the option list runs empty', () => {
     const editor = mountEditor('/goal finish the full prompt')
     const { hook } = mountTrigger(editor, [])
