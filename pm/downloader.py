@@ -34,6 +34,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,8 +47,27 @@ from pm.network import is_transient, retry_network
 # their docs require a real User-Agent. A browser-shaped one is the
 # least-privileged string every asset CDN accepts.
 _UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) hermes-pm/1.0", "Accept-Encoding": "identity"}
-_LOOPBACK = ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
 _CHUNK = 1 << 20  # read/write block, also the minimum range size
+
+
+def _is_loopback_http(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        return (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+                and parsed.username is None and parsed.password is None)
+    except ValueError:
+        return False
+
+
+def _is_https(url: str) -> bool:
+    try:
+        return urlsplit(url).scheme == "https"
+    except ValueError:
+        return False
+
+
+def _is_download_url(url: str) -> bool:
+    return _is_https(url) or _is_loopback_http(url)
 
 
 class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -59,8 +79,8 @@ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
         # Plain-http loopback exists for test servers, and only a download that
         # started on loopback may stay there: an https origin bouncing to a local
         # listener would hand an unpinned model file to whatever is bound there.
-        loopback = req.full_url.startswith(_LOOPBACK) and newurl.startswith(_LOOPBACK)
-        if not (newurl.startswith("https://") or loopback):
+        loopback = _is_loopback_http(req.full_url) and _is_loopback_http(newurl)
+        if not (_is_https(newurl) or loopback):
             raise DownloadError(f"refusing redirect to non-https url: {newurl}")
         # urllib preserves our User-Agent and range headers. Do not re-add
         # arbitrary headers after its redirect policy has processed them.
@@ -290,7 +310,7 @@ class Download:
             if source.fallbacks and not re.fullmatch(r"[a-f0-9]{64}", source.sha256):
                 raise ValueError("mirror fallback requires a full lowercase SHA256")
             for url in (source.url, *source.fallbacks):
-                if not (url.startswith("https://") or url.startswith(_LOOPBACK)):
+                if not _is_download_url(url):
                     raise ValueError(f"refusing non-https url: {url}")
 
         # Probe the whole plan before reporting a denominator. A missing

@@ -28,6 +28,30 @@ from pathlib import Path
 
 SCHEMA = 1
 STORE_TOKEN = "{{store}}"
+_SHA256 = re.compile(r"[a-f0-9]{64}")
+_FACT_ENV_KEYS = frozenset({"PATH", "PLAYWRIGHT_BROWSERS_PATH", "AGENT_BROWSER_EXECUTABLE_PATH"})
+
+
+def _entry_name(value: object) -> bool:
+    return (isinstance(value, str) and value not in ("", ".", "..")
+            and not any(char in value for char in "/\\:"))
+
+
+def _artifact_rows(value: object) -> list[dict]:
+    rows = list(value) if isinstance(value, list) else [value]
+    if any(not isinstance(row, dict) or not isinstance(row.get("sha256"), str)
+           or not _SHA256.fullmatch(row["sha256"]) for row in rows):
+        raise ValueError("lock artifact requires a full lowercase SHA256")
+    return rows
+
+
+def _fact_is_safe(fact: object) -> bool:
+    if not isinstance(fact, dict):
+        return False
+    if "entry" in fact and not _entry_name(fact["entry"]):
+        return False
+    env = fact.get("env", {})
+    return isinstance(env, dict) and set(env).issubset(_FACT_ENV_KEYS)
 
 
 def _read(path: Path, *, strict: bool = False) -> dict:
@@ -97,11 +121,14 @@ class Lockfile:
             found = artifacts.get("any")
         if found is None:
             return []
-        return list(found) if isinstance(found, list) else [found]
+        return _artifact_rows(found)
 
     def pinned_artifacts(self, name: str) -> dict:
         """Return the complete pin table, including targets without discovery."""
-        return deepcopy((self._packages.get(name) or {}).get("artifacts") or {})
+        artifacts = deepcopy((self._packages.get(name) or {}).get("artifacts") or {})
+        for rows in artifacts.values():
+            _artifact_rows(rows)
+        return artifacts
 
     def names(self) -> list[str]:
         return sorted(self._packages)
@@ -157,7 +184,10 @@ class Facts:
         self._packages = _read(self.path, strict=True)["packages"]
 
     def get(self, name: str) -> dict | None:
-        return self._packages.get(name)
+        fact = self._packages.get(name)
+        if fact is not None and not _fact_is_safe(fact):
+            raise ValueError(f"invalid package fact: {name}")
+        return fact
 
     def refresh_digests(self, store_root: Path) -> int:
         """Publish all tool digests after packaging finishes changing their bytes."""
@@ -176,12 +206,11 @@ class Facts:
                 continue
             entry_name = fact.get("entry")
             artifacts = fact.get("artifacts")
-            if (not isinstance(entry_name, str) or entry_name in ("", ".", "..")
-                    or any(c in entry_name for c in "/\\:")
+            if (not _entry_name(entry_name)
                     or not isinstance(fact.get("version"), str) or not fact["version"]
                     or not isinstance(fact.get("target"), str) or not fact["target"]
                     or not isinstance(artifacts, list) or not artifacts
-                    or any(not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha)
+                    or any(not isinstance(sha, str) or not _SHA256.fullmatch(sha)
                            for sha in artifacts)):
                 raise ValueError(f"incomplete payload tool: {name}")
             entry = root / entry_name
@@ -207,7 +236,7 @@ class Facts:
         that exact identity: a same-version re-pin, a different target, or
         a fact written before identity existed all count as NOT installed
         and force a reinstall. ``None`` keeps the version+path check."""
-        fact = self._packages.get(name)
+        fact = self.get(name)
         if not fact or "entry" not in fact:
             # State facts (``record_state``: venv stamp + extras) share this
             # file with tool facts but own no store entry.
@@ -225,7 +254,7 @@ class Facts:
         return (store_root / fact["entry"]).exists()
 
     def env_for(self, name: str, store_root: Path) -> dict:
-        fact = self._packages.get(name) or {}
+        fact = self.get(name) or {}
         return _resolve(fact.get("env", {}), store_root)
 
     def _merge_and_write(self, name: str, fact: dict) -> None:
@@ -287,7 +316,12 @@ class Facts:
         self._packages = retained
 
     def entries_in_use(self) -> set[str]:
-        return {f["entry"] for f in self._packages.values() if "entry" in f}
+        entries = set()
+        for name in self._packages:
+            fact = self.get(name)
+            if fact is not None and "entry" in fact:
+                entries.add(fact["entry"])
+        return entries
 
 
 def _templatize(env: dict, store_root: Path) -> dict:

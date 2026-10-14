@@ -9,6 +9,7 @@ import threading
 import pytest
 
 from pm.lock import Facts, Lockfile
+from pm.store import Store
 
 
 def test_corrupt_package_state_cannot_be_replaced_by_a_partial_write(tmp_path):
@@ -21,6 +22,36 @@ def test_corrupt_package_state_cannot_be_replaced_by_a_partial_write(tmp_path):
     with pytest.raises(ValueError, match="recorded package state"):
         facts.record_state("venv", "new", [])
     assert path.read_bytes() == b"not JSON"
+
+
+def test_untrusted_pin_digest_and_fact_environment_are_rejected(tmp_path):
+    """Regression for #138359: persisted metadata cannot become a path or loader env."""
+    lock_path = tmp_path / "lock.json"
+    lock_path.write_text(json.dumps({"schema": 1, "packages": {
+        "tool": {"version": "1", "artifacts": {"any": {
+            "url": "https://example.test/tool.tar.gz", "sha256": "../../outside",
+        }}},
+    }}), encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA256"):
+        Lockfile(lock_path).artifacts("tool", "any")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep"
+    marker.write_text("keep", encoding="utf-8")
+    with Store(tmp_path / "store").scratch() as scratch:
+        with pytest.raises(ValueError, match="SHA256"):
+            Store(tmp_path / "store").fetch_many([{
+                "url": "https://example.test/tool.tar.gz", "sha256": "../../outside",
+            }], scratch)
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+    facts_path = tmp_path / "facts.json"
+    facts_path.write_text(json.dumps({"schema": 1, "packages": {
+        "tool": {"entry": "../outside", "env": {"LD_PRELOAD": "/tmp/payload"}},
+    }}), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid package fact"):
+        Facts(facts_path).env_for("tool", tmp_path / "store")
 
 
 def test_pin_writers_merge_without_losing_other_rows(tmp_path):

@@ -369,13 +369,14 @@ class Store:
         The downloader owns partial bytes outside this disposable scratch.
         """
         from pm.downloader import Download, DownloadPaused
-        from pm.artifact_mirror import pinned_source
+        from pm.artifact_mirror import object_key, pinned_source
 
         sources = []
         for artifact in artifacts:
             if pause_event is not None and pause_event.is_set():
                 raise DownloadPaused("download paused")
             url, digest = artifact["url"], artifact["sha256"]
+            object_key(digest)
             entry_name = f"fetch-{digest}"
             entry = self.entry(entry_name)
             files = list(entry.iterdir()) if entry.is_dir() else []

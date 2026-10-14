@@ -208,6 +208,16 @@ def test_refuses_non_https_non_loopback(tmp_path):
         dl.run()
 
 
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:@evil.test/payload",
+    "http://localhost@evil.test/payload",
+    "http://[::1]@evil.test/payload",
+])
+def test_refuses_loopback_lookalike_urls(tmp_path, url):
+    with pytest.raises(ValueError, match="non-https"):
+        Download([Source(url, tmp_path / "payload")], partials_dir=tmp_path / "partials").run()
+
+
 # ── edge cases: no-Range fallback, multi-source resume, pause mid-plan ──
 
 
