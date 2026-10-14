@@ -360,6 +360,26 @@ class TestRichBlocksAfterSeal:
         client.chat_update.assert_awaited()
         assert client.chat_update.await_args.kwargs["blocks"]
 
+    @pytest.mark.asyncio
+    async def test_block_mismatch_retries_stream_finalization_without_blocks(self):
+        """A native stream cannot replace its rich-text block type with local blocks."""
+        adapter, client = _make_adapter({"rich_blocks": True})
+        rich = "# Title\n\nbody text"
+        await adapter.send_draft("D1", 7, rich[:5], metadata=META)
+        client.chat_update = AsyncMock(side_effect=[
+            _StreamExpiredError("block mismatch", {"ok": False, "error": "block_mismatch"}),
+            {"ts": "123.456"},
+        ])
+
+        result = await adapter.send("D1", rich, metadata=META)
+
+        assert result.success
+        assert client.chat_update.await_count == 2
+        first, second = (call.kwargs for call in client.chat_update.await_args_list)
+        assert first["blocks"]
+        assert second["blocks"] == []
+        assert second["text"]
+
 
 class TestDisconnectCleanup:
     @pytest.mark.asyncio

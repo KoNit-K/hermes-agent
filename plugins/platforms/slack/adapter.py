@@ -3081,7 +3081,7 @@ class SlackAdapter(BasePlatformAdapter):
     def _is_block_payload_rejection(error: BaseException) -> bool:
         """Errors recoverable by retrying without ``blocks`` (an enhancement over ``text``, so a
         rejected/oversized payload must not drop the whole response)."""
-        recoverable_codes = {"invalid_blocks", "msg_too_long", "too_many_blocks"}
+        recoverable_codes = {"block_mismatch", "invalid_blocks", "msg_too_long", "too_many_blocks"}
         response_get = getattr(getattr(error, "response", None), "get", None)
         if callable(response_get):
             try:
