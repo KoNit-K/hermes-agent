@@ -224,6 +224,7 @@ def handle_api_error(
 def _is_local_validation_error(api_error: Any) -> bool:
     """ValueError/TypeError are local bugs, except: UnicodeEncodeError (surrogate recovery
     path), json.JSONDecodeError / provider stream-parse ValueErrors (transient provider/network failure, must retry),
+    Bedrock's ``internalServerException`` event-stream wrapper (an upstream server fault),
     ssl.SSLError (inherits OSError *and* ValueError — a TLS failure is not a local bug)
     and "NoneType is not iterable" TypeErrors (upstream shape mismatches, e.g. Codex
     response.completed.output=null — retryable so the fallback path runs)."""
@@ -234,6 +235,8 @@ def _is_local_validation_error(api_error: Any) -> bool:
     _text = str(api_error).lower()
     if is_provider_stream_parse_error(api_error):
         return False  # corrupted provider SSE chunk (jiter), transient — not a local bug (#65147)
+    if "internalserverexception" in _text and ":exception-type" in _text:
+        return False  # Bedrock's event stream wrapped an upstream server fault (#138580)
     return not (isinstance(api_error, TypeError) and "nonetype" in _text and "not iterable" in _text)
 
 
