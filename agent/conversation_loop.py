@@ -904,6 +904,11 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     stored_cwd = runtime_host_value(prompt, "Current working directory")
     if stored_cwd and stored_cwd != str(resolve_agent_cwd()):
         return False
+    # Launch skills (-s) live in the stable tier, so a resume that adds them must rebuild or
+    # the reused bytes silently drop them.
+    preloaded = getattr(agent, "preloaded_skills_prompt", None)
+    if isinstance(preloaded, str) and preloaded and preloaded not in prompt:
+        return False
     # Platform is deliberately NOT an identity field: a surface switch does not invalidate the
     # stored bytes, it only makes their interface section out of date, and that is corrected by
     # agent.surface_switch.stage_surface_switch_note without touching the cached prefix (#104414).

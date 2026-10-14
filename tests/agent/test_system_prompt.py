@@ -342,6 +342,20 @@ def test_stored_prompt_stamped_for_another_session_is_not_restored(monkeypatch, 
     assert not _stored_prompt_matches_runtime(_make_agent(session_id="child-sid", **fields), parent_prompt)
 
 
+def test_stored_prompt_without_launch_skills_is_not_restored(monkeypatch, tmp_path):
+    """`--resume <id> -s X` on a session persisted without X must rebuild: launch skills live in
+    the stable tier, so reusing the stored bytes would never send them."""
+    from agent.conversation_loop import _stored_prompt_matches_runtime
+
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    fields = dict(platform="cli", model="test-model", provider="test-provider")
+    stored = build_system_prompt(_make_agent(**fields))
+    with_skill = _make_agent(preloaded_skills_prompt="LAUNCH SKILL BODY", **fields)
+    assert not _stored_prompt_matches_runtime(with_skill, stored)
+    assert _stored_prompt_matches_runtime(with_skill, build_system_prompt(with_skill))
+
+
 class TestExecutionGuidanceInjection:
     """Injection gate for OPENAI_MODEL_EXECUTION_GUIDANCE via
     ``agent.execution_guidance`` (auto/true/false/list).
