@@ -139,3 +139,17 @@ class TestPluginDispatch:
             image_generation_tool, "_read_configured_image_provider", lambda: None
         )
         assert image_generation_tool.check_image_generation_requirements() is False
+
+    def test_requirements_probe_does_not_load_or_install_fal(self, monkeypatch):
+        """The registry check_fn must not enter FAL's lazy-installing loader."""
+        import pm
+        from tools import image_generation_tool
+
+        monkeypatch.setattr(image_generation_tool, "check_fal_api_key", lambda: True)
+        monkeypatch.setattr(pm, "available", lambda extra: extra == "fal")
+        monkeypatch.setattr(
+            image_generation_tool, "_load_fal_client",
+            lambda: pytest.fail("availability probe loaded the FAL client"),
+        )
+
+        assert image_generation_tool.check_image_generation_requirements() is True
