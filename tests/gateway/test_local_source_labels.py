@@ -53,6 +53,26 @@ async def test_source_tool_is_admitted_stored_and_hidden_from_pickers(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_live_list_skips_a_session_deleted_from_the_durable_store(tmp_path, monkeypatch):
+    """A stale live entry must not make the picker RPC crash."""
+    authority, _ = await _authority(tmp_path, monkeypatch)
+    conn = AuthorityConnection(authority, SimpleNamespace(write=lambda frame: None), {'user_id': 'owner'})
+    from gateway.session_authority import LiveSession
+    chat = 'deleted-live-session'
+    authority.db.create_session(chat, source='cli')
+    authority.sessions[chat] = LiveSession(None, 'route')
+
+    assert authority.db.delete_session(chat)
+    assert chat in authority.sessions
+
+    listed = await conn.dispatch({'id': 9, 'method': 'session.list', 'params': {}})
+
+    assert listed['result'] == {'sessions': [], 'scope': 'live'}
+    await conn.close()
+    authority.db.close()
+
+
+@pytest.mark.asyncio
 async def test_finite_oneshot_sessions_stay_out_of_every_owner_picker(tmp_path, monkeypatch):
     authority, store = await _authority(tmp_path, monkeypatch)
     conn = AuthorityConnection(authority, SimpleNamespace(write=lambda frame: None), {'user_id': 'owner'})
