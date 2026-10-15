@@ -488,11 +488,11 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: dic
     cmd_name = slugify_skill_name(name)
     if not cmd_name:
         return
-    # A collision with a core command (name or alias) skips auto-registration; the skill stays
-    # loadable via /skill <name>. The same predicate feeds the /skills + palette notes.
+    # A collision with a core command (name or alias) requires renaming the skill to expose
+    # a slash command. The same predicate feeds the /skills + palette notes.
     if skill_command_collision_note(name) is not None:
         logger.warning("Skill %r generates slash command '/%s' which collides with a core Hermes command; "
-                       "skipping auto-registration. Use '/skill %s' instead.", name, cmd_name, name)
+                       "skipping auto-registration. Rename the skill to expose a slash command.", name, cmd_name)
         return
     # Dedup on the slug too: "git_helper" and "git-helper" normalize the same.
     # First-wins preserves project > local > external precedence.
@@ -511,6 +511,9 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
     global exposed partial results to overlapping scans, which then logged
     bogus "already claimed" collisions against their own incumbents."""
     key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    # Stamp the result with the pre-scan state so a racing edit invalidates it on the next lookup,
+    # even when an older scan publishes last. Filesystem I/O stays outside the publication lock.
+    disk_tag = _skill_command_disk_tag()
     # Build into a local map and publish once, at the end. Writing straight into the global made a scan's
     # partial results visible to everything else in the process: a second, overlapping scan deduped against
     # its own (empty) ``seen_names`` but collided against the first scan's already- published slugs, logging
@@ -518,14 +521,14 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
     # (#74574).
     commands: dict[str, dict[str, Any]] = {}
     try:
-        from tools.skills_tool import _get_disabled_skill_names, _skill_catalog, clear_skills_cache
-        clear_skills_cache()
+        from tools.skills_tool import _get_disabled_skill_names, _skill_catalog
         disabled = _get_disabled_skill_names()
         seen_names: set = set()
         # Only names skill_view resolves to exactly this file get a /command: the shared catalog applies
         # project > local > create_dir > external precedence (live profile dir, #67277) and leaves
-        # same-tier duplicates to their exact paths (`/skill a/one`), so a bare slug never guesses.
-        for entry in _skill_catalog():
+        # same-tier duplicates to their exact paths (skill_view), so a bare slug never guesses.
+        # Bypass the shared TTL cache: clearing it cannot prevent an older writer repopulating it.
+        for entry in _skill_catalog(use_cache=False):
             if entry["status"] == "unique":
                 try:
                     _scan_skill_md(Path(entry["path"]), disabled, seen_names, commands)
@@ -541,7 +544,7 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
         # reader between the lookup and this store (#14536, #74574); the scan above
         # (file I/O, deferred imports) stays outside it.
         _skill_commands_by_key[key] = commands
-        _skill_command_disk_tags_by_key[key] = _skill_command_disk_tag()
+        _skill_command_disk_tags_by_key[key] = disk_tag
     return commands
 
 
