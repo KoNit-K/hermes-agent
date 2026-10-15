@@ -11,12 +11,14 @@ import { clearQueuedPrompts, getQueuedPrompts } from '@/store/composer-queue'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $connection, $gatewayState } from '@/store/session'
 
-import { ChatBar } from './index'
 import { composerPlainText, RICH_INPUT_SLOT } from './rich-editor'
 import type { ChatBarProps, ChatBarState } from './types'
 
+import { ChatBar } from './index'
+
 const QUEUE_KEY = 'markdown-preview-lifecycle'
 const DRAFT = '# Latest draft\n\nKeep **these words**.'
+
 const state: ChatBarState = {
   model: { canSwitch: false, model: '', provider: '' },
   tools: { enabled: false, label: '' },
@@ -84,12 +86,12 @@ function editorIn(container: HTMLElement) {
   return container.querySelector<HTMLElement>(`[data-slot="${RICH_INPUT_SLOT}"]`)!
 }
 
-function enterPreview(container: HTMLElement, text = DRAFT) {
+async function enterPreview(container: HTMLElement, text = DRAFT) {
   const editor = editorIn(container)
 
   // No input event: the final keystroke has reached the DOM but the coalesced
   // draft flush has not run. Preview must synchronously capture that text.
-  act(() => {
+  await act(async () => {
     editor.textContent = text
     fireEvent.click(screen.getByRole('button', { name: 'Preview Markdown' }))
   })
@@ -111,10 +113,10 @@ describe('ChatBar Markdown preview lifecycle', () => {
     const onSubmit = vi.fn(async () => true)
     const onSteer = vi.fn(async () => true)
     const { container } = render(<Harness onSteer={onSteer} onSubmit={onSubmit} />)
-    const editor = enterPreview(container)
+    const editor = await enterPreview(container)
 
     expect(await screen.findByRole('heading', { name: 'Latest draft' })).toBeTruthy()
-    expect(screen.getByText('these words').tagName).toBe('STRONG')
+    expect(screen.getByText('these words').getAttribute('data-streamdown')).toBe('strong')
     fireEvent.click(screen.getByRole('button', { name: 'Edit Markdown' }))
 
     expectEditing(container)
@@ -124,11 +126,11 @@ describe('ChatBar Markdown preview lifecycle', () => {
     expect(getQueuedPrompts(QUEUE_KEY)).toEqual([])
   })
 
-  it('exits preview and queues the synchronized draft through Queue', () => {
+  it('exits preview and queues the synchronized draft through Queue', async () => {
     const onSubmit = vi.fn(async () => true)
     const onSteer = vi.fn(async () => true)
     const { container } = render(<Harness busy onSteer={onSteer} onSubmit={onSubmit} />)
-    const editor = enterPreview(container)
+    const editor = await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Queue message' }))
 
@@ -142,7 +144,7 @@ describe('ChatBar Markdown preview lifecycle', () => {
   it('exits preview and sends the synchronized draft through Send', async () => {
     const onSubmit = vi.fn(async () => true)
     const { container } = render(<Harness onSubmit={onSubmit} />)
-    const editor = enterPreview(container)
+    const editor = await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
@@ -156,7 +158,7 @@ describe('ChatBar Markdown preview lifecycle', () => {
     const onSubmit = vi.fn(async () => true)
     const onSteer = vi.fn(async () => true)
     const { container } = render(<Harness busy onSteer={onSteer} onSubmit={onSubmit} />)
-    const editor = enterPreview(container)
+    const editor = await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Steer the current run' }))
 
@@ -172,7 +174,7 @@ describe('ChatBar Markdown preview lifecycle', () => {
     const onSteer = vi.fn(async () => true)
     const onSubmit = vi.fn(async () => true)
     const { container } = render(<Harness busy onSteer={onSteer} onSubmit={onSubmit} />)
-    enterPreview(container)
+    await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Redirect the current run' }))
 
@@ -184,7 +186,7 @@ describe('ChatBar Markdown preview lifecycle', () => {
   it('restores the editable draft when Send is rejected', async () => {
     const onSubmit = vi.fn(async () => false)
     const { container } = render(<Harness onSubmit={onSubmit} />)
-    const editor = enterPreview(container)
+    const editor = await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
@@ -202,9 +204,10 @@ describe('ChatBar Markdown preview lifecycle', () => {
 
       return false
     })
+
     const onSubmit = vi.fn(async () => true)
     const { container } = render(<Harness busy onSteer={onSteer} onSubmit={onSubmit} />)
-    enterPreview(container)
+    await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Steer the current run' }))
 
@@ -219,7 +222,7 @@ describe('ChatBar Markdown preview lifecycle', () => {
   it('restores the editable draft when steering is refused before a queue exists', async () => {
     const onSteer = vi.fn(async () => false)
     const { container } = render(<Harness busy onSteer={onSteer} queueSessionKey={null} />)
-    const editor = enterPreview(container)
+    const editor = await enterPreview(container)
 
     fireEvent.click(screen.getByRole('button', { name: 'Steer the current run' }))
 
@@ -229,10 +232,10 @@ describe('ChatBar Markdown preview lifecycle', () => {
     expect(getQueuedPrompts(QUEUE_KEY)).toEqual([])
   })
 
-  it('keeps the independent Steer unavailable for slash commands in preview', () => {
+  it('keeps the independent Steer unavailable for slash commands in preview', async () => {
     const onSteer = vi.fn(async () => true)
     const { container } = render(<Harness busy onSteer={onSteer} />)
-    enterPreview(container, '/help')
+    await enterPreview(container, '/help')
 
     expect(screen.queryByRole('button', { name: 'Steer the current run' })).toBeNull()
     expect(onSteer).not.toHaveBeenCalled()
