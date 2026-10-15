@@ -834,8 +834,8 @@ Config and state have different owners: settings are user-visible behavior in
 
 ### Add validation to dashboard skills
 
-Native plugins can add a namespaced record to `GET /api/skills/content`. Register
-one callback that receives a stable skill descriptor (`name`, `path`) and the
+Plugins can add a namespaced record to `GET /api/skills/content`. Register one
+callback that receives a stable skill descriptor (`name`, `path`) and the
 SHA-256 digest of every file in that skill's instruction tree. Return `None` for
 no record, or a JSON-compatible mapping that repeats that exact digest in
 `content_hash`. Hermes exposes matching records under `validation.<plugin-id>`

@@ -118,11 +118,17 @@ class TestSkillContent:
         """Regression for #138869: validation follows the instruction-tree hash."""
         from hermes_cli import plugins
         from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+        from hermes_cli.web_routers.skills import _skill_instruction_hash
 
         manager = PluginManager()
         context = PluginContext(PluginManifest(name="grader", source="user"), manager)
+        skill_dir = isolated_profiles["default"] / "skills/dashboard-skill"
+        record = {
+            "content_hash": _skill_instruction_hash(skill_dir),
+            "grade": "approved",
+        }
         context.register_skill_validation(
-            lambda skill, content_hash: {"content_hash": content_hash, "grade": "approved"})
+            lambda skill, content_hash: record)
         stale_context = PluginContext(PluginManifest(name="old-grader", source="user"), manager)
         stale_context.register_skill_validation(
             lambda skill, content_hash: {"content_hash": "stale", "grade": "old"})
@@ -141,6 +147,7 @@ class TestSkillContent:
         )
         changed = client.get("/api/skills/content", params={"name": "dashboard-skill"}).json()
         assert changed["content_hash"] != payload["content_hash"]
+        assert "grader" not in changed["validation"]
 
 
 class TestSkillCreate:
