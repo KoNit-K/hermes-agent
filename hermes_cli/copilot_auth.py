@@ -18,8 +18,9 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-from agent.secret_scope import get_secret_str, serves_routed_profile
+from agent.secret_scope import current_secret_scope_home, get_secret_str, serves_routed_profile
 from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hermes_constants import get_routing_process_hermes_home, hermes_home_key
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,12 @@ def resolve_copilot_token() -> tuple[str, str]:
                      "token` fallback to honor explicit env-var intent (and avoid the subprocess "
                      "cost on cold start, #60800).")
         return "", ""
-    if serves_routed_profile():
+    # Multiplexing marks even launch-profile turns as routed. Only a scope stamped with
+    # the canonical launch home may use that process's global gh credential.
+    scope_home = current_secret_scope_home()
+    if serves_routed_profile() and not (
+        scope_home and hermes_home_key(scope_home) == hermes_home_key(get_routing_process_hermes_home())
+    ):
         logger.debug("No Copilot token is configured for the routed profile; skipping global `gh auth "
                      "token` fallback to preserve profile credential isolation (#138553).")
         return "", ""
