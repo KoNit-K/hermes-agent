@@ -1,6 +1,7 @@
 """ACP controls retain generation fences and reject unavailable mutations."""
 import pytest
 
+from acp_adapter.gateway_server import GatewayACPAgent
 from acp_adapter.server import HermesACPAgent
 from hermes_cli.gateway_client import GatewayClientError
 from hermes_state import SessionDB
@@ -40,6 +41,33 @@ async def test_cancel_uses_observed_generation_and_mutations_fail_explicitly(tmp
     with pytest.raises(GatewayClientError, match="unavailable"):
         await agent.set_session_mode(session_id="shared", mode_id="dont_ask")
     assert len(calls) == before, "Unsupported operations must not reach an alternate writer"
+
+
+@pytest.mark.asyncio
+async def test_gateway_acp_model_picker_sends_explicit_provider_to_mutation():
+    """Gateway ACP picker IDs use the same provider split as the legacy ACP path."""
+    payloads = []
+
+    class Client:
+        async def rpc(self, method, **params):
+            assert (method, params) == ("session.resume", {"session_id": "shared"})
+            return {"revision": 2, "execution_generation": 1}
+
+    class Mutations:
+        async def apply(self, client, session_id, operation, payload, **kwargs):
+            payloads.append((session_id, operation, payload))
+            return {"status": "applied"}
+
+        def acknowledge(self, session_id, operation, payload):
+            assert (session_id, operation, payload) == payloads[-1]
+
+    agent = GatewayACPAgent()
+    agent._gateway = Client()
+    agent._mutations = Mutations()
+
+    await agent.set_session_model(session_id="shared", model_id="deepseek:deepseek-flash")
+
+    assert payloads == [("shared", "model", {"model": "deepseek-flash", "provider": "deepseek"})]
 
 
 @pytest.mark.asyncio
