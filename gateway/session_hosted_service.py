@@ -27,12 +27,15 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
         from gateway.run import _load_gateway_config
         from gateway.hosted_rooms_common import IDENTIFIER_RE
         from gateway.session_authorities import served_profile_name
-        home = Path(self.authority.profile_id)
-        own = served_profile_name(home)
+        registry = getattr(getattr(self.authority, 'runner', None), 'session_authorities', None)
+        authorities = registry.serving() if registry is not None else (self.authority,)
+        result = {}
+        for authority in authorities:
+            home = Path(authority.profile_id)
+            result[served_profile_name(home)] = home
         # The coordinator's own threads do not inherit the caller's ContextVars.
         with owner_scope(self.authority):
             configured = _load_gateway_config().get('hosted_rooms', {}).get('profiles', {})
-        result = {own: home}
         if not isinstance(configured, dict):
             raise RuntimeStoreError('invalid_params')
         for name, value in configured.items():
@@ -41,7 +44,7 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
             target = Path(value)
             if not IDENTIFIER_RE.fullmatch(name) or not target.is_absolute() or target != target.resolve():
                 raise RuntimeStoreError('invalid_params')
-            if name == own and target != home:
+            if name in result and target != result[name]:
                 raise RuntimeStoreError('permission_denied')
             result[name] = target
         return result

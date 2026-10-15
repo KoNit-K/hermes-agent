@@ -54,6 +54,35 @@ def test_private_hosted_policy_restores_without_public_source_admission(tmp_path
         build_policy({'source': 'bot_room'}, {})
 
 
+def test_group_creation_uses_all_served_profiles_without_hosted_room_config(tmp_path, monkeypatch):
+    """A multiplex gateway's authorities, not optional YAML, define local members."""
+    from gateway.session_authorities import SessionAuthorities, owner_scope
+    from gateway.session_hosted_service import CanonicalHostedRoomService
+
+    root, alpha, beta = tmp_path / 'root', tmp_path / 'profiles' / 'alpha', tmp_path / 'profiles' / 'beta'
+    for home in (root, alpha, beta):
+        home.mkdir(parents=True)
+        (home / 'config.yaml').write_text('{}')
+    monkeypatch.setenv('HERMES_HOME', str(root))
+    with SessionDB(alpha / 'state.db') as db:
+        registry = SessionAuthorities(root, multiplexed=True)
+        runner = SimpleNamespace(config=SimpleNamespace(multiplex_profiles=True), session_authorities=registry)
+        default = SimpleNamespace(profile_id=str(root), retiring=False)
+        authority = SimpleNamespace(db=db, profile_id=str(alpha), runner=runner, retiring=False,
+                                    epoch=begin_runtime_epoch(db, instance_id='test'))
+        registry.add(root, default, name='default')
+        registry.add(alpha, authority, name='alpha')
+        registry.add(beta, SimpleNamespace(profile_id=str(beta), retiring=False), name='beta')
+        with owner_scope(authority):
+            room = CanonicalHostedRoomService(authority, None).create_room(
+                room_id='room', name='Room', members=[
+                    {'member_id': 'host', 'profile': 'alpha', 'handle': 'host'},
+                    {'member_id': 'helper', 'profile': 'beta', 'handle': 'helper'},
+                ])
+
+    assert {member['profile'] for member in room['members']} == {'alpha', 'beta'}
+
+
 
 def test_hosted_dequeue_checks_exact_task_member_and_frozen_input(tmp_path, monkeypatch):
     import json
