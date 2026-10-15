@@ -212,14 +212,15 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
     def _row_ids(message: dict) -> frozenset:
         return _tool_call_ids(message) | frozenset(filter(None, (_tool_result_id(message),)))
 
-    def _stable_row_identity(message: dict) -> tuple[str, int | str] | None:
+    def _stable_row_identities(message: dict) -> dict[str, int | str]:
+        identities = {}
         row_id = message.get("_row_id")
         if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0:
-            return ("row", row_id)
+            identities["row"] = row_id
         message_uid = message.get("message_uid")
         if isinstance(message_uid, str) and message_uid:
-            return ("uid", message_uid)
-        return None
+            identities["uid"] = message_uid
+        return identities
 
     followers = [f for f in followers if isinstance(f, dict)]
     ambiguous = False
@@ -228,7 +229,7 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
     for follower in followers:
         follower_role, follower_text = follower.get("role"), _message_text(follower).strip()
         follower_call_ids = _tool_call_ids(follower)
-        follower_identity = _stable_row_identity(follower)
+        follower_identities = _stable_row_identities(follower)
         if _row_ids(follower) & reused_ids:
             ambiguous = ambiguous or any(
                 isinstance(m, dict) and _row_ids(m) & reused_ids for m in compressed
@@ -243,11 +244,13 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
             # such row sits LAST (mid-turn compaction keeps the whole current tool chain).
             # The call ids are unique per round; match on those instead.
             message_call_ids = _tool_call_ids(message)
-            message_identity = _stable_row_identity(message)
-            # Engines may strip durable metadata. Only comparable identities can
-            # veto the existing tool-id/text fallback.
-            if follower_identity and message_identity and follower_identity[0] == message_identity[0]:
-                if follower_identity == message_identity:
+            message_identities = _stable_row_identities(message)
+            # Engines may strip either field. Compare every shared identity so a
+            # matching row id cannot hide a conflicting uid (or vice versa).
+            # Without shared fields, retain the tool-id/text fallback.
+            shared_keys = follower_identities.keys() & message_identities.keys()
+            if shared_keys:
+                if all(follower_identities[key] == message_identities[key] for key in shared_keys):
                     earliest_identified_match = (
                         pos if earliest_identified_match is None else min(earliest_identified_match, pos)
                     )
@@ -267,12 +270,14 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
             # A text twin without metadata must not hide an earlier identity match.
             if text_match is None and _same_visible_content(message, follower, follower_text):
                 text_match = pos
-    if ambiguous:
-        return None
     if earliest_identified_match is not None:
         return min(text_match, earliest_identified_match) if text_match is not None else earliest_identified_match
     if text_match is not None:
         return text_match
+    # Reused tool ids cannot invalidate a slot established by another follower;
+    # they only prevent guessing a slot when no reliable follower survived.
+    if ambiguous:
+        return None
     if (
         followers
         and any(_is_real_user_message(f) for f in followers)
