@@ -90,10 +90,18 @@ def _record_policy_refusal(path, task, refused):
             kb._append_event(conn, task.id, 'worker_policy_refused', {'refused': refused}, run_id=task.current_run_id)
 
 
+def _load_owner_policy(connection, params):
+    from hermes_cli.config_effective import load_user_config_effective
+
+    # New capabilities require the owner's current policy, never gateway fallback
+    # defaults or last-good recovery from before a broken policy edit.
+    config = load_user_config_effective(Path(connection.authority.profile_id) / 'config.yaml', fail_closed=True)
+    return build_kanban_policy(connection, params, config)
+
+
 async def run_task(connection, params):
     if not connection.native_owner or 'session:create' not in connection.actor.capabilities:
         raise RuntimeStoreError('permission_denied')
-    from gateway.run import _load_gateway_config
     from gateway.session_local import create_local_session
     from gateway.session_contract import Submission
     from gateway.session_local_recovery import local_identity
@@ -121,7 +129,7 @@ async def run_task(connection, params):
         # Refusal evidence takes the Kanban writer lock even when deduplicating.
         # Track it through cancellation/retirement without blocking the owner loop.
         policy, private = await tracked_write(authority,
-            partial(build_kanban_policy, connection, params, _load_gateway_config()))
+            partial(_load_owner_policy, connection, params))
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
     from hermes_cli.kanban_db_connect import connect_closing

@@ -2,6 +2,7 @@
 Kanban DB is the cross-profile dispatch bus (busy_timeout up to 120 s), so a dispatcher holding
 its writer must not freeze every session on the loop. Real Kanban SQLite, a real held writer."""
 import asyncio
+import json
 from itertools import pairwise
 from contextlib import closing
 import sqlite3
@@ -39,7 +40,7 @@ def test_run_task_kanban_write_never_blocks_the_loop(tmp_path, monkeypatch, life
         board_db = conn.execute('PRAGMA database_list').fetchone()[2]
     config = {'model': {'default': 'loop-model', 'provider': 'custom'}, 'platform_toolsets': {'cli': ['terminal']},
               'kanban': {'worker_policy': {'lifecycle_toolset': lifecycle_toolset}}}
-    monkeypatch.setattr('gateway.run._load_gateway_config', lambda: config)
+    (tmp_path / 'config.yaml').write_text(json.dumps(config), encoding='utf-8')
     monkeypatch.setattr('gateway.session_local.create_local_session', lambda *a, **k: SimpleNamespace(
         session_id='owner-session', profile_id=str(tmp_path)))
     calls = []

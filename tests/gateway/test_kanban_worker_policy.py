@@ -173,3 +173,33 @@ def test_malformed_kanban_section_is_rejected(claimed_card, kanban):
     path.write_text(json.dumps({'kanban': kanban}), encoding='utf-8')
     with pytest.raises(ValueError, match='worker_policy'):
         build_kanban_policy(connection, params, load_user_config_effective(path, fail_closed=True))
+
+
+@pytest.mark.parametrize('contents', ['kanban:\n  worker_policy: [', 'kanban:\n  worker_policy: null'])
+def test_owner_rejects_malformed_file_before_session_creation(claimed_card, monkeypatch, contents):
+    import asyncio
+    from ruamel.yaml.error import YAMLError
+    from gateway.session_kanban import run_task
+    from hermes_cli.config_effective import load_user_config_effective
+
+    home, connection, params = claimed_card
+    connection.authority.db = SimpleNamespace(db_path=str(home / 'state.db'), get_session=lambda _: None)
+    path = home / 'config.yaml'
+    # Prime last-good recovery with permissive defaults, then simulate a torn policy edit.
+    path.write_text('{}', encoding='utf-8')
+    load_user_config_effective(path, fail_closed=True)
+    path.write_text(contents, encoding='utf-8')
+    # An ambient launch profile must not supply defaults for this owner.
+    launch_home = home / 'launch'
+    launch_home.mkdir()
+    (launch_home / 'config.yaml').write_text(json.dumps({
+        'model': {'default': 'launch-model', 'provider': 'custom'},
+        'platform_toolsets': {'cli': ['terminal']}}), encoding='utf-8')
+    monkeypatch.setattr('gateway.run._gateway_config_home', lambda: launch_home)
+
+    def unexpected_session(*args, **kwargs):
+        pytest.fail('malformed configuration reached session creation')
+
+    monkeypatch.setattr('gateway.session_local.create_local_session', unexpected_session)
+    with pytest.raises((YAMLError, ValueError)):
+        asyncio.run(run_task(connection, params))
