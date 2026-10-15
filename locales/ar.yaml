@@ -66,7 +66,7 @@ gateway:
     usage_switch_model: "`/model <name>` — تبديل النموذج"
     usage_switch_provider: "`/model <name> --provider <slug>` — تبديل المزوّد"
     usage_persist: "`/model <name> --global` — حفظ دائم"
-    err_skew: "هذه البوّابة تعمل بكود من {boot_rev} بينما أصبحت النسخة على القرص {disk_rev}. تبديل النموذج الآن قد يسبّب انهيارًا بسبب وحدات قديمة — أعد تشغيل البوّابة لتحميل الكود الجديد: hermes gateway restart"
+    err_skew: "هذه البوّابة تعمل بكود من {boot_rev} بينما أصبحت النسخة على القرص {disk_rev}. تبديل النموذج الآن قد يسبّب انهيارًا بسبب وحدات قديمة — أعد تشغيل البوّابة لتحميل الكود الجديد: /restart"
     err_switch_failed: "فشل التبديل إلى النموذج {model} ({error})؛ سنبقى على {current}."
     err_config_not_updated: "لم يُحدَّث config.yaml ({error})"
     err_stale_override: "تم الحفظ في config.yaml، لكن لم يُمسح تجاوز الجلسة القديم ({error})"
