@@ -87,6 +87,21 @@ class DiscussionReconstructionError(DiscussionPolicyError):
 
 
 @dataclass(frozen=True)
+class DiscussionLimits:
+    """Optional host caps for one Discussion replay without changing stock policy."""
+    max_rounds: int = MAX_DISCUSSION_ROUNDS
+    max_messages: int = MAX_DISCUSSION_MESSAGES
+
+    def __post_init__(self) -> None:
+        for name, value, maximum in (
+            ("max_rounds", self.max_rounds, MAX_DISCUSSION_ROUNDS),
+            ("max_messages", self.max_messages, MAX_DISCUSSION_MESSAGES),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
+                raise DiscussionValidationError(f"{name} must be an integer between 1 and {maximum}")
+
+
+@dataclass(frozen=True)
 class DiscussionMember:
     """One immutable local or peer member of the hosted room."""
     member_id: str
@@ -691,9 +706,15 @@ def _bounded_task_delta(messages: Sequence[_ValidatedEvent], *, watermark: int,
 def plan_next_task(
     room_value: Any, events: Sequence[Mapping[str, Any]], *, local_profiles: Iterable[str],
     initial_watermarks: Mapping[tuple[str, str], int] | None = None,
-    freeze_input_context: bool = False) -> DiscussionDecision:
+    freeze_input_context: bool = False, limits: DiscussionLimits | None = None,
+    active_member_ids: Iterable[str] | None = None) -> DiscussionDecision:
     """Replay the complete room log and return at most one next member task."""
     room = validate_room(room_value, local_profiles=local_profiles)
+    limits = DiscussionLimits() if limits is None else limits
+    if not isinstance(limits, DiscussionLimits):
+        raise DiscussionValidationError("limits must be a DiscussionLimits instance")
+    active_ids = None if active_member_ids is None else {
+        _member_by_id(room, member_id).member_id for member_id in active_member_ids}
     validated = _validated_events(events, room=room)
     if (discussion := _pending_discussion(validated)) is None:
         return DiscussionDecision(status="idle", reason="no_pending_user_event")
@@ -702,13 +723,13 @@ def plan_next_task(
         DiscussionDecision, discussion_event_id=discussion.event_id, source_event_seq=discussion.seq,
         thread_id=thread_id)
     thread_messages, discussion_messages, member_messages = _thread_messages(validated, discussion)
-    if len(member_messages) >= MAX_DISCUSSION_MESSAGES:
+    if len(member_messages) >= limits.max_messages:
         return decide("bounded", "max_messages")
     terminals = {
         (int(event.payload["round_index"]), str(event.payload["member_id"])) for event in validated
         if event.kind in _TERMINAL_EVENT_KINDS and event.payload.get("discussion_event_id") == discussion.event_id}
     watermarks = _effective_watermarks(validated, initial_watermarks)
-    for round_index in range(MAX_DISCUSSION_ROUNDS):
+    for round_index in range(limits.max_rounds):
         # The user's message selects the first round, with no mention meaning
         # everyone. Later rounds are opt-in: only a peer explicitly cited by a
         # Bot and not heard from afterward gets another turn. Every member's
@@ -717,6 +738,8 @@ def plan_next_task(
         responders = (
             resolve_mentions((str(discussion.payload["text"]),), room.members) if round_index == 0
             else _unaddressed_member_mentions(discussion_messages, room))
+        if active_ids is not None:
+            responders = tuple(member for member in responders if member.member_id in active_ids)
         for member_index, member in enumerate(_rotate(responders, round_index)):
             watermark = watermarks.get((thread_id, member.member_id), 0)
             delta, attachments = _bounded_task_delta(thread_messages, watermark=watermark, member=member)
@@ -733,7 +756,7 @@ def plan_next_task(
                     if freeze_input_context or attachments else None)))
         if not any(int(event.payload["round_index"]) == round_index for event in member_messages):
             return decide("settled", "silent_round")
-        if round_index == MAX_DISCUSSION_ROUNDS - 1:
+        if round_index == limits.max_rounds - 1:
             return decide("bounded", "max_rounds")
     raise AssertionError("bounded Discussion loop exhausted unexpectedly")
 

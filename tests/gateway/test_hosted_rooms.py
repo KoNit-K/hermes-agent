@@ -867,6 +867,19 @@ def test_retention_pruning_keeps_retired_room_id_reserved(tmp_path):
     _assert_retired_identity_stays_reserved(db, "room-old", fresh_id="room-new")
 
 
+def test_host_can_pin_disbanded_room_history_until_it_unpins(tmp_path):
+    db = tmp_path / "state.db"
+    _create(db, "room-old")
+    _disband(db, room_id="room-old", now=20)
+
+    rooms.pin_room_history(db, room_id="room-old")
+    assert rooms.prune_disbanded_rooms(db, now=20 + rooms.DISBANDED_ROOM_RETENTION_SECONDS + 1) == 0
+    assert rooms.room_state(db, room_id="room-old", include_disbanded=True)["room_id"] == "room-old"
+
+    rooms.unpin_room_history(db, room_id="room-old")
+    assert rooms.prune_disbanded_rooms(db, now=20 + rooms.DISBANDED_ROOM_RETENTION_SECONDS + 1) == 1
+
+
 def test_byte_pressure_pruning_keeps_retired_room_id_reserved(
     tmp_path,
     monkeypatch,

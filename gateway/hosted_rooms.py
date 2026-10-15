@@ -44,6 +44,7 @@ MAX_GATEWAY_EVENT_BYTES = 16 * 1024 * 1024
 CONTROL_EVENT_COUNT_RESERVE = 64
 CONTROL_EVENT_BYTE_RESERVE = 1024 * 1024
 _JOURNAL_MODE_LOCK_RETRIES = 8
+_PINNED_ROOM_HISTORY: set[tuple[Path, str]] = set()
 
 _EVENT_KIND_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
 _CONTROL_EVENT_KINDS = frozenset({"authority.claimed", "authority.lost", "room.disbanded", "room.stop_requested"})
@@ -574,7 +575,7 @@ def _room_ids(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> li
 
 
 def _prune_disbanded_rooms_locked(
-    conn: sqlite3.Connection, *, now: float | None, max_gateway_event_bytes: int | None = None) -> int:
+    conn: sqlite3.Connection, *, db_path: DbPath, now: float | None, max_gateway_event_bytes: int | None = None) -> int:
     candidates: set[str] = set()
     if now is not None:
         candidates.update(_room_ids(
@@ -593,6 +594,7 @@ def _prune_disbanded_rooms_locked(
                 retained_bytes -= int(row["event_bytes"])
                 if retained_bytes <= max_gateway_event_bytes:
                     break
+    candidates.difference_update(room_id for path, room_id in _PINNED_ROOM_HISTORY if path == Path(db_path).resolve())
     if not candidates:
         return 0
     placeholders = ",".join("?" for _ in candidates)
@@ -608,7 +610,20 @@ def _prune_disbanded_rooms_locked(
 def prune_disbanded_rooms(db_path: DbPath, *, now: float | None = None) -> int:
     """Purge deleted Group Chat payloads while reserving their identities."""
     with _transaction(db_path, immediate=True) as conn:
-        return _prune_disbanded_rooms_locked(conn, now=_now(now))
+        return _prune_disbanded_rooms_locked(conn, db_path=db_path, now=_now(now))
+
+
+def pin_room_history(db_path: DbPath, *, room_id: Any) -> None:
+    """Keep a disbanded room's replay history while this host remains responsible for it."""
+    room_id = _room_id(room_id)
+    with _transaction(db_path) as conn:
+        _room_row(conn, "SELECT room_id FROM hosted_rooms WHERE room_id=?", (room_id,), room_id)
+    _PINNED_ROOM_HISTORY.add((Path(db_path).resolve(), room_id))
+
+
+def unpin_room_history(db_path: DbPath, *, room_id: Any) -> None:
+    """Allow normal retention pruning for a previously pinned room."""
+    _PINNED_ROOM_HISTORY.discard((Path(db_path).resolve(), _room_id(room_id)))
 
 
 # --- room links / grants / reservations / remote runs ---------------------------------
@@ -1156,7 +1171,8 @@ def disband_room(
         conn.execute(_INSERT_RETIRED, (room_id, now))
         event = _reload(
             conn, _SELECT_EVENT, (room_id, "system:room-disbanded"), "room disband event could not be reloaded")
-        _prune_disbanded_rooms_locked(conn, now=now, max_gateway_event_bytes=MAX_GATEWAY_EVENT_BYTES)
+        _prune_disbanded_rooms_locked(
+            conn, db_path=db_path, now=now, max_gateway_event_bytes=MAX_GATEWAY_EVENT_BYTES)
     return {"room_id": room_id, "disbanded_at": now, "idempotent": False, "event": _event_from_row(event)}
 
 

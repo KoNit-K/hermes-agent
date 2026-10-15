@@ -193,6 +193,21 @@ def test_distinct_threads_are_planned_fifo_without_skipping(room_db):
     assert second.discussion_event_id == "user-2"
 
 
+def test_host_can_limit_discussion_to_active_members_and_one_round(room_db):
+    db, room = room_db
+    _append_user(db, event_id="user-1", text="Everyone, report.")
+
+    decision = discussion.plan_next_task(
+        room, _events(db), local_profiles=LOCAL_PROFILES,
+        limits=discussion.DiscussionLimits(max_rounds=1),
+        active_member_ids={"member-research"},
+    )
+
+    assert decision.status == "task"
+    assert decision.task is not None
+    assert decision.task.member.member_id == "member-research"
+
+
 def test_room_stop_fences_old_work_but_allows_a_later_message(room_db):
     db, room = room_db
     _append_user(db, event_id="user-1", text="First", thread_id="thread-1")

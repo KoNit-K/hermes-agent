@@ -193,6 +193,10 @@ class HostedRoomRuntime:
             self._rooms_needing_reschedule.update(self._room_threads)
         self._wake.set()
 
+    def request_reconciliation(self) -> None:
+        """Ask the driver to promptly inspect durable room state after a host-side change."""
+        self.wakeup()
+
     def status(self) -> dict[str, Any]:
         """Return a transport-neutral snapshot of runtime health."""
         with self._status_lock:
