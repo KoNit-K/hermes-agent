@@ -140,16 +140,42 @@ class TestPluginDispatch:
         )
         assert image_generation_tool.check_image_generation_requirements() is False
 
-    def test_requirements_probe_does_not_load_or_install_fal(self, monkeypatch):
-        """The registry check_fn must not enter FAL's lazy-installing loader."""
+    @pytest.mark.parametrize("provider", ["fal", "nous"])
+    def test_discovery_without_fal_sdk_defers_install_until_dispatch(
+            self, monkeypatch, tmp_path, provider):
+        """Eligible backends stay discoverable before their optional SDK is installed."""
+        import sys
+        from unittest.mock import Mock
+
         import pm
         from tools import image_generation_tool
+        from tools.registry import registry
 
-        monkeypatch.setattr(image_generation_tool, "check_fal_api_key", lambda: True)
-        monkeypatch.setattr(pm, "available", lambda extra: extra == "fal")
-        monkeypatch.setattr(
-            image_generation_tool, "_load_fal_client",
-            lambda: pytest.fail("availability probe loaded the FAL client"),
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            f"image_gen:\n  provider: {provider}\n  model: {image_generation_tool.DEFAULT_MODEL}\n",
+            encoding="utf-8",
         )
+        monkeypatch.setenv("FAL_KEY", "test-key" if provider == "fal" else "")
+        monkeypatch.setattr(
+            image_generation_tool, "resolve_managed_tool_gateway", lambda service: object()
+        )
+        monkeypatch.setitem(sys.modules, "fal_client", None)
+        monkeypatch.setattr(image_generation_tool, "fal_client", None)
+        probe = Mock(return_value=False)
+        install = Mock(side_effect=ImportError("FAL lazy installation reached"))
+        monkeypatch.setattr(pm, "available", probe)
+        monkeypatch.setattr(pm, "ensure_import", install)
 
-        assert image_generation_tool.check_image_generation_requirements() is True
+        definitions = registry.get_definitions({"image_generate"})
+
+        install.assert_not_called()
+        assert [row["function"]["name"] for row in definitions] == ["image_generate"]
+        probe.assert_not_called()
+        assert image_generation_tool.fal_client is None
+
+        result = json.loads(registry.dispatch("image_generate", {"prompt": "draw a cat"}))
+
+        install.assert_called_once_with("fal")
+        assert result["success"] is False
+        assert "fal_client" in result["error"]

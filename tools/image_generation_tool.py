@@ -538,10 +538,8 @@ def check_image_generation_requirements() -> bool:
     """True if FAL or the explicitly configured image backend is available."""
     try:
         if check_fal_api_key():
-            from pm import available
-
-            if available("fal"):
-                return True
+            # The SDK is installed lazily by the handler, after the user requests generation.
+            return True
     except ImportError:
         pass
     configured = _plugin_provider_name()
