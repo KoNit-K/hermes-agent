@@ -5,7 +5,8 @@ from gateway.config import Platform, PlatformConfig, load_gateway_config
 
 
 def _make_adapter(require_mention=None, mention_patterns=None, free_response_chats=None,
-                  dm_policy=None, allow_from=None, group_policy=None, group_allow_from=None):
+                  dm_policy=None, allow_from=None, group_policy=None, group_allow_from=None,
+                  observe_unmentioned_group_messages=None, group_allowed_chats=None):
     from plugins.platforms.whatsapp.adapter import WhatsAppAdapter
 
     extra = {}
@@ -23,6 +24,10 @@ def _make_adapter(require_mention=None, mention_patterns=None, free_response_cha
         extra["group_policy"] = group_policy
     if group_allow_from is not None:
         extra["group_allow_from"] = group_allow_from
+    if observe_unmentioned_group_messages is not None:
+        extra["observe_unmentioned_group_messages"] = observe_unmentioned_group_messages
+    if group_allowed_chats is not None:
+        extra["group_allowed_chats"] = group_allowed_chats
 
     adapter = object.__new__(WhatsAppAdapter)
     adapter.platform = Platform.WHATSAPP
@@ -140,6 +145,117 @@ def test_free_response_chats_does_not_bypass_other_groups():
     )
 
     assert adapter._should_process_message(_group_message("hello everyone")) is False
+
+
+def test_unmentioned_allowed_group_message_is_observed_without_dispatching():
+    class Store:
+        class Entry:
+            session_id = "whatsapp-group-session"
+
+        def __init__(self):
+            self.sources = []
+            self.messages = []
+
+        def get_or_create_session(self, source):
+            self.sources.append(source)
+            return self.Entry()
+
+        def append_to_transcript(self, session_id, message):
+            self.messages.append((session_id, message))
+
+    async def run():
+        adapter = _make_adapter(
+            require_mention=True,
+            group_policy="open",
+            observe_unmentioned_group_messages=True,
+            group_allowed_chats=["120363001234567890@g.us"],
+        )
+        store = Store()
+        adapter._session_store = store
+
+        event = await adapter._build_message_event(_group_message(
+            "side chatter", senderId="alice@s.whatsapp.net", senderName="Alice",
+        ))
+
+        assert event is None
+        assert len(store.messages) == 1
+        assert store.messages[0][0] == "whatsapp-group-session"
+        assert store.messages[0][1]["content"] == "[Alice|alice@s.whatsapp.net]\\nside chatter"
+        assert store.messages[0][1]["observed"] is True
+        assert store.sources[0].user_id is None
+
+    import asyncio
+    asyncio.run(run())
+
+
+def test_allowed_group_mention_uses_observed_context_session():
+    async def run():
+        adapter = _make_adapter(
+            require_mention=True,
+            group_policy="open",
+            observe_unmentioned_group_messages=True,
+            group_allowed_chats=["120363001234567890@g.us"],
+        )
+        event = await adapter._build_message_event(_group_message(
+            "@15551230000 what did Alice say?",
+            senderId="bob@s.whatsapp.net", senderName="Bob",
+            mentionedIds=["15551230000@s.whatsapp.net"],
+        ))
+
+        assert event.source.user_id is None
+        assert event.text == "[Bob|bob@s.whatsapp.net]\\nwhat did Alice say?"
+        assert "Observed WhatsApp group context" in event.channel_prompt
+
+    import asyncio
+    asyncio.run(run())
+
+
+def test_observe_mode_leaves_free_response_and_no_mention_gate_unchanged():
+    allowed_group = ["120363001234567890@g.us"]
+    assert _make_adapter(
+        require_mention=False,
+        group_policy="open",
+        observe_unmentioned_group_messages=True,
+        group_allowed_chats=allowed_group,
+    )._should_observe_unmentioned_group_message(_group_message()) is False
+    assert _make_adapter(
+        require_mention=True,
+        group_policy="open",
+        free_response_chats=allowed_group,
+        observe_unmentioned_group_messages=True,
+        group_allowed_chats=allowed_group,
+    )._should_observe_unmentioned_group_message(_group_message()) is False
+
+
+def test_whatsapp_observed_rows_are_context_only_for_the_addressed_turn():
+    from gateway.run import _build_gateway_agent_history
+
+    history, observed = _build_gateway_agent_history(
+        [
+            {"role": "user", "content": "[Alice|alice]\\nside chatter", "observed": True},
+            {"role": "user", "content": "[Bob|bob]\\nwhat did Alice say?"},
+        ],
+        channel_prompt="Observed WhatsApp group context",
+    )
+
+    assert history == [{"role": "user", "content": "[Bob|bob]\\nwhat did Alice say?"}]
+    assert observed == "[Alice|alice]\\nside chatter"
+
+
+def test_observed_whatsapp_group_source_is_authorized_by_group_allowlist(monkeypatch):
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionSource
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="120363001234567890@g.us",
+        chat_type="group",
+    )
+    monkeypatch.setenv("WHATSAPP_GROUP_ALLOWED_CHATS", "120363001234567890@g.us")
+    monkeypatch.delenv("WHATSAPP_ALLOWED_USERS", raising=False)
+
+    assert runner._is_user_authorized(source) is True
 
 
 def test_mention_stripping_removes_bot_phone_from_body():

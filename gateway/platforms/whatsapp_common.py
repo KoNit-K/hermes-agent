@@ -95,6 +95,17 @@ class WhatsAppBehaviorMixin(OwnAccessPolicyMixin):
             return configured.lower() in _TRUTHY
         return bool(configured)
 
+    def _whatsapp_observe_unmentioned_group_messages(self) -> bool:
+        """Whether skipped, explicitly allowed group chatter is retained as context."""
+        configured = self.config.extra.get("observe_unmentioned_group_messages")
+        if configured is None:
+            configured = _get_wsecret("WHATSAPP_OBSERVE_UNMENTIONED_GROUP_MESSAGES", default="false") or "false"
+        return configured.lower() in _TRUTHY if isinstance(configured, str) else bool(configured)
+
+    def _whatsapp_observe_allowed_chats(self) -> set[str]:
+        return self._coerce_allow_list(
+            _extra_or_wsecret(self.config.extra, "group_allowed_chats", "WHATSAPP_GROUP_ALLOWED_CHATS"))
+
     def _whatsapp_free_response_chats(self) -> set[str]:
         """``extra.free_response_chats`` (blank = unset) else the scoped env CSV."""
         return self._coerce_allow_list(
@@ -262,6 +273,23 @@ class WhatsAppBehaviorMixin(OwnAccessPolicyMixin):
             or self._message_is_reply_to_bot(data)
             or self._message_mentions_bot(data)
             or self._message_matches_mention_patterns(data)
+        )
+
+    def _should_observe_unmentioned_group_message(self, data: dict[str, Any]) -> bool:
+        """Keep mention-gated chatter only from groups explicitly allowed for shared context."""
+        if not self._whatsapp_observes_group(data):
+            return False
+        return not self._should_process_message(data)
+
+    def _whatsapp_observes_group(self, data: dict[str, Any]) -> bool:
+        chat_id = str(data.get("chatId") or "")
+        return bool(
+            data.get("isGroup")
+            and self._whatsapp_observe_unmentioned_group_messages()
+            and self._whatsapp_require_mention()
+            and chat_id in self._whatsapp_observe_allowed_chats()
+            and chat_id not in self._whatsapp_free_response_chats()
+            and self._is_group_allowed(chat_id)
         )
 
     # ------------------------------------------------------------------ formatting
