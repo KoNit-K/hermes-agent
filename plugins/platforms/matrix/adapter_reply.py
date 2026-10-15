@@ -1,6 +1,9 @@
 """Best-effort recovery of Matrix reply targets through the configured client."""
 
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def fetch_reply_context(client, room_id: str, reply_to: str) -> tuple[str | None, str | None]:
@@ -36,3 +39,28 @@ async def fetch_reply_context(client, room_id: str, reply_to: str) -> tuple[str 
         if isinstance(related_sender, str):
             reply_to_author_id = related_sender
     return reply_to_text, reply_to_author_id
+
+
+async def extract_reply_context(adapter, room_id: str, body: str, relates_to: dict):
+    """Strip transport quotes and recover genuine reply metadata best-effort."""
+    from plugins.platforms.matrix.adapter import (
+        _extract_reply_fallback, _strip_reply_fallback,
+    )
+
+    reply_to = (relates_to.get("m.in_reply_to") or {}).get("event_id")
+    if relates_to.get("rel_type") == "m.thread" and relates_to.get("is_falling_back") is True:
+        # The fallback is transport context, not user text or a genuine reply.
+        return _strip_reply_fallback(body) if reply_to else body, None, None, None, None
+    reply_to_text = reply_to_author_id = reply_to_author_name = None
+    if reply_to and body.startswith("> "):
+        reply_to_text, reply_to_author_id = _extract_reply_fallback(body)
+        body = _strip_reply_fallback(body)
+    elif reply_to and adapter._client:
+        try:
+            reply_to_text, reply_to_author_id = await fetch_reply_context(adapter._client, room_id, reply_to)
+        except Exception:
+            logger.debug("Matrix: failed to fetch reply target %s in %s", reply_to, room_id, exc_info=True)
+    # Resolve the replied-to author's display name (falls back to localpart).
+    if reply_to_author_id:
+        reply_to_author_name = await adapter._get_display_name(room_id, reply_to_author_id)
+    return body, reply_to, reply_to_text, reply_to_author_id, reply_to_author_name

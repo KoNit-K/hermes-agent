@@ -2136,23 +2136,9 @@ class MatrixAdapter(BasePlatformAdapter):
         the inline reply fallback (``> <@user:srv> text\\n\\nreply``) BEFORE stripping it, so the
         prompt layer can render "[Replying to: ...]" like Signal/Slack/Telegram. Modern Matrix
         clients may omit the fallback, so recover its context from the related event best-effort."""
-        if relates_to.get("rel_type") == "m.thread" and relates_to.get("is_falling_back") is True:
-            return body, None, None, None, None
-        reply_to = (relates_to.get("m.in_reply_to") or {}).get("event_id")
-        reply_to_text = reply_to_author_id = reply_to_author_name = None
-        if reply_to and body.startswith("> "):
-            reply_to_text, reply_to_author_id = _extract_reply_fallback(body)
-            body = _strip_reply_fallback(body)
-        elif reply_to and self._client:
-            try:
-                from plugins.platforms.matrix.adapter_reply import fetch_reply_context
-                reply_to_text, reply_to_author_id = await fetch_reply_context(self._client, room_id, reply_to)
-            except Exception:
-                logger.debug("Matrix: failed to fetch reply target %s in %s", reply_to, room_id, exc_info=True)
-        # Resolve the replied-to author's display name (falls back to localpart).
-        if reply_to_author_id:
-            reply_to_author_name = await self._get_display_name(room_id, reply_to_author_id)
-        return body, reply_to, reply_to_text, reply_to_author_id, reply_to_author_name
+        from plugins.platforms.matrix.adapter_reply import extract_reply_context
+
+        return await extract_reply_context(self, room_id, body, relates_to)
 
     async def _build_inbound_event(
         self, room_id: str, sender: str, event_id: str, body: str, source_content: dict, relates_to: dict,

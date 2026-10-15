@@ -464,14 +464,38 @@ async def test_thread_fallback_is_not_reply_context(monkeypatch, falling_back, l
     adapter.handle_message.assert_awaited_once()
     msg = adapter.handle_message.await_args.args[0]
     assert msg.source.thread_id == "$thread"
+    assert msg.text == "because reasons"
     if falling_back is True:
-        assert msg.text == body
         assert (msg.reply_to_message_id, msg.reply_to_text,
                 msg.reply_to_author_id, msg.reply_to_author_name) == (None, None, None, None)
         adapter._client.get_event.assert_not_awaited()
     else:
-        assert msg.text == "because reasons"
         assert msg.reply_to_message_id == "$target"
         assert msg.reply_to_text == "original question"
         assert msg.reply_to_author_id == ("@hermes:example.org" if legacy else "@carol:example.org")
         assert msg.reply_to_author_name == ("hermes" if legacy else "carol")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_mention", [False, True])
+async def test_thread_fallback_quote_preserves_bang_command(monkeypatch, require_mention):
+    from gateway.platforms.base import MessageType
+
+    adapter = _make_adapter(require_mention=require_mention, monkeypatch=monkeypatch)
+    adapter._client = SimpleNamespace(get_event=AsyncMock())
+    event = _make_event(
+        "> <@hermes:example.org> original question\n\n!model",
+        thread_id="$thread", in_reply_to_event_id="$target",
+    )
+    event.content["m.relates_to"]["is_falling_back"] = True
+
+    await adapter._on_room_message(event)
+
+    adapter.handle_message.assert_awaited_once()
+    msg = adapter.handle_message.await_args.args[0]
+    assert msg.text == "/model"
+    assert msg.message_type == MessageType.COMMAND
+    assert msg.source.thread_id == "$thread"
+    assert (msg.reply_to_message_id, msg.reply_to_text,
+            msg.reply_to_author_id, msg.reply_to_author_name) == (None, None, None, None)
+    adapter._client.get_event.assert_not_awaited()
