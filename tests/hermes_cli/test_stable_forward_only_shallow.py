@@ -1,5 +1,6 @@
 """An unchosen default channel never moves a checkout backward on a guess."""
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,3 +50,25 @@ def test_full_history_behind_release_is_proof(history, tmp_path, monkeypatch):
     monkeypatch.setattr(source_check, "_github_compare", lambda *a, **k: pytest.fail("no network on proof"))
     assert source_releases._head_containing(["git"], clone, shas[2], "o/r") is None
     assert source_releases._head_containing(["git"], clone, shas[0], "o/r") == shas[0]
+
+
+def test_ancestor_probe_timeout_keeps_head_as_an_unknown_relation(monkeypatch):
+    """A slow local graph probe must not make stable-channel resolution fail."""
+    head = "a" * 40
+
+    def run(args, **_kwargs):
+        if args[-2:] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout=head + "\n", returncode=0)
+        if args[1:] == ["merge-base", "--is-ancestor", "b" * 40, head]:
+            raise subprocess.TimeoutExpired(args, 10)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(
+        source_releases,
+        "subprocess",
+        SimpleNamespace(
+            run=run, TimeoutExpired=subprocess.TimeoutExpired, DEVNULL=subprocess.DEVNULL),
+    )
+    monkeypatch.setattr(source_check, "_github_compare", lambda *_: None)
+
+    assert source_releases._head_containing(["git"], ".", "b" * 40, "o/r") == head
