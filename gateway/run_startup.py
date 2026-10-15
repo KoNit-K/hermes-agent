@@ -13,6 +13,7 @@ import faulthandler
 import logging
 import os
 import signal
+import sys
 import time
 from contextlib import nullcontext, suppress
 from contextvars import copy_context
@@ -35,6 +36,20 @@ from typing import Any, Dict, Optional, Tuple
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
+
+
+def _remove_legacy_checkout_venv_site_packages() -> None:
+    """Keep a stale Windows checkout venv from shadowing the active runtime."""
+    legacy_site_packages = (Path(__file__).resolve().parents[1] / "venv" / "Lib" / "site-packages").resolve()
+    legacy_path = os.path.normcase(str(legacy_site_packages))
+
+    def is_legacy_path(entry: str) -> bool:
+        try:
+            return os.path.commonpath((legacy_path, os.path.normcase(os.path.realpath(entry)))) == legacy_path
+        except ValueError:
+            return False
+
+    sys.path[:] = [entry for entry in sys.path if not entry or not is_legacy_path(entry)]
 
 
 def recover_left_core_in(home: Path, *, hydrate_secrets: bool = True) -> None:
@@ -816,6 +831,7 @@ class GatewayStartupMixin:
     @staticmethod
     def _start_hosted_room_worker_sync():
         """Start the local Group Chat worker without importing the dashboard."""
+        _remove_legacy_checkout_venv_site_packages()
         import tui_gateway.server
         from tui_gateway import methods_groups
         service = methods_groups.get_hosted_room_service()
