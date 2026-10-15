@@ -20,6 +20,7 @@ MXID and display name on the MessageEvent (not buried in `source`), and
 reply-targeted messages must carry the replied-to message's text and author.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -348,3 +349,129 @@ async def test_plain_blockquote_without_reply_is_stripped_whole(monkeypatch):
     assert msg.reply_to_message_id is None
     assert "@hermes:example.org" not in msg.text
     assert "thanks" in msg.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("msgtype", ["m.text", "m.image"])
+async def test_encrypted_reply_target_uses_client_crypto(monkeypatch, msgtype):
+    adapter = _make_adapter(monkeypatch=monkeypatch)
+    encrypted = SimpleNamespace(
+        type="m.room.encrypted", sender="@untrusted:example.org",
+        content={"body": "not plaintext", "ciphertext": "encrypted"},
+    )
+    plaintext = SimpleNamespace(
+        sender="@carol:example.org",
+        content=SimpleNamespace(serialize=lambda: {"body": "decrypted question", "msgtype": "m.text"}),
+    )
+    decrypt = AsyncMock(return_value=plaintext)
+    adapter._client = SimpleNamespace(
+        get_event=AsyncMock(return_value=encrypted),
+        crypto=SimpleNamespace(decrypt_megolm_event=decrypt),
+    )
+    event = _make_event("because reasons", in_reply_to_event_id="$encrypted")
+    event.content["msgtype"] = msgtype
+    await adapter._on_room_message(event)
+
+    decrypt.assert_awaited_once_with(encrypted)
+    adapter._client.get_event.assert_awaited_once_with("!room1:example.org", "$encrypted")
+    adapter.handle_message.assert_awaited_once()
+    msg = adapter.handle_message.await_args.args[0]
+    assert msg.text == "because reasons"
+    assert msg.reply_to_message_id == "$encrypted"
+    assert msg.reply_to_text == "decrypted question"
+    assert msg.reply_to_author_id == "@carol:example.org"
+    assert msg.reply_to_author_name == "carol"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["no_crypto", "missing_keys", "decrypt_error"])
+async def test_encrypted_reply_failure_preserves_delivery(monkeypatch, failure):
+    adapter = _make_adapter(monkeypatch=monkeypatch)
+    encrypted = SimpleNamespace(
+        type="m.room.encrypted", sender="@carol:example.org",
+        content={"body": "must not use encrypted envelope body"},
+    )
+    decrypt = AsyncMock(side_effect=(
+        KeyError("missing session keys") if failure == "missing_keys" else RuntimeError("decryption failed")))
+    adapter._client = SimpleNamespace(
+        get_event=AsyncMock(return_value=encrypted),
+        crypto=None if failure == "no_crypto" else SimpleNamespace(decrypt_megolm_event=decrypt),
+    )
+    await adapter._on_room_message(_make_event("keep this reply", in_reply_to_event_id="$encrypted"))
+
+    adapter.handle_message.assert_awaited_once()
+    msg = adapter.handle_message.await_args.args[0]
+    assert msg.text == "keep this reply"
+    assert msg.reply_to_message_id == "$encrypted"
+    assert (msg.reply_to_text, msg.reply_to_author_id, msg.reply_to_author_name) == (None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["fetch", "decrypt"])
+@pytest.mark.parametrize("msgtype", ["m.text", "m.image"])
+async def test_reply_lookup_timeout_preserves_delivery(monkeypatch, stage, msgtype):
+    adapter = _make_adapter(monkeypatch=monkeypatch)
+    cancelled = asyncio.Event()
+
+    async def stall(*args):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    encrypted = SimpleNamespace(type="m.room.encrypted", content={})
+    adapter._client = SimpleNamespace(
+        get_event=AsyncMock(side_effect=stall) if stage == "fetch" else AsyncMock(return_value=encrypted),
+        crypto=SimpleNamespace(decrypt_megolm_event=AsyncMock(side_effect=stall)),
+    )
+    real_timeout = asyncio.timeout
+    budgets = []
+
+    def expire_budget(seconds):
+        budgets.append(seconds)
+        return real_timeout(0)
+
+    monkeypatch.setattr("plugins.platforms.matrix.adapter.asyncio.timeout", expire_budget)
+    event = _make_event("keep this reply", in_reply_to_event_id="$slow")
+    event.content["msgtype"] = msgtype
+    await adapter._on_room_message(event)
+
+    assert budgets == [10]
+    assert cancelled.is_set()
+    adapter.handle_message.assert_awaited_once()
+    msg = adapter.handle_message.await_args.args[0]
+    assert msg.text == "keep this reply"
+    assert msg.reply_to_message_id == "$slow"
+    assert (msg.reply_to_text, msg.reply_to_author_id, msg.reply_to_author_name) == (None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("falling_back", [True, False, None])
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("msgtype", ["m.text", "m.image"])
+async def test_thread_fallback_is_not_reply_context(monkeypatch, falling_back, legacy, msgtype):
+    adapter = _make_adapter(require_mention=legacy, monkeypatch=monkeypatch)
+    adapter._client = SimpleNamespace(get_event=AsyncMock(return_value={
+        "sender": "@carol:example.org", "content": {"body": "original question"},
+    }))
+    body = "> <@hermes:example.org> original question\n\nbecause reasons" if legacy else "because reasons"
+    event = _make_event(body, thread_id="$thread", in_reply_to_event_id="$target")
+    event.content["msgtype"] = msgtype
+    if falling_back is not None:
+        event.content["m.relates_to"]["is_falling_back"] = falling_back
+    await adapter._on_room_message(event)
+
+    adapter.handle_message.assert_awaited_once()
+    msg = adapter.handle_message.await_args.args[0]
+    assert msg.source.thread_id == "$thread"
+    if falling_back is True:
+        assert msg.text == body
+        assert (msg.reply_to_message_id, msg.reply_to_text,
+                msg.reply_to_author_id, msg.reply_to_author_name) == (None, None, None, None)
+        adapter._client.get_event.assert_not_awaited()
+    else:
+        assert msg.text == "because reasons"
+        assert msg.reply_to_message_id == "$target"
+        assert msg.reply_to_text == "original question"
+        assert msg.reply_to_author_id == ("@hermes:example.org" if legacy else "@carol:example.org")
+        assert msg.reply_to_author_name == ("hermes" if legacy else "carol")

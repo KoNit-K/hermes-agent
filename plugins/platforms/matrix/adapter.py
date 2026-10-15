@@ -2136,6 +2136,8 @@ class MatrixAdapter(BasePlatformAdapter):
         the inline reply fallback (``> <@user:srv> text\\n\\nreply``) BEFORE stripping it, so the
         prompt layer can render "[Replying to: ...]" like Signal/Slack/Telegram. Modern Matrix
         clients may omit the fallback, so recover its context from the related event best-effort."""
+        if relates_to.get("rel_type") == "m.thread" and relates_to.get("is_falling_back") is True:
+            return body, None, None, None, None
         reply_to = (relates_to.get("m.in_reply_to") or {}).get("event_id")
         reply_to_text = reply_to_author_id = reply_to_author_name = None
         if reply_to and body.startswith("> "):
@@ -2143,22 +2145,8 @@ class MatrixAdapter(BasePlatformAdapter):
             body = _strip_reply_fallback(body)
         elif reply_to and self._client:
             try:
-                related_event = await self._client.get_event(RoomID(room_id), EventID(reply_to))
-                related_content = (
-                    related_event.get("content") if isinstance(related_event, dict)
-                    else getattr(related_event, "content", None)
-                )
-                if not isinstance(related_content, dict) and hasattr(related_content, "serialize"):
-                    related_content = related_content.serialize()
-                related_body = related_content.get("body") if isinstance(related_content, dict) else None
-                if isinstance(related_body, str) and related_body.strip():
-                    reply_to_text = related_body
-                    related_sender = (
-                        related_event.get("sender") if isinstance(related_event, dict)
-                        else getattr(related_event, "sender", None)
-                    )
-                    if isinstance(related_sender, str):
-                        reply_to_author_id = related_sender
+                from plugins.platforms.matrix.adapter_reply import fetch_reply_context
+                reply_to_text, reply_to_author_id = await fetch_reply_context(self._client, room_id, reply_to)
             except Exception:
                 logger.debug("Matrix: failed to fetch reply target %s in %s", reply_to, room_id, exc_info=True)
         # Resolve the replied-to author's display name (falls back to localpart).
