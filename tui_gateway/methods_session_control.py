@@ -400,7 +400,11 @@ def _execute_manager_action(session_key: str, action: str, args: dict) -> dict:
 def _execute_goal_action(session_key: str, action: str, args: dict) -> dict:
     from hermes_cli.goals import GoalContract, GoalManager
 
-    manager = GoalManager(session_id=session_key)
+    try:
+        default_max_turns = int((_load_cfg().get("goals") or {}).get("max_turns", 20) or 20)
+    except (AttributeError, TypeError, ValueError):
+        default_max_turns = 20
+    manager = GoalManager(session_id=session_key, default_max_turns=default_max_turns)
     if action == "goal.set":
         contract = GoalContract.from_dict(args["contract"]) if args["contract"] is not None else None
         manager.set(args["title"], max_turns=args["max_turns"], contract=contract)

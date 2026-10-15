@@ -299,6 +299,14 @@ class TestManagerOnlyMutations:
         assert waiting["result"]["control"]["goal"]["wait_barrier"]["type"] == "until"
         assert waiting["result"]["control"]["goal"]["wait_barrier"]["reason"] == "Await CI"
 
+    def test_goal_set_uses_the_profile_default_turn_budget(self, server, session, monkeypatch):
+        sid, _, _ = session
+        monkeypatch.setattr(server, "_load_cfg", lambda: {"goals": {"max_turns": 9}})
+
+        response = _call(server, "session.control", session_id=sid, action="goal.set", args={"title": "Use profile defaults"})
+
+        assert response["result"]["control"]["goal"]["max_turns"] == 9
+
     def test_subgoal_add_remove_clear_are_real_one_based_mutations_without_dispatch(self, server, session, monkeypatch):
         from hermes_cli.goals import load_goal
 
