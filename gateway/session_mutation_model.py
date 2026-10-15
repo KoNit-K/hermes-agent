@@ -12,15 +12,22 @@ async def prepare_model(authority, live, payload, prepared):
     from hermes_cli.model_switch import apply_model_selection, selection_route_changed, switch_model
     from hermes_cli.config import get_compatible_custom_providers
     old = restore_policy(prepared['snapshot']['receipt']['policy'])
-    config = old.config(authority)
-    _, runtime = authority.runner._resolve_session_agent_runtime(source=live.source, session_key=live.route)
+    # Resolve the pick from the policy's effective route, not by constructing the old agent first.
+    # A legacy local-DM receipt can retain bare ``custom`` while its followed profile has the named
+    # provider that actually owns the endpoint; resolving that stale route raises before the target
+    # picker can inspect its own credentials.
+    config, current_model = old.effective(authority)
+    current = config.get('model') or {}
+    current_key = launch_key(authority, old) or current.get('api_key') or ''
+    runtime = {'api_key': current_key}
 
     def switch(**kwargs):
         result = switch_model(**kwargs)
         return result, _alias_credential(authority, result)
     result, alias_credential = await asyncio.to_thread(switch, raw_input=payload['model'],
-        current_provider=old.provider, current_model=old.model, current_base_url=old.base_url or '',
-        current_api_key=runtime.get('api_key') or '', explicit_provider=payload.get('provider', ''),
+        current_provider=current.get('provider') or old.provider, current_model=current_model or old.model,
+        current_base_url=current.get('base_url') or old.base_url or '', current_api_key=current_key,
+        explicit_provider=payload.get('provider', ''),
         is_global=False, user_providers=config.get('providers'),
         custom_providers=get_compatible_custom_providers(config))
     if not result.success:

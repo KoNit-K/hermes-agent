@@ -203,6 +203,59 @@ async def test_provider_change_drops_the_launch_key_and_keeps_config_secrets(tmp
 
 
 @pytest.mark.asyncio
+async def test_model_mutation_uses_effective_followed_route_not_stale_frozen_runtime(tmp_path, monkeypatch):
+    """A legacy bare ``custom`` snapshot cannot block a Desktop Bot Chat's next model pick.
+
+    Follow-profile chats may have been created before named custom providers kept their durable
+    identity in the frozen policy.  The current profile route is authoritative for a pick; resolving
+    the stale route first raises before the target provider gets a chance to resolve.
+    """
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from gateway import run
+    from gateway import session_mutation_model
+    from gateway.session_mutation_model import prepare_model
+    from gateway.session_policy import build_policy, restore_policy
+    from hermes_state import SessionDB
+    from hermes_cli import model_switch
+
+    legacy = {'model': {'provider': 'custom', 'default': 'deepseek-flash'}}
+    followed = {'model': {'provider': 'custom:deepseek', 'default': 'deepseek-flash',
+                          'base_url': 'https://deepseek.example/v1'},
+                'providers': {'deepseek': {'base_url': 'https://deepseek.example/v1', 'key_env': 'DEEPSEEK_KEY'}}}
+    monkeypatch.setattr(run, '_load_gateway_config', lambda *_: followed)
+    seen = {}
+
+    def switch_model(**kwargs):
+        seen.update(kwargs)
+        return model_switch.ModelSwitchResult(
+            success=True, new_model='gpt-6-astra', target_provider='ofox',
+            provider_changed=True, base_url='https://ofox.example/v1', api_key='target-key')
+
+    monkeypatch.setattr(model_switch, 'switch_model', switch_model)
+
+    async def no_refusal(*args):
+        return None
+
+    monkeypatch.setattr(session_mutation_model, '_selection_guard_refusal', no_refusal)
+    with SessionDB(tmp_path / 'state.db') as db:
+        policy = build_policy({'cwd': str(tmp_path), 'model': 'deepseek-flash', 'toolsets': [],
+                               'follow_profile_config': True}, legacy)
+        authority = SimpleNamespace(instance_id='i', epoch=1, profile_id='secondary', db=db)
+        authority.runner = SimpleNamespace(
+            _resolve_session_agent_runtime=lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError('stale frozen runtime must not be resolved before the new selection')))
+        prepared = {'snapshot': {'receipt': {'session_id': 'sid', 'policy': asdict(policy)}}}
+        switched = restore_policy((await prepare_model(
+            authority, SimpleNamespace(source=None, route='route'),
+            {'model': 'gpt-6-astra', 'provider': 'ofox'}, prepared))['policy'])
+
+    assert seen['current_provider'] == 'custom:deepseek'
+    assert seen['current_base_url'] == 'https://deepseek.example/v1'
+    assert switched.config()['model']['provider'] == 'ofox'
+
+
+@pytest.mark.asyncio
 async def test_committed_model_selection_is_the_next_resolved_runtime(tmp_path, monkeypatch):
     """custom -> custom on a new origin: the committed policy and the next resolved runtime agree on
     endpoint, protocol and credentials. The creation request's launch URL, the old endpoint's launch
