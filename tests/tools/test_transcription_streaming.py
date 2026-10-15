@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import json
 import threading
+from array import array
 
 from websockets.sync.server import serve
 
 from tools import transcription_streaming as ts
 from tools import voice_mode
+
+
+def test_resampler_keeps_nonintegral_rate_output_independent_of_pcm_chunks():
+    """Regression for #139121: 44.1 kHz input must retain interpolation state."""
+    pcm = array("h", [100, 200, 300, 400, 500, 600]).tobytes()
+
+    whole = ts.Resampler(44100, 16000)(pcm)
+    chunked_resampler = ts.Resampler(44100, 16000)
+    chunked = chunked_resampler(pcm[:8]) + chunked_resampler(pcm[8:])
+
+    assert array("h", chunked) == array("h", whole)
 
 
 def _xai_like_server(received: list):

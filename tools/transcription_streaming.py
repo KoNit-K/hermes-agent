@@ -78,7 +78,10 @@ class Resampler:
             frac = pos - i
             out.append(int(data[i] + (data[i + 1] - data[i]) * frac))
             pos += ratio
-        keep = int(pos)
+        # ``pos`` can move past ``last`` after emitting the final interpolation
+        # point in a chunk. Keep that boundary sample for the next chunk so the
+        # fractional phase remains relative to data that is still available.
+        keep = min(int(pos), last)
         self._carry = data[keep:]
         self._pos = pos - keep
         return out.tobytes()
