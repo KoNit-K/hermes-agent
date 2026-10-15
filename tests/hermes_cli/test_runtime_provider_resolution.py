@@ -8,6 +8,23 @@ import pytest
 from hermes_cli import runtime_provider as rp
 
 
+def test_anthropic_pool_cooldown_has_structured_rate_limit_code(monkeypatch):
+    """A model-specific Anthropic pool cooldown must remain transient for cron preflight (#138816)."""
+    from hermes_cli.auth import PROVIDER_RATE_LIMITED_CODE, is_rate_limited_auth_error
+
+    monkeypatch.setattr(
+        "agent.anthropic_credentials.resolve_anthropic_token",
+        lambda *, model=None: None if model else "available-for-other-models",
+    )
+
+    with pytest.raises(rp.AuthError) as exc_info:
+        rp._anthropic_token_or_raise(model="claude-sonnet-5")
+
+    assert exc_info.value.provider == "anthropic"
+    assert exc_info.value.code == PROVIDER_RATE_LIMITED_CODE
+    assert is_rate_limited_auth_error(exc_info.value)
+
+
 def test_configured_api_key_provider_without_key_fails_closed(monkeypatch):
     """A saved provider must not resolve as another authenticated provider."""
     monkeypatch.setattr(

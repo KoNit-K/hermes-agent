@@ -219,6 +219,29 @@ class TestMissingProviderKeyBlocks:
         assert "provider credential missing" in (error or "")
         assert "openrouter" not in calls
 
+    def test_rate_limited_pinned_provider_is_not_blocked_as_missing_key(self, tmp_path):
+        """Regression for #138816: a pool cooldown is transient, not a missing key."""
+        from hermes_cli.auth import AuthError, PROVIDER_RATE_LIMITED_CODE
+
+        def resolve(**_kwargs):
+            raise AuthError(
+                "Anthropic credentials are rate-limited for claude-sonnet-5",
+                provider="anthropic",
+                code=PROVIDER_RATE_LIMITED_CODE,
+            )
+
+        job = _job(provider="anthropic", model="claude-sonnet-5")
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            success, _output, _final_response, error, agent_constructed = \
+                _run_job_patched(job, tmp_path, resolve=resolve)
+
+        assert agent_constructed is False
+        assert success is False
+        assert "rate-limited" in (error or "")
+        assert "provider credential missing" not in (error or "")
+        assert "blocked_config" not in (error or "")
+
 
 class TestHealthyJobUnaffected:
     def test_healthy_job_runs_normally(self, tmp_path):
