@@ -93,6 +93,19 @@ class ClarifyThenToolAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class HiddenThenToolAgent(ClarifyThenToolAgent):
+    """Emits a tool opted out of gateway progress before a normal tool."""
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "hidden_progress_tool", "secret action", {})
+            cb("tool.started", "terminal", "pwd", {})
+            if not type(self).adapter.delivered.wait(timeout=5.0):
+                raise AssertionError("progress task never delivered a bubble")
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
@@ -173,3 +186,33 @@ async def test_clarify_tool_never_renders_progress_bubble(monkeypatch, tmp_path,
     # The unrelated terminal tool still renders progress normally (and proves
     # the no-leak asserts above ran against a drained queue).
     assert "pwd" in all_content
+
+
+@pytest.mark.asyncio
+async def test_tool_opted_out_of_progress_does_not_render_bubble(monkeypatch, tmp_path):
+    from tools.registry import registry
+
+    registry.register(
+        name="hidden_progress_tool", toolset="test", schema={"name": "hidden_progress_tool"},
+        handler=lambda _args: "{}", show_progress=False,
+    )
+    try:
+        adapter = ProgressCaptureAdapter()
+        runner = _make_runner(adapter)
+        monkeypatch.setattr(HiddenThenToolAgent, "adapter", adapter)
+        gateway_run = _install_fakes(monkeypatch, "all")
+        monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+        monkeypatch.setitem(sys.modules["run_agent"].__dict__, "AIAgent", HiddenThenToolAgent)
+
+        await runner._run_agent(
+            message="hello", context_prompt="", history=[],
+            source=SessionSource(platform=Platform.SLACK, chat_id="C1", chat_type="dm"),
+            session_id="sess-hidden-progress", session_key="agent:main:slack:dm:C1",
+        )
+
+        all_content = "\n".join([m["content"] for m in adapter.sent] + [e["content"] for e in adapter.edits])
+        assert "hidden_progress_tool" not in all_content
+        assert "secret action" not in all_content
+        assert "pwd" in all_content
+    finally:
+        registry.deregister("hidden_progress_tool")

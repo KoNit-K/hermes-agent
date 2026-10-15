@@ -79,6 +79,18 @@ class TestRegisterAndDispatch:
                      schema={"name": "noargs", "description": "x"}, handler=_dummy_handler)
         assert reg.get_entry("noargs") is not None
 
+    def test_show_progress_defaults_to_true_and_can_be_disabled(self):
+        reg = ToolRegistry()
+        reg.register(name="visible", toolset="core", schema=_make_schema("visible"), handler=_dummy_handler)
+        reg.register(
+            name="hidden", toolset="core", schema=_make_schema("hidden"), handler=_dummy_handler,
+            show_progress=False,
+        )
+
+        assert reg.shows_progress("visible") is True
+        assert reg.shows_progress("hidden") is False
+        assert reg.shows_progress("not_registered") is True
+
 
     def test_cross_mcp_toolsets_do_not_overwrite_atomically(self, caplog):
         """Parallel MCP registrations with one name leave exactly one owner."""

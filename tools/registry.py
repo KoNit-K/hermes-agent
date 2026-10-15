@@ -225,6 +225,7 @@ class ToolEntry:
     is_async: bool
     description: str
     emoji: str
+    show_progress: bool = True
     max_result_size_chars: int | float | None = None
     # Zero-arg callable whose dict is shallow-merged onto the schema at every get_definitions()
     # — for fields tracking runtime config (delegate_task's description reflects limits).
@@ -539,6 +540,11 @@ class ToolRegistry:
         with self._lock:
             return self._lookup(name, scope or self.current_scope_key(), explicit_scope=scope is not None)
 
+    def shows_progress(self, name: str) -> bool:
+        """Whether *name* should render gateway tool-progress lines; unknown tools stay visible."""
+        entry = self.get_entry(name)
+        return entry is None or entry.show_progress
+
     def _lookup(self, name: str, scope_key: Optional[str], *, explicit_scope: bool = True) -> Optional[ToolEntry]:
         """``_merged_tools(scope).get(name)`` without building the merged dict. An implicit scope
         (the caller passed none) also sees the current session's tool overlay, as the merge does."""
@@ -711,7 +717,7 @@ class ToolRegistry:
         check_fn: Callable | None = None, requires_env: list | None = None, is_async: bool = False,
         description: str = "", emoji: str = "", max_result_size_chars: float | None = None,
         dynamic_schema_overrides: Callable | None = None, override: bool = False,
-        scope: Optional[str] = None, execution_timeout: float | None = None):
+        scope: Optional[str] = None, execution_timeout: float | None = None, show_progress: bool = True):
         """Register a tool (called at import time by each tool file). ``override=True`` is an
         explicit opt-in for plugins replacing a built-in implementation (e.g. a headed-Chrome
         browser backend); without it, cross-toolset shadowing is rejected."""
@@ -775,6 +781,7 @@ class ToolRegistry:
                 name=name, toolset=toolset, schema=schema, handler=handler, check_fn=check_fn,
                 requires_env=requires_env or [], is_async=is_async,
                 description=description or schema.get("description", ""), emoji=emoji,
+                show_progress=show_progress,
                 max_result_size_chars=max_result_size_chars, execution_timeout=execution_timeout,
                 dynamic_schema_overrides=dynamic_schema_overrides)
             # Availability is derived per-tool (_toolset_has_exposable_tools), so this map no

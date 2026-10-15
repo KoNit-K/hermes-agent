@@ -31,6 +31,12 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
+def _tool_shows_progress(tool_name: str | None) -> bool:
+    """Read the registry's per-tool display hint without widening gateway tool state."""
+    from tools.registry import registry
+    return registry.shows_progress(str(tool_name or ""))
+
+
 def _tool_lifecycle_payload(call_id, tool_name, args) -> dict:
     """The ``ToolStartPayload`` contract every client reads (``tool_id``/``name``/``context``),
     plus the ``tool_call_id``/``tool_name`` the gateway's own consumers were built on."""
@@ -172,6 +178,7 @@ class GatewayTurnProgressMixin:
             # the progress queue drains on a background task, that raw JSON typically lands right underneath
             # the rendered prompt (#52374).
             or tool_name == "clarify"
+            or not _tool_shows_progress(tool_name)
             or self._agent_interrupted()
         ):
             return
