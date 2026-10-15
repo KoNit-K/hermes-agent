@@ -52,6 +52,16 @@ def _model_gate(setting: Any, model: Optional[str], default_models) -> bool:
     return any(p in model_lower for p in default_models)
 
 
+def _sol_auto_guidance_suppressed(setting: Any, provider: Optional[str], model: Optional[str]) -> bool:
+    """Keep Sol's Nous route out of the two repetitive tool-turn steers by default (#139403)."""
+    return (
+        isinstance(setting, str)
+        and setting.lower() == "auto"
+        and (provider or "").lower() == "nous"
+        and "gpt-6.1-sol" in (model or "").lower()
+    )
+
+
 def _resolve_platform_hint(agent: Any, platform_key: str, default_hint: str) -> str:
     """Apply the ``platform_hints.<platform>`` config override: ``replace``
     substitutes the default, ``append`` adds text (a bare string is shorthand
@@ -569,11 +579,15 @@ def _guidance_parts(agent: Any) -> list[str]:
     # matches the hardcoded model lists; true/false force; a list gives custom
     # model-name substrings.  Execution guidance is an independent gate so
     # DeepSeek/Kimi/Qwen-class models get it even with enforcement off.
-    if _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS):
+    if _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS) and not _sol_auto_guidance_suppressed(
+        agent._tool_use_enforcement, agent.provider, agent.model
+    ):
         parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
         if any(g in (agent.model or "").lower() for g in ("gemini", "gemma")):
             parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
-    if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
+    if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS) and not _sol_auto_guidance_suppressed(
+        getattr(agent, "_execution_guidance", "auto"), agent.provider, agent.model
+    ):
         from agent.prompt_builder import execution_guidance_text
         parts.append(execution_guidance_text(agent.valid_tool_names))
     return parts

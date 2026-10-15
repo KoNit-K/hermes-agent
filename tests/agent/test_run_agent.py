@@ -980,6 +980,63 @@ class TestBuildSystemPrompt:
 class TestToolUseEnforcementConfig:
     """Tests for the agent.tool_use_enforcement config option."""
 
+    def test_sol_auto_mode_omits_repetitive_execution_steers(self):
+        """Regression for #139403: Sol must not receive the two plan-persistence steers by default."""
+        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE
+
+        with (
+            patch("model_tools.get_tool_definitions", return_value=_make_tool_defs("terminal")),
+            patch("model_tools.check_toolset_requirements", return_value={}),
+            patch("agent.process_bootstrap.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={}),
+            patch("hermes_cli.config.load_config_readonly", return_value={}),
+        ):
+            agent = AIAgent(
+                model="openai/gpt-6.1-sol",
+                provider="nous",
+                api_key="test-key-1234567890",
+                base_url="https://api.nousresearch.com/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+            prompt = agent._build_system_prompt()
+
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE not in prompt
+        assert OPENAI_MODEL_EXECUTION_GUIDANCE not in prompt
+
+    def test_sol_explicit_guidance_config_remains_enabled(self):
+        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE
+
+        with (
+            patch("model_tools.get_tool_definitions", return_value=_make_tool_defs("terminal")),
+            patch("model_tools.check_toolset_requirements", return_value={}),
+            patch("agent.process_bootstrap.OpenAI"),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"agent": {"tool_use_enforcement": True, "execution_guidance": True}},
+            ),
+            patch(
+                "hermes_cli.config.load_config_readonly",
+                return_value={"agent": {"tool_use_enforcement": True, "execution_guidance": True}},
+            ),
+        ):
+            agent = AIAgent(
+                model="openai/gpt-6.1-sol",
+                provider="nous",
+                api_key="test-key-1234567890",
+                base_url="https://api.nousresearch.com/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent.client = MagicMock()
+            prompt = agent._build_system_prompt()
+
+        assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert OPENAI_MODEL_EXECUTION_GUIDANCE in prompt
+
 
     def test_no_tools_never_injects(self):
         """Even with enforcement=true, no injection when agent has no tools."""
