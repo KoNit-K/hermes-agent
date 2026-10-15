@@ -40,6 +40,27 @@ async def test_repeated_resume_and_close_preserve_only_live_memberships(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_list_skips_a_live_session_whose_db_row_was_deleted(tmp_path):
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        for sid in ('deleted', 'kept'):
+            db.create_session(sid, source='test')
+        epoch = begin_runtime_epoch(db, instance_id='test')
+        authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id='test',
+                                     instance_id='test', db=db, epoch=epoch)
+        for sid in ('deleted', 'kept'):
+            authority.sessions[sid] = LiveSession(None, sid + '-route')
+        connection = AuthorityConnection(authority, object(), {'user_id': 'human'})
+
+        assert db.delete_session('deleted')
+        reply = await connection.dispatch({'id': 1, 'method': 'session.list', 'params': {}})
+
+        assert [row['session_id'] for row in reply['result']['sessions']] == ['kept']
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('deleted_first', [True, False])
 async def test_close_after_a_subscribed_session_was_deleted_releases_every_membership(tmp_path, deleted_first):
     """Deletion evicts the live session before the viewer disconnects; teardown must still
