@@ -201,11 +201,11 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
     (idle/maintenance compaction right after the reply) → the reply is genuinely
     the tail.
 
-    Tool rounds whose ids the transcript reuses (``reused_ids``) are not usable
-    anchors: the id would bind to whichever round happens to sit last and put the
-    reply mid-chain. Such followers are passed over in favour of the remaining
-    real followers; when none locates the slot and a reused-id round survives in
-    ``compressed``, the placement is unknown and ``None`` is returned (skip).
+    Tool rounds whose pairing ids the transcript reuses (``reused_ids``) need a
+    matching durable identity to serve as anchors: the pairing id alone would
+    bind to the wrong round and put the reply mid-chain. When no follower
+    locates the slot and a reused-id round survives in ``compressed``, the
+    placement is unknown and ``None`` is returned (skip).
     """
     from agent.conversation_compression import _is_real_user_message, _message_text
 
@@ -230,11 +230,11 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
         follower_role, follower_text = follower.get("role"), _message_text(follower).strip()
         follower_call_ids = _tool_call_ids(follower)
         follower_identities = _stable_row_identities(follower)
-        if _row_ids(follower) & reused_ids:
+        follower_reuses_ids = bool(_row_ids(follower) & reused_ids)
+        if follower_reuses_ids:
             ambiguous = ambiguous or any(
                 isinstance(m, dict) and _row_ids(m) & reused_ids for m in compressed
             )
-            continue
         for pos in range(len(compressed) - 1, -1, -1):
             message = compressed[pos]
             if not isinstance(message, dict) or message.get("role") != follower_role:
@@ -254,6 +254,10 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
                     earliest_identified_match = (
                         pos if earliest_identified_match is None else min(earliest_identified_match, pos)
                     )
+                continue
+            # Reused pairing ids cannot locate a round, but must not suppress
+            # a durable identity match above. One-sided metadata is insufficient.
+            if follower_reuses_ids:
                 continue
             if follower_call_ids or message_call_ids:
                 if message_call_ids == follower_call_ids:
