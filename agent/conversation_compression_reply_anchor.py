@@ -186,8 +186,9 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
 
     ``followers`` are the ORIGINAL rows after the reply (the next user turn, its
     tool rounds, ...). The slot is just before the surviving row that originally
-    followed it. Text rows use the LAST match in ``compressed`` (a first-match
-    scan binds to an older identical "ok"/"thanks" twin and resurfaces the reply
+    followed it. The first matching text follower uses its LAST match in
+    ``compressed`` (a first-match scan binds to an older identical "ok"/"thanks"
+    twin and resurfaces the reply
     mid-history; raw ``==`` misses a follower the engine re-rendered from a
     parts list), but an unambiguous tool or durable-row identity clamps that
     tentative slot to its earliest surviving position. When no follower survives but the original
@@ -242,8 +243,11 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
             # such row sits LAST (mid-turn compaction keeps the whole current tool chain).
             # The call ids are unique per round; match on those instead.
             message_call_ids = _tool_call_ids(message)
-            if follower_identity or _stable_row_identity(message):
-                if follower_identity == _stable_row_identity(message):
+            message_identity = _stable_row_identity(message)
+            # Engines may strip durable metadata. Only comparable identities can
+            # veto the existing tool-id/text fallback.
+            if follower_identity and message_identity and follower_identity[0] == message_identity[0]:
+                if follower_identity == message_identity:
                     earliest_identified_match = (
                         pos if earliest_identified_match is None else min(earliest_identified_match, pos)
                     )
@@ -260,9 +264,9 @@ def _reply_insertion_index(followers: list, compressed: list, *, reused_ids: fro
                         pos if earliest_identified_match is None else min(earliest_identified_match, pos)
                     )
                 continue
-            if _same_visible_content(message, follower, follower_text):
+            # A text twin without metadata must not hide an earlier identity match.
+            if text_match is None and _same_visible_content(message, follower, follower_text):
                 text_match = pos
-                break
     if ambiguous:
         return None
     if earliest_identified_match is not None:
