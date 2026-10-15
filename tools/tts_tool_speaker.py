@@ -19,7 +19,7 @@ import platform
 import queue
 import tempfile
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Callable, Iterable, Iterator, List, Optional
 
 from tools.tts_text_normalize import _strip_markdown_for_tts
@@ -121,7 +121,8 @@ class _SyncSentencePipeline:
         """Flush queued sentences in order (skipped if stopped), then join."""
         self._queue.put(None)
         self._player.join()
-        self._executor.shutdown(wait=True)
+        stopped = self._stop.is_set()
+        self._executor.shutdown(wait=not stopped, cancel_futures=stopped)
 
     def _synthesize_to_tmp(self, cleaned: str) -> Optional[str]:
         if self._stop.is_set():
@@ -144,7 +145,7 @@ class _SyncSentencePipeline:
         for _sentence, future in iter(self._queue.get, None):
             tmp_path = None
             try:
-                tmp_path = future.result()
+                tmp_path = self._wait_for_audio(future)
                 if tmp_path and not self._stop.is_set() and os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 0:
                     from tools.voice_mode import play_audio_file
                     play_audio_file(tmp_path)
@@ -152,6 +153,27 @@ class _SyncSentencePipeline:
                 logger.warning("Sync per-sentence TTS failed: %s", exc)
             finally:
                 _unlink_quietly(tmp_path)
+
+    def _wait_for_audio(self, future: Future) -> Optional[str]:
+        """Wait for one synthesis result without delaying a stop request."""
+        while not self._stop.is_set():
+            try:
+                return future.result(timeout=0.05)
+            except FutureTimeout:
+                continue
+        future.add_done_callback(self._cleanup_late_result)
+        future.cancel()
+        return None
+
+    @staticmethod
+    def _cleanup_late_result(future: Future) -> None:
+        """Remove an artifact produced after barge-in released the voice loop."""
+        if future.cancelled():
+            return
+        try:
+            _unlink_quietly(future.result())
+        except Exception as exc:
+            logger.debug("Late sync TTS cleanup skipped: %s", exc)
 
 
 class _StreamerPlayback:
