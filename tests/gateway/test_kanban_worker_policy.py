@@ -175,7 +175,13 @@ def test_malformed_kanban_section_is_rejected(claimed_card, kanban):
         build_kanban_policy(connection, params, load_user_config_effective(path, fail_closed=True))
 
 
-@pytest.mark.parametrize('contents', ['kanban:\n  worker_policy: [', 'kanban:\n  worker_policy: null'])
+@pytest.mark.parametrize('contents', [
+    'kanban:\n  worker_policy: [',
+    'kanban:\n  worker_policy: null',
+    '- kanban:\n    worker_policy:\n      task_skills: none\n      lifecycle_toolset: none\n'
+    '      task_model_override: deny\n      task_reasoning_override: deny\n',
+    '[]', 'null', 'false', '42', 'invalid',
+])
 def test_owner_rejects_malformed_file_before_session_creation(claimed_card, monkeypatch, contents):
     import asyncio
     from ruamel.yaml.error import YAMLError
@@ -189,6 +195,8 @@ def test_owner_rejects_malformed_file_before_session_creation(claimed_card, monk
     path.write_text('{}', encoding='utf-8')
     load_user_config_effective(path, fail_closed=True)
     path.write_text(contents, encoding='utf-8')
+    # Runtime readers may already have cached a tolerant interpretation of this file.
+    load_user_config_effective(path)
     # An ambient launch profile must not supply defaults for this owner.
     launch_home = home / 'launch'
     launch_home.mkdir()
