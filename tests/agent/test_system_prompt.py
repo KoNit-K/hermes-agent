@@ -242,7 +242,8 @@ def test_preloaded_skills_are_stable_before_context_and_volatile():
     rendered = "\n\n".join(parts.values())
 
     assert "EXPLICIT CLI SKILL" in parts["stable"]
-    assert parts["stable"].endswith("EXPLICIT CLI SKILL")
+    from agent.launch_skills import frame_launch_skills
+    assert parts["stable"].endswith(frame_launch_skills("EXPLICIT CLI SKILL"))
     assert rendered.count("EXPLICIT CLI SKILL") == 1
     assert "EPHEMERAL PERSONALITY" not in rendered
 
@@ -573,7 +574,7 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
         prompt = build_system_prompt(agent, system_message="SYSTEM_MESSAGE")
 
     assert prompt == expected
-    assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:4])
+    assert agent._cached_system_prompt_static == expected.partition("\n\nSYSTEM_MESSAGE")[0]
 
 
 class TestTelegramRichMessagesHint:

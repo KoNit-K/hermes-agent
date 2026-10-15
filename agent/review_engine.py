@@ -71,9 +71,14 @@ def collect_parent_loaded_skills(parent_agent, messages: list[dict[str, Any]], l
     """Skills the parent was operating under: launch-preloaded (marker in ``preloaded_skills_prompt``)
     first, then ``skill_view`` loads from history, deduped, capped at ``limit`` (a reviewer told to load 30
     skills would burn its budget before working)."""
+    from agent.launch_skills import restore_launch_skills
+    restore_launch_skills(parent_agent)
     names: list[str] = []
     prompt = str(getattr(parent_agent, "preloaded_skills_prompt", "") or "")
-    candidates = [m.group(1) for m in re.finditer(r'with the "([^"]+)" skill\s+preloaded', prompt)]
+    from agent.launch_skills import preloaded_skill_names
+    candidates = preloaded_skill_names(prompt)
+    if candidates is None:  # raw prompts supplied by older direct callers
+        candidates = [m.group(1) for m in re.finditer(r'with the "([^"]+)" skill\s+preloaded', prompt)]
     for message in messages or []:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue

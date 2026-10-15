@@ -724,11 +724,19 @@ def _refresh_bot_chat_tools(agent) -> None:
     gateway keeps agents alive across turns; every other surface builds a fresh agent whose
     tools[] already reflects config. No prefix preservation: a disabled toolset must drop,
     and the prompt rebuild this rides on already breaks the cache."""
+    from gateway.session_policy import active_policy
+    policy = active_policy()
     platform = getattr(agent, "platform", None)
-    if platform not in ("desktop", "tui"):
+    if policy is None and platform not in ("desktop", "tui"):
         return
     try:
         from tools.mcp_tool_agent import refresh_agent_mcp_tools
+        if policy is not None:
+            # Gateway-owned session (managed worker / owner turn): toolsets are frozen in its
+            # launch policy, so live config edits never widen or narrow a running session.
+            refresh_agent_mcp_tools(agent, enabled_override=list(policy.toolsets),
+                                    quiet_mode=True, content_aware=True)
+            return
         from tui_gateway.server import _load_disabled_toolsets, _load_enabled_toolsets
         refresh_agent_mcp_tools(
             agent, enabled_override=_load_enabled_toolsets(platform),
@@ -761,6 +769,9 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
                 agent.session_id, exc,
             )
 
+    from agent.launch_skills import restore_launch_skills
+    if stored_prompt:
+        restore_launch_skills(agent, stored_prompt)
     if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
         # NULL/empty rows never reach this probe: they already rebuild below.
         if _bot_chat_prompt_stale(agent, stored_prompt):
@@ -904,10 +915,10 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     stored_cwd = runtime_host_value(prompt, "Current working directory")
     if stored_cwd and stored_cwd != str(resolve_agent_cwd()):
         return False
-    # Launch skills (-s) live in the stable tier, so a resume that adds them must rebuild or
-    # the reused bytes silently drop them.
+    # Launch skills live in the stable tier; resume additions must rebuild to reach the model.
+    from agent.launch_skills import persisted_launch_skills
     preloaded = getattr(agent, "preloaded_skills_prompt", None)
-    if isinstance(preloaded, str) and preloaded and preloaded not in prompt:
+    if isinstance(preloaded, str) and preloaded and preloaded != persisted_launch_skills(prompt):
         return False
     # Platform is deliberately NOT an identity field: a surface switch does not invalidate the
     # stored bytes, it only makes their interface section out of date, and that is corrected by

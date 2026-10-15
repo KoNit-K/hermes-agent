@@ -3135,6 +3135,8 @@ def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
 
 def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
     """Refresh tool schemas and rebuild the system prompt at the commit boundary."""
+    from agent.launch_skills import restore_launch_skills
+    restore_launch_skills(agent)
     if getattr(agent, "_retain_seeded_system_prompt", False) is True:
         # Gateway hygiene / gateway /compress run a detached agent with a reduced toolset and no live
         # surface: its builder output drops the skills index, external provider blocks and tool guidance,
@@ -3162,8 +3164,6 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
             "compaction tool-definition refresh failed; keeping the session's existing tool snapshot", exc_info=True
         )
 
-    # ALWAYS rebuild the prompt here: keeping old bytes meant prompt-builder changes
-    # never reached long sessions. Equal bytes keep KV; preserve object identity.
     # ALWAYS rebuild the prompt at the admitted-commit boundary (maintainer-directed, #95681 arc). The
     # previous "keep-prompt" containment branch put the OLD bytes back whenever the reloaded memory blocks
     # were already embedded — which meant prompt-builder changes (guidance diets, new blocks, renames) NEVER
@@ -3271,18 +3271,9 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
     is carried unchanged (renumbering per rotation made one session look like many); its provenance is read BEFORE the
     transfer clears the ancestor's row, then restored so an inherited auto-title stays upgradeable.
     """
-    with _swallow('Could not migrate goal on compression: %s'):
-        # Carry a persistent /goal onto the continuation session. Compression mints a fresh child id;
-        # load_goal does a flat per-session lookup with no parent walk, so without this an active goal
-        # silently dies at the boundary (#33618).
-        from hermes_cli.goals import migrate_goal_to_session
-        migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
-    with _swallow('Could not migrate heartbeat on compression: %s'):
-        from hermes_cli.heartbeat import migrate_heartbeat_to_session
-        migrate_heartbeat_to_session(old_session_id, agent.session_id)
-    with _swallow('Could not migrate loop on compression: %s'):
-        from hermes_cli.loops import migrate_loop_to_session
-        migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
+    # /goal, /heartbeat, /loop: carried locally, or atomically by the owner on a RuntimeSessionStore.
+    from agent.compression_automation import carry_compression_automation
+    carry_compression_automation(agent, old_session_id)
     with _swallow('Could not carry rejected thinking on compression: %s'):
         from agent.anthropic_thinking_replay import carry_rejected_thinking_to_session
         carry_rejected_thinking_to_session(agent, old_session_id)
