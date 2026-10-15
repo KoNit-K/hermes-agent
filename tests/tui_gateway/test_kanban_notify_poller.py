@@ -11,6 +11,7 @@ These tests cover the delivery half that now lives in tui_gateway/server.py:
 unsubscribe) and ``_format_kanban_event_text``.
 """
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ from tui_gateway.server import (
     _collect_kanban_notifications,
     _format_kanban_event_text,
 )
+from tui_gateway import server
 
 SESSION_KEY = "tui-session-key-1"
 
@@ -56,6 +58,19 @@ def _sub_rows(tid: str) -> list:
 
 
 class TestCollectKanbanNotifications:
+    def test_non_owner_does_not_claim_events_before_turn_admission(self, monkeypatch):
+        """Regression for #138810: a refused dashboard wake must leave the cursor for its owner."""
+        tid = _create_subscribed_task()
+        pre_cursor = _sub_rows(tid)[0]["last_event_id"]
+        _complete(tid, summary="still awaiting the owning backend")
+        session = {"session_key": SESSION_KEY, "history_lock": threading.RLock(), "running": False}
+
+        monkeypatch.setattr(server, "_ensure_active_session_slot", lambda _sid, _session: "SESSION_NOT_OWNED")
+        server._notif_poll_kanban(SESSION_KEY, session)
+
+        assert _sub_rows(tid)[0]["last_event_id"] == pre_cursor
+        assert not session.get("_kanban_pending")
+
     def test_zero_sub_board_is_never_opened_writable(self):
         conn = kbc.connect()
         conn.close()

@@ -455,6 +455,12 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
 def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
     """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events are
     cursor-claimed (never re-queued), so they wait in the buffer instead of dropping the agent turn."""
+    # Claim the active-session lease before advancing the durable kanban cursor. A second backend can
+    # share this session_key but be fenced by SESSION_NOT_OWNED; if it claimed first, the owner could
+    # never see the event after this process' rejected wake-up. Do this separately from the idle-turn
+    # claim so an owning session may still buffer notifications while it is busy.
+    if _ensure_active_session_slot(sid, session) is not None:
+        return
     try:
         texts = _collect_kanban_notifications(session)
     except Exception as exc:
