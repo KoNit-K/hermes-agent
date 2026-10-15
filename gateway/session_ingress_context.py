@@ -68,6 +68,30 @@ def native_callback(runner, event, transport_home, profile=None):
         _callback.reset(token)
 
 
+@contextmanager
+def redispatched_native_callback(runner, event):
+    """Rebind a runner-owned retry event to its authenticated ingress callback.
+
+    Only an event re-dispatched while handling the original event may inherit this
+    process-local context. Wire input cannot install either callback.
+    """
+    context = _callback.get()
+    if context is None or context[0] is not runner or event.source is not context[1].source:
+        yield
+        return
+    relay = _relay_callback.get()
+    if event.source.delivered_via_upstream_relay:
+        if relay is None or relay[1] is not context[1]:
+            yield
+            return
+        with native_callback(runner, event, context[2], context[3]):
+            with relay_callback(relay[0], event):
+                yield
+        return
+    with native_callback(runner, event, context[2], context[3]):
+        yield
+
+
 def _binding(runner, source, profile):
     registries = [(None, runner.adapters), *getattr(runner, '_profile_adapters', {}).items()]
     from gateway.config import Platform

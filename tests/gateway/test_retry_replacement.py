@@ -15,7 +15,7 @@ from agent.context_compressor import (
 from gateway.config import GatewayConfig
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import GatewayRunner
-from gateway.session import SessionStore
+from gateway.session import SessionSource, SessionStore
 
 
 def _composite_carrier(ask="REAL ASK"):
@@ -307,6 +307,45 @@ async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path, mon
         "first answer",
         "new answer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_retry_rebinds_native_ingress_provenance(tmp_path, monkeypatch):
+    """A multiplexed retry keeps the authenticated callback of its source event."""
+    from gateway.config import Platform
+    from gateway.session_ingress_context import capture_provenance, native_callback
+
+    config = GatewayConfig(multiplex_profiles=True)
+    session_id = "retry-native-provenance"
+    source = SessionSource(platform=Platform.DISCORD, chat_id="chat", user_id="user")
+    original = MessageEvent(text="/retry", message_type=MessageType.COMMAND, source=source)
+    adapter = object()
+    gw = GatewayRunner.__new__(GatewayRunner)
+    gw.config = config
+    gw.session_store = object()
+    gw._transport_owner = MagicMock(return_value=(adapter, None))
+    session_entry = MagicMock(session_id=session_id, last_prompt_tokens=123)
+    gw._async_session_store = SimpleNamespace(
+        _store=gw.session_store,
+        get_or_create_session=AsyncMock(return_value=session_entry),
+        load_transcript=AsyncMock(return_value=[
+            {"role": "user", "content": "retry me"},
+            {"role": "assistant", "content": "old answer"},
+        ]),
+        rewrite_transcript=AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "gateway.session_ingress_context._binding",
+        lambda *_args: (adapter, tmp_path, tmp_path, {"transport_home": str(tmp_path)}),
+    )
+
+    async def admit_retry(retried):
+        assert capture_provenance(gw, retried) == {"transport_home": str(tmp_path)}
+        return "new answer"
+
+    gw._handle_message = AsyncMock(side_effect=admit_retry)
+    with native_callback(gw, original, tmp_path):
+        assert await gw._handle_retry_command(original) == "new answer"
 
 
 @pytest.mark.asyncio
