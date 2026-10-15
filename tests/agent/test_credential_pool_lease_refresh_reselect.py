@@ -16,10 +16,10 @@ NOT in ``available`` until the refresh has run.
 
 import threading
 
-from agent.credential_pool import CredentialPool, PooledCredential
+from agent.credential_pool import STRATEGY_FILL_FIRST, CredentialPool, PooledCredential
 
 
-def _entry(entry_id: str) -> PooledCredential:
+def _entry(entry_id: str, *, priority: int = 0) -> PooledCredential:
     return PooledCredential(
         id=entry_id,
         provider="anthropic",
@@ -27,7 +27,7 @@ def _entry(entry_id: str) -> PooledCredential:
         access_token="tok",
         label=entry_id,
         source="oauth",
-        priority=0,
+        priority=priority,
     )
 
 
@@ -39,6 +39,7 @@ def _bare_pool(entries):
     pool._active_leases = {}
     pool._current_id = None
     pool._max_concurrent = 2
+    pool._strategy = STRATEGY_FILL_FIRST
     pool._unmatched_rotation_streak = 0
     pool.provider = "anthropic"
     return pool
@@ -93,3 +94,19 @@ def test_acquire_lease_still_none_when_refresh_does_not_help():
     assert pool.acquire_lease() is None
     assert state["refresh_calls"] == 1, "retry must not refresh repeatedly"
     assert pool._active_leases == {}
+
+
+def test_fill_first_lease_keeps_using_highest_priority_credential_at_soft_cap():
+    """Concurrent child runs must not make ``fill_first`` spill to a fallback.
+
+    A soft lease cap regulates concurrency for balancing strategies, but it is
+    not exhaustion.  ``fill_first`` promises to keep the primary credential
+    until it becomes unavailable, so another child must retain that affinity.
+    """
+    primary = _entry("primary", priority=0)
+    fallback = _entry("fallback", priority=1)
+    pool = _bare_pool([primary, fallback])
+    pool._active_leases[primary.id] = pool._max_concurrent
+
+    assert pool.acquire_lease() == primary.id
+    assert pool._active_leases == {primary.id: pool._max_concurrent + 1}
