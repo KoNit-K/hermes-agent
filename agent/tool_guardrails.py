@@ -368,8 +368,12 @@ class ToolCallGuardrailController:
         if signature != self._successful_streak_sig:
             self._successful_streak_sig = None
             self._successful_streak_count = 0
+        # Argument-only replay protection covers non-idempotent successes even when
+        # resource IDs change. Execution/navigation tools need identical-result evidence.
         elif (
-            not self._is_idempotent(tool_name)
+            self.config.hard_stop_enabled
+            and not self._is_idempotent(tool_name)
+            and tool_name not in FAILURE_TOLERANT_TOOL_NAMES
             and not is_stall_guard_repeatable(tool_name)
             and self._successful_streak_count >= self.config.no_progress_block_after
         ):
