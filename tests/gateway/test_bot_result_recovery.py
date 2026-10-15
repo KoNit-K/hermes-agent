@@ -112,3 +112,19 @@ def test_settled_bot_receipt_relays_empty_reply_for_a_bare_silence_marker(tmp_pa
         assert prose['reply'] == 'The NO_REPLY marker means do not answer.'
     finally:
         db.close()
+
+
+def test_bulk_scan_accepts_pre_admission_ambiguous_receipt_without_recovery_warning(tmp_path, caplog):
+    """A refused admission leaves its pre-commit pin for exact-id fail-closed handling."""
+    from gateway.session_bot import _scan_records
+    from tools.bot_live_delivery import _locked, _write
+
+    key = 'a' * 32
+    record = dict(delivery_id=key, profile_home=str(tmp_path), session_id='bot',
+                  principal_id='owner', message='hello', status='ambiguous')
+    with _locked(tmp_path) as root:
+        _write(root / f'{key}.json', record)
+        records = list(_scan_records(root))
+
+    assert records == [(tmp_path / 'runtime' / 'bot_live_delivery' / f'{key}.json', record)]
+    assert 'Skipping malformed Bot mailbox receipt' not in caplog.text

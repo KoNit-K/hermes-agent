@@ -48,8 +48,31 @@ def _canonical_record_error(path, record):
     return None
 
 
+def _pre_admission_pin_error(path, record):
+    """Return why an uncommitted admission pin is unsafe to retain during scans."""
+    delivery_id = record.get('delivery_id')
+    if not isinstance(delivery_id, str) or delivery_id != path.stem:
+        return 'delivery id does not match filename'
+    try:
+        _delivery_id(delivery_id)
+    except ValueError:
+        return 'delivery id is invalid'
+    required_strings = ('profile_home', 'session_id', 'principal_id')
+    missing = [key for key in required_strings
+               if not isinstance(record.get(key), str) or not record[key]]
+    if missing:
+        return 'missing pre-admission fields: ' + ', '.join(missing)
+    if not isinstance(record.get('message'), str):
+        return 'message is not a string'
+    if record.get('status') != 'ambiguous':
+        return f'unknown pre-admission status {record.get("status")!r}'
+    return None
+
+
 def _record_shape_error(path, record):
     """Validate the known canonical or legacy receipt shape for directory scans."""
+    if record.get('status') == 'ambiguous' and 'admission_id' not in record and 'owner' not in record:
+        return _pre_admission_pin_error(path, record)
     if 'admission_id' in record or record.get('status') == 'canonical' or 'principal_id' in record:
         return _canonical_record_error(path, record)
     if 'owner' in record:
