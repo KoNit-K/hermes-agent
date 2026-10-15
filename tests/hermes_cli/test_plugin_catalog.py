@@ -33,6 +33,17 @@ def test_shipped_catalog_entries_are_all_valid_and_pinned():
     assert all(e.install_identifier.startswith(e.repo) for e in entries)
 
 
+def test_graphiti_memory_catalog_entry_exposes_its_pinned_recall_tools():
+    """Regression for #70067: Graphiti stays discoverable as a pinned memory provider."""
+    entry = pc.get_catalog_entry("graphiti-memory")
+
+    assert entry is not None
+    assert entry.repo == "https://github.com/xiaoyaner0201/hermes-graphiti-memory"
+    assert entry.sha == "fe4056ef4e2a393291770f4c2b81555327d97fd4"
+    assert entry.category == "memory"
+    assert entry.capabilities.provides_tools == ["graphiti_memory", "recall"]
+
+
 def test_category_defaults_to_other_and_unknown_category_is_rejected(tmp_path):
     """``category`` is the browse shelf: absent → ``desktop``; a value outside CATALOG_CATEGORIES is an
     invalid entry (skipped with a warning) so a typo cannot create a phantom shelf on the site."""
