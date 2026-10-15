@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +22,25 @@ logger = logging.getLogger(__name__)
 
 BACKUPS_SUBDIR = Path("backups") / "config"
 DEFAULT_KEEP = 5
+
+_LAST_KNOWN_GOOD_BACKUPS_SUPPRESSED: ContextVar[bool] = ContextVar(
+    "_LAST_KNOWN_GOOD_BACKUPS_SUPPRESSED", default=False
+)
+
+
+@contextmanager
+def suppress_last_known_good_backups():
+    """Prevent maintenance from writing last-known-good copies for another profile."""
+    token = _LAST_KNOWN_GOOD_BACKUPS_SUPPRESSED.set(True)
+    try:
+        yield
+    finally:
+        _LAST_KNOWN_GOOD_BACKUPS_SUPPRESSED.reset(token)
+
+
+def last_known_good_backups_suppressed() -> bool:
+    """Whether the current config read belongs to cross-profile maintenance."""
+    return _LAST_KNOWN_GOOD_BACKUPS_SUPPRESSED.get()
 
 # Names earlier code wrote next to config.yaml (setup wizard, corrupt snapshot, xai migration).
 # Moved into the backups dir on first use so they stop accumulating in the home root; hand-named

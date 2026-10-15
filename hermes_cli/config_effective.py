@@ -98,8 +98,10 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
                 # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
                 # must not create backups/ inside that profile.
-                if config_path == _config.get_config_path():
-                    from hermes_cli.config_backups import backup_config
+                from hermes_cli.config_backups import (
+                    backup_config, last_known_good_backups_suppressed)
+                if (config_path == _config.get_config_path()
+                        and not last_known_good_backups_suppressed()):
                     backup_config(config_path, "good")
 
         env_snapshot = _config._env_ref_snapshot(raw)

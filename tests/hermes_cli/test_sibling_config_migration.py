@@ -53,6 +53,7 @@ def _setup(monkeypatch, tmp_path, active_home: Path, *, default_home: Path | Non
 
 
 def test_sibling_behind_is_migrated_on_disk(monkeypatch, tmp_path):
+    """Regression for #139429: updater-owned migration must not leave LKG files in siblings."""
     active = _write_profile(tmp_path / "profiles", "active", _latest_version())
     sibling = _write_profile(tmp_path / "profiles", "research", 12)
     _setup(monkeypatch, tmp_path, active)
@@ -68,6 +69,7 @@ def test_sibling_behind_is_migrated_on_disk(monkeypatch, tmp_path):
     assert on_disk["_config_version"] == _latest_version()
     # and user settings survived
     assert on_disk["model"]["provider"] == "nous"
+    assert not (sibling / "backups").exists()
 
 
 def test_active_profile_is_skipped(monkeypatch, tmp_path):

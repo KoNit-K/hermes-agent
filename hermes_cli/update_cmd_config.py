@@ -43,6 +43,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     ``hermes update`` still migrates it.
     """
     from hermes_cli.config import check_config_version, migrate_config
+    from hermes_cli.config_backups import suppress_last_known_good_backups
     migrated: list[tuple[str, int, int]] = []
     with _best_effort('Sibling profile enumeration failed: %s'):
         from hermes_constants import (
@@ -54,13 +55,14 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
                 continue  # profile never configured — nothing to migrate
             token = set_hermes_home_override(profile_home)
             try:
-                current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
-                if current_ver >= latest_ver:
-                    continue
-                migrate_config(interactive=False, quiet=True)
-                after_ver, _ = check_config_version(raise_on_parse_error=True)
-                if after_ver > current_ver:
-                    migrated.append((name, current_ver, after_ver))
+                with suppress_last_known_good_backups():
+                    current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
+                    if current_ver >= latest_ver:
+                        continue
+                    migrate_config(interactive=False, quiet=True)
+                    after_ver, _ = check_config_version(raise_on_parse_error=True)
+                    if after_ver > current_ver:
+                        migrated.append((name, current_ver, after_ver))
             except Exception as exc:
                 logger.debug("Config migration for profile %s failed: %s", name, exc)
             finally:
