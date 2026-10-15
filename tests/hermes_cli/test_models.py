@@ -433,6 +433,13 @@ class TestCodexSoftAcceptPlausibilityGate:
         assert r["recognized"] is True
 
 
+def test_opencode_go_catalog_accepts_hy4_preview_for_session_coherence():
+    """Regression for #138969: a picker-offered OpenCode Go model cannot be rejected at session creation."""
+    from hermes_cli.models_validate import static_model_provider_conflict
+
+    assert static_model_provider_conflict("hy4-preview", "opencode-go") is None
+
+
 class TestFormatPricePerMtok:
     """_format_price_per_mtok: sub-cent prices must not collapse to 'free'/'$0.00'."""
 
