@@ -112,6 +112,36 @@ class TestSkillContent:
         resp = client.get("/api/skills/content", params={"name": "worker-skill"})
         assert resp.status_code == 404
 
+    def test_content_carries_only_current_plugin_validation(
+        self, client, isolated_profiles, monkeypatch
+    ):
+        """Regression for #138869: validation follows the instruction-tree hash."""
+        from hermes_cli import plugins
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+        manager = PluginManager()
+        context = PluginContext(PluginManifest(name="grader", source="user"), manager)
+        context.register_skill_validation(
+            lambda skill, content_hash: {"content_hash": content_hash, "grade": "approved"})
+        stale_context = PluginContext(PluginManifest(name="old-grader", source="user"), manager)
+        stale_context.register_skill_validation(
+            lambda skill, content_hash: {"content_hash": "stale", "grade": "old"})
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: manager)
+
+        response = client.get("/api/skills/content", params={"name": "dashboard-skill"})
+
+        assert response.status_code == 200
+        payload = response.json()
+        validation = payload["validation"]
+        assert validation["grader"] == {"content_hash": payload["content_hash"], "grade": "approved"}
+        assert "old-grader" not in validation
+
+        (isolated_profiles["default"] / "skills/dashboard-skill/notes.md").write_text(
+            "supporting instructions", encoding="utf-8"
+        )
+        changed = client.get("/api/skills/content", params={"name": "dashboard-skill"}).json()
+        assert changed["content_hash"] != payload["content_hash"]
+
 
 class TestSkillCreate:
     def test_create_writes_skill_md(self, client, isolated_profiles):
