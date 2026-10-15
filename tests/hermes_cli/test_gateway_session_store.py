@@ -335,6 +335,25 @@ def test_cli_listings_include_gateway_rows_created_by_the_cli(store, tmp_path, m
     assert len(db.list_sessions_rich(limit=10)) == 4
 
 
+def test_cli_listing_keeps_a_token_first_session_after_gateway_routing_refresh(store, tmp_path, monkeypatch):
+    """Regression for #138831: token accounting may create the row before the CLI creator runs."""
+    db, _ = store
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    from hermes_state import SessionDB
+    writer = SessionDB(db_path=tmp_path / "state.db")
+    writer.update_token_counts("local-cli", input_tokens=1)
+    writer.create_session("local-cli", source="cli")
+    writer.record_gateway_session_peer("local-cli", source="local")
+    writer.append_message("local-cli", "user", "hi")
+    assert writer.get_session("local-cli")["created_source"] == "cli"
+    writer.close()
+
+    from hermes_cli.session_listing import query_session_listing
+    assert [row["id"] for row in query_session_listing(
+        db, source="cli", include_unnamed=True, limit=10,
+    )] == ["local-cli"]
+
+
 def test_create_if_missing_titles_a_gateway_created_session(store, monkeypatch):
     """``chat -c NAME --create-if-missing``: the gateway creates the titled session (its own
     resolve -> create -> title step); the CLI then resumes the id it returns. No client write."""

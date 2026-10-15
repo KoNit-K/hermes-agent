@@ -273,11 +273,19 @@ _SAME_KEY_NAMESPACE_SQL = (
 # Upsert tail of _insert_session_row: every routing/metadata column keeps the value an
 # earlier writer set (whitespace is part of the SQL text).
 _UPSERT_KEEP_EXISTING_SQL = ",\n".join(
-    f"                       {col} = COALESCE(sessions.{col}, excluded.{col})" for col in (
+    (
+        "                       created_source = CASE\n"
+        "                           WHEN sessions.created_source = 'unknown'\n"
+        "                           THEN COALESCE(excluded.created_source, sessions.created_source)\n"
+        "                           ELSE sessions.created_source\n"
+        "                       END"
+        if col == "created_source"
+        else f"                       {col} = COALESCE(sessions.{col}, excluded.{col})"
+    ) for col in (
         "session_key", "chat_id", "chat_type", "thread_id", "parent_session_id", "cwd", "profile_name",
         "transport_profile", "git_repo_root", "origin_json", "display_name",
-        # Immutable provenance (#56439): stamped once at first creation, never overwritten by later
-        # upserts — unlike ``source``, which stays live routing state.
+        # Immutable provenance (#56439): stamped once at first real creation, never overwritten by
+        # later upserts — except the token-accounting ``unknown`` placeholder (#138831).
         "created_source",
     )
 )
