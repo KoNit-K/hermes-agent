@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import closing
 from dataclasses import asdict, replace
+from functools import partial
 import threading
 import json
 from pathlib import Path
@@ -98,10 +99,10 @@ async def run_task(connection, params):
     from gateway.session_local_recovery import local_identity
     from hermes_state_local import local_receipt
     from gateway.session_policy import restore_policy
+    from gateway.session_runtime_workers import tracked_write
     authority = connection.authority
-    # Resolved off-loop up front: no await separates the saved-claim check from session
-    # creation. The Kanban claim check and its marker share one off-loop transaction; a
-    # concurrent retry of the same attempt meets that marker (same session) or a stale claim.
+    # Resolve off-loop; admission rechecks the claim and its marker in one tracked
+    # transaction before resume/submit, including after policy construction yields.
     owner_db = str(await asyncio.to_thread(Path(authority.db.db_path).resolve))
     # The dispatcher attempt is the durable request identity, including after the
     # task closes. Retry checks the saved claim, never reinterprets updated cards.
@@ -117,7 +118,10 @@ async def run_task(connection, params):
         from gateway.session_local_recovery import restore_local_session
         ref = restore_local_session(authority, sid)
     else:
-        policy, private = build_kanban_policy(connection, params, _load_gateway_config())
+        # Refusal evidence takes the Kanban writer lock even when deduplicating.
+        # Track it through cancellation/retirement without blocking the owner loop.
+        policy, private = await tracked_write(authority,
+            partial(build_kanban_policy, connection, params, _load_gateway_config()))
         ref = create_local_session(authority, connection.actor, {'request_id': request_id},
                                    trusted_policy=policy, trusted_secrets=private)
     from hermes_cli.kanban_db_connect import connect_closing
@@ -146,7 +150,6 @@ async def run_task(connection, params):
                     {'db': owner_db, 'session_id': ref.session_id,
                      'request_id': request_id, 'pid': os.getpid(), 'birth': psutil.Process().create_time()},
                     run_id=task.current_run_id)
-    from gateway.session_runtime_workers import tracked_write
     await tracked_write(authority, admit_claim)
     await connection.resume(ref, {})
     receipt = await authority.submit(connection.actor, Submission(request_id, ref,
