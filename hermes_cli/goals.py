@@ -1102,6 +1102,8 @@ class GoalManager:
         self.session_id = session_id
         self.default_max_turns = int(default_max_turns or DEFAULT_MAX_TURNS)
         self._state: Optional[GoalState] = load_goal(session_id)
+        self._persisted_state = self._state.to_json() if self._state else None
+        self._evaluating = False
 
     # --- introspection ------------------------------------------------
 
@@ -1117,9 +1119,14 @@ class GoalManager:
         row at this boundary. Keep a live in-memory goal in that case, matching
         the existing fail-open behavior for a dropped state write.
         """
+        if self._evaluating:
+            return self._state
         loaded = load_goal(self.session_id)
-        if loaded is not None or self._state is None:
-            self._state = loaded
+        if loaded is not None:
+            persisted = loaded.to_json()
+            if persisted != self._persisted_state:
+                self._state = loaded
+                self._persisted_state = persisted
         return self._state
 
     def is_active(self) -> bool:
@@ -1164,7 +1171,18 @@ class GoalManager:
     # --- mutation -----------------------------------------------------
 
     def _save(self) -> Optional[GoalState]:
-        save_goal(self.session_id, self._state)
+        from hermes_cli.goals_storage import GoalChangedDuringEvaluation, save_if_unchanged
+
+        saved = save_if_unchanged(self.session_id, self._state, self._persisted_state)
+        if saved is True:
+            self._persisted_state = self._state.to_json()
+        elif saved is False:
+            self._state = load_goal(self.session_id)
+            self._persisted_state = self._state.to_json() if self._state else None
+            if self._evaluating:
+                raise GoalChangedDuringEvaluation
+        else:
+            _warn_dropped_write("GoalManager", "goal", self.session_id)
         return self._state
 
     def _require_goal(self) -> GoalState:
@@ -1195,6 +1213,7 @@ class GoalManager:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
+        self.refresh()
         self._state = GoalState(
             goal=goal, status="active", turns_used=0, created_at=time.time(), last_turn_at=0.0,
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
@@ -1237,7 +1256,8 @@ class GoalManager:
             return
         self._state.status = "cleared"
         self._save()
-        self._state = None
+        if self._state is not None and self._state.status == "cleared":
+            self._state = None
 
     def mark_done(self, reason: str) -> None:
         self.refresh()
@@ -1514,6 +1534,27 @@ class GoalManager:
         )
 
     def evaluate_after_turn(
+        self, last_response: str, *, user_initiated: bool = True,
+        background_processes: Optional[list[dict[str, Any]]] = None,
+        active_delegations: int = 0,
+    ) -> dict[str, Any]:
+        from hermes_cli.goals_storage import GoalChangedDuringEvaluation
+
+        self.refresh()
+        self._evaluating = True
+        try:
+            return self._evaluate_after_turn(
+                last_response, user_initiated=user_initiated,
+                background_processes=background_processes, active_delegations=active_delegations,
+            )
+        except GoalChangedDuringEvaluation:
+            state = self._state
+            return _decision(state.status if state else None, False, None, "inactive",
+                             "goal changed during evaluation", "")
+        finally:
+            self._evaluating = False
+
+    def _evaluate_after_turn(
         self, last_response: str, *, user_initiated: bool = True,
         background_processes: Optional[list[dict[str, Any]]] = None,
         active_delegations: int = 0,

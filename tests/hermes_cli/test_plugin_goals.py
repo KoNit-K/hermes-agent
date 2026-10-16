@@ -99,3 +99,112 @@ def test_cached_goal_manager_observes_plugin_goal_and_preserves_it_on_clear(herm
     assert cached_cli_manager.state.owner == "plan-mode"
     cached_cli_manager.clear()
     assert ctx.goals.get("session") is None
+
+
+@pytest.mark.parametrize("operation", ["set", "clear"])
+def test_plugin_mutation_cannot_overwrite_intervening_goal(hermes_home, monkeypatch, operation):
+    from hermes_cli import goals
+    from hermes_cli.goals import GoalManager
+
+    ctx = _context()
+    if operation == "clear":
+        assert ctx.goals.set("session", "plugin goal")
+    db = goals._get_session_db()
+    execute = db._execute_write
+    armed = True
+
+    def interleave(action, *args, **kwargs):
+        nonlocal armed
+        if armed:
+            armed = False
+            GoalManager("session").set("new user goal")
+        return execute(action, *args, **kwargs)
+
+    monkeypatch.setattr(db, "_execute_write", interleave)
+    changed = ctx.goals.set("session", "plugin goal") if operation == "set" else ctx.goals.clear("session")
+
+    assert not changed
+    assert GoalManager("session").state.goal == "new user goal"
+    assert GoalManager("session").state.status == "active"
+
+
+@pytest.mark.parametrize("verdict", ["continue", "done", "blocked"])
+def test_evaluation_cannot_resurrect_goal_cleared_during_judgment(hermes_home, monkeypatch, verdict):
+    from hermes_cli import goals
+    from hermes_cli.goals import GoalManager
+
+    ctx = _context()
+    assert ctx.goals.set("session", "plugin goal")
+    manager = GoalManager("session")
+
+    def judge(*args, **kwargs):
+        assert ctx.goals.clear("session")
+        return verdict, "judgment", False, None, False
+
+    monkeypatch.setattr(goals, "judge_goal", judge)
+    decision = manager.evaluate_after_turn("response")
+
+    assert not decision["should_continue"]
+    assert decision["status"] == "cleared"
+    assert ctx.goals.get("session") is None
+
+
+def test_evaluation_persists_turn_budget_across_refreshes(hermes_home, monkeypatch):
+    from hermes_cli import goals
+    from hermes_cli.goals import GoalManager
+
+    manager = GoalManager("session")
+    manager.set("finish", max_turns=2)
+    monkeypatch.setattr(goals, "judge_goal", lambda *a, **k: ("continue", "more work", False, None, False))
+    assert manager.evaluate_after_turn("first")["should_continue"]
+    decision = manager.evaluate_after_turn("second")
+
+    assert not decision["should_continue"]
+    assert decision["status"] == "paused"
+    assert GoalManager("session").state.turns_used == 2
+
+
+def test_readable_store_with_failed_writes_keeps_local_pause(hermes_home, monkeypatch):
+    from hermes_cli import goals
+    from hermes_cli.goals import GoalManager
+
+    manager = GoalManager("session")
+    manager.set("finish")
+    db = goals._get_session_db()
+
+    def fail(*args, **kwargs):
+        raise OSError("readable store, unavailable writer")
+
+    monkeypatch.setattr(db, "_execute_write", fail)
+    manager.pause()
+    assert not manager.is_active()
+    assert manager.state.status == "paused"
+
+
+@pytest.mark.parametrize("replacement", ["cleared", "new goal"])
+def test_gate_save_conflict_stops_before_judging_replaced_goal(hermes_home, monkeypatch, replacement):
+    from hermes_cli import goals
+    from hermes_cli.goals import GoalManager
+
+    ctx = _context()
+    assert ctx.goals.set("session", "plugin goal")
+    manager = GoalManager("session")
+    manager.add_gate("true")
+    monkeypatch.setattr(goals, "_gate_workspace", lambda: (hermes_home, None))
+
+    def gate(*args, **kwargs):
+        if replacement == "cleared":
+            assert ctx.goals.clear("session")
+        else:
+            GoalManager("session").set("new goal")
+        return True, 0, "passed"
+
+    def judge(*args, **kwargs):
+        pytest.fail("a replaced goal must not be judged")
+
+    monkeypatch.setattr(goals, "run_gate", gate)
+    monkeypatch.setattr(goals, "judge_goal", judge)
+    decision = manager.evaluate_after_turn("response")
+    assert not decision["should_continue"]
+    stored = GoalManager("session").state
+    assert stored.status == "cleared" if replacement == "cleared" else stored.goal == "new goal"

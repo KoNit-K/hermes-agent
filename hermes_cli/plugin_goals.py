@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from hermes_cli.goals import GoalContract, GoalManager
+import time
+
+from hermes_cli.goals import DEFAULT_MAX_TURNS, GoalContract, GoalManager, GoalState
+from hermes_cli.goals_storage import save_if_unchanged
 
 
 @dataclass(frozen=True)
@@ -54,8 +57,15 @@ class PluginGoals:
             contract = GoalContract.from_dict(dict(contract))
         if contract is not None and not isinstance(contract, GoalContract):
             raise TypeError("contract must be a GoalContract, mapping, or None")
-        manager.set(objective, max_turns=max_turns, contract=contract, owner=self._owner(owner))
-        return True
+        objective = objective.strip()
+        if not objective:
+            raise ValueError("goal text is empty")
+        candidate = GoalState(
+            goal=objective, status="active", created_at=time.time(),
+            max_turns=int(max_turns) if max_turns else DEFAULT_MAX_TURNS,
+            contract=contract if contract is not None else GoalContract(), owner=self._owner(owner),
+        )
+        return save_if_unchanged(session_id, candidate, state.to_json() if state else None) is True
 
     def clear(self, session_id: str, *, owner: Optional[str] = None) -> bool:
         """Clear only a goal that this plugin created."""
@@ -64,5 +74,6 @@ class PluginGoals:
         state = manager.state
         if state is None or state.owner != owner:
             return False
-        manager.clear()
-        return True
+        expected = state.to_json()
+        state.status = "cleared"
+        return save_if_unchanged(session_id, state, expected) is True
