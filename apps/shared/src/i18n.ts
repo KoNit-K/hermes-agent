@@ -51,15 +51,20 @@ export function formatPositional(template: string, args: readonly unknown[]): st
   })
 }
 
-/** Where the base catalog holds a function (`(n) => string`) and a pack
- *  supplies a plain string, wrap the string into a positional formatter so
- *  the merged catalog keeps the base's call shape. Records recurse; every
- *  other shape passes through untouched (a string over a string, a function
- *  over a function, arrays wholesale). Packs come from YAML, which cannot
- *  express functions — this is the only bridge between the two. */
+/** Where the base catalog holds a function and a pack supplies a plain string
+ *  or record, wrap the value so the merged catalog keeps the base's call
+ *  shape. Strings are positional formatters; records are static structured
+ *  results. Records recurse otherwise; every other shape passes through
+ *  untouched (a string over a string, a function over a function, arrays
+ *  wholesale). Packs come from YAML, which cannot express functions — this is
+ *  the only bridge between the two. */
 export function adaptStringOverrides(base: unknown, overrides: unknown): unknown {
   if (typeof base === 'function' && typeof overrides === 'string') {
     return (...args: unknown[]) => formatPositional(overrides, args)
+  }
+
+  if (typeof base === 'function' && isRecord(overrides)) {
+    return () => overrides
   }
 
   if (!isRecord(base) || !isRecord(overrides)) {

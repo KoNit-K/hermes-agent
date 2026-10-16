@@ -56,6 +56,26 @@ describe('syncBackendLocalePacks', () => {
     expect(resolveTranslations('pl').common.cancel).toBe(TRANSLATIONS.en.common.cancel)
   })
 
+  it('keeps an object-returning catalog entry callable for a flattened language pack', async () => {
+    await syncBackendLocalePacks(
+      backend(
+        [{ id: 'it', endonym: 'Italiano' }],
+        {
+          it: {
+            'sidebar.projects.branchOff.after': '',
+            'sidebar.projects.branchOff.before': 'dirama da '
+          }
+        }
+      ),
+      'it'
+    )
+
+    expect(resolveTranslations('it').sidebar.projects.branchOff()).toEqual({
+      after: '',
+      before: 'dirama da '
+    })
+  })
+
   it('accepts a bare array from i18n.languages and skips the catalog call without a requested language', async () => {
     const calls: Call[] = []
 
