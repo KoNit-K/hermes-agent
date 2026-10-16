@@ -11,6 +11,13 @@ import * as ClipboardModule from '../lib/clipboard.js'
 import * as Osc52Module from '../lib/osc52.js'
 import * as TerminalSetupModule from '../lib/terminalSetup.js'
 
+// The command registry loads built-in widgets on import. Keep their real
+// registration, but don't scan or watch the user's widget directory in tests.
+vi.mock('../sdk/userWidgets.js', () => ({
+  loadUserWidgets: vi.fn().mockResolvedValue({ added: [], errors: [], loaded: [], removed: [] }),
+  watchUserWidgets: vi.fn()
+}))
+
 // DASHBOARD_TUI_MODE resolves once at module load from HERMES_TUI_DASHBOARD,
 // so toggling process.env in a test body can't move it. Mock just that one
 // export (everything else stays real) and flip the holder per test.
