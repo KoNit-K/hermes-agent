@@ -349,7 +349,10 @@ class SessionManager:
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
         session_meta = {"cwd": state.cwd}
-        for key in ("provider", "base_url", "api_mode"):
+        provider = getattr(state.agent, "requested_provider", None) or getattr(state.agent, "provider", None)
+        if isinstance(provider, str) and provider.strip():
+            session_meta["provider"] = provider.strip()
+        for key in ("base_url", "api_mode"):
             value = getattr(state.agent, key, None)
             if isinstance(value, str) and value.strip():
                 session_meta[key] = value.strip()
@@ -551,6 +554,8 @@ class SessionManager:
                 kwargs["request_overrides"] = runtime["request_overrides"]
         except Exception as exc:
             resolve_error = exc
+            if requested_provider:
+                raise
             logger.debug("ACP session falling back to default provider resolution", exc_info=True)
 
         _register_task_cwd(session_id, cwd)

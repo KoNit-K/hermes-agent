@@ -35,11 +35,12 @@ def _acp_agent():
 
 def _state(**agent_attrs):
     import threading
+    defaults = {"provider": "anthropic", "base_url": "https://api.anthropic.com", "api_key": "k"}
+    defaults.update(agent_attrs)
     return types.SimpleNamespace(
         session_id="s1", cwd=".", model="claude-sonnet-5",
         is_running=False, command_op=False, queued_prompts=[], runtime_lock=threading.Lock(),
-        agent=types.SimpleNamespace(
-            provider="anthropic", base_url="https://api.anthropic.com", api_key="k", **agent_attrs))
+        agent=types.SimpleNamespace(**defaults))
 
 
 def test_acp_and_dashboard_reject_what_switch_model_rejects(monkeypatch):
@@ -72,6 +73,34 @@ def test_acp_explicit_provider_prefix_becomes_explicit_provider(monkeypatch):
     assert (seen["explicit_provider"], seen["raw_input"]) == ("anthropic", "claude-sonnet-5")
     assert (old, new_provider, model) == ("anthropic", "anthropic", "claude-sonnet-5")
     assert made["requested_provider"] == "anthropic" and made["base_url"] == "https://api.anthropic.com"
+
+
+def test_acp_switch_model_does_not_keep_endpoint_when_current_provider_is_unknown(monkeypatch):
+    """Regression for #139908: an incomplete restored route must not pair a new key with its old URL."""
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model",
+        lambda **_kw: ModelSwitchResult(success=True, new_model="model-b", target_provider="custom:gateway"),
+    )
+    agent, made = _acp_agent()
+
+    agent._switch_model(_state(provider="", base_url="https://old.example/v1"), "custom:gateway:model-b", keep_endpoint=True)
+
+    assert "base_url" not in made and "api_mode" not in made
+
+
+def test_acp_switch_model_keeps_endpoint_for_the_same_named_provider(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model",
+        lambda **_kw: ModelSwitchResult(success=True, new_model="model-b", target_provider="custom:gateway"),
+    )
+    agent, made = _acp_agent()
+
+    agent._switch_model(
+        _state(provider="custom", requested_provider="custom:gateway", base_url="https://gateway.example/v1"),
+        "custom:gateway:model-b", keep_endpoint=True,
+    )
+
+    assert made["base_url"] == "https://gateway.example/v1"
 
 
 def test_acp_set_session_model_runs_switch_model_off_the_event_loop(monkeypatch):

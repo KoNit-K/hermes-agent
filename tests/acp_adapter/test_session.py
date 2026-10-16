@@ -37,6 +37,21 @@ class TestCreateSession:
         assert state.history == []
         assert state.agent is not None
 
+    def test_persist_keeps_named_provider_identity_for_restore(self, tmp_path):
+        """Regression for #139908: ``provider=custom`` alone cannot restore a named endpoint."""
+        db = SessionDB(tmp_path / "state.db")
+        agent = SimpleNamespace(
+            model="model-a", provider="custom", requested_provider="custom:gateway",
+            base_url="https://gateway.example/v1", api_mode="chat_completions",
+        )
+        manager = SessionManager(agent_factory=lambda: agent, db=db)
+        state = manager.create_session(cwd="/work")
+        state.history.append({"role": "user", "content": "hello"})
+
+        manager.save_session(state.session_id)
+
+        assert json.loads(db.get_session(state.session_id)["model_config"])["provider"] == "custom:gateway"
+
 
 
     def test_register_task_cwd_translates_windows_drive_for_wsl_tools(self, monkeypatch):
@@ -204,10 +219,8 @@ class TestCreateSession:
         assert {t for t in enabled if t.startswith("mcp-")} == expected_mcp
         assert not {"alpha", "beta", "no_mcp"} & set(enabled)
 
-    def test_make_agent_surfaces_the_provider_resolution_failure(self, monkeypatch):
-        """#91090: when ``resolve_runtime_provider`` fails, the bare-AIAgent fallback dies with the
-        first-run "No LLM provider configured" text; the operator must get the swallowed cause
-        instead. The fallback still stands when the bare build succeeds."""
+    def test_make_agent_does_not_fallback_when_restoring_a_named_provider(self, monkeypatch):
+        """#139908: a saved route that cannot resolve must not silently use the config default."""
         def _no_creds(**_kw):
             raise RuntimeError("No Codex credentials stored. Run `hermes auth add openai-codex`")
 
@@ -226,9 +239,8 @@ class TestCreateSession:
         manager = SessionManager(db=None)
 
         monkeypatch.setattr("run_agent.AIAgent", BareFails)
-        with pytest.raises(RuntimeError, match="No Codex credentials stored") as exc:
+        with pytest.raises(RuntimeError, match="No Codex credentials stored"):
             manager._make_agent(session_id="rebuilt", cwd=".", requested_provider="openai-codex")
-        assert "No LLM provider configured" in str(exc.value.__cause__)
 
         monkeypatch.setattr("run_agent.AIAgent", BareWorks)
         assert "provider" not in manager._make_agent(session_id="fresh", cwd=".").kwargs
