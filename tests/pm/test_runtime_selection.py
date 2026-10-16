@@ -219,3 +219,27 @@ def test_invalid_selected_environment_never_silently_falls_back(tmp_path, monkey
     }))
     with pytest.raises(RuntimeError, match="environment"):
         runtime_paths.selected_venv(root)
+
+
+def test_recorded_environment_accepts_an_existing_case_alias_of_its_generation_root(tmp_path, monkeypatch):
+    """A case-insensitive volume may preserve a metadata path's wrong-case spelling."""
+    from pm import environments as runtime_paths
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    root = tmp_path / "repo"
+    state = runtime_paths.install_state_dir(root)
+    environment = state / "environments" / "candidate" / "venv"
+    (environment / "pyvenv.cfg").parent.mkdir(parents=True)
+    (environment / "pyvenv.cfg").write_text("home = test\n")
+    state.joinpath("facts.json").write_text(json.dumps({"packages": {"venv": {
+        "environment": str(environment),
+    }}}))
+    original_is_relative_to = Path.is_relative_to
+
+    def lexical_alias_is_not_relative(path, other):
+        if path == environment.resolve() and Path(other) == (state / "environments").resolve():
+            return False
+        return original_is_relative_to(path, other)
+
+    monkeypatch.setattr(Path, "is_relative_to", lexical_alias_is_not_relative)
+    assert runtime_paths.selected_venv(root).samefile(environment)

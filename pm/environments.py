@@ -294,6 +294,28 @@ def committed_venv(project_root: Path) -> Path | None:
     return _recorded_venv(project_root) or payload_venv(project_root)
 
 
+def _is_within_directory(path: Path, directory: Path) -> bool:
+    """Whether an existing path is contained by *directory*, including case aliases.
+
+    ``Path.resolve()`` follows symlinks but retains the caller's spelling of ordinary
+    directory entries. On a case-insensitive filesystem, persisted metadata can
+    therefore name an existing generation with a different case from its state root.
+    Check the directory identities as a fallback instead of weakening the boundary
+    to a case-folded string comparison.
+    """
+    if path.is_relative_to(directory):
+        return True
+    ancestor = path
+    while ancestor != ancestor.parent:
+        try:
+            if ancestor.samefile(directory):
+                return True
+        except OSError:
+            return False
+        ancestor = ancestor.parent
+    return False
+
+
 def _recorded_venv(project_root: Path) -> Path | None:
     path = runtime_facts_path(project_root)
     try:
@@ -313,7 +335,7 @@ def _recorded_venv(project_root: Path) -> Path | None:
         raise RuntimeError("invalid dependency environment path")
     environment = Path(value).resolve()
     generations = install_state_dir(project_root) / "environments"
-    if not environment.is_relative_to(generations.resolve()) or not (environment / "pyvenv.cfg").is_file():
+    if not (environment / "pyvenv.cfg").is_file() or not _is_within_directory(environment, generations.resolve()):
         raise RuntimeError(f"dependency environment is missing or outside this install: {environment}")
     return environment
 
