@@ -516,6 +516,13 @@ export function ActiveSessionSwitcher({
 
     try {
       const result = await onClose(target.id)
+
+      if (!result) {
+        setActionErr(messages().pickers.common.invalidResponse(gw.isCanonical ? 'session.detach' : 'session.close'))
+
+        return
+      }
+
       const closed = Boolean(result?.closed ?? result?.ok)
 
       if (!closed) {

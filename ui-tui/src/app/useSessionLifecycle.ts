@@ -169,28 +169,11 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     sys
   } = opts
 
-  // Plugin on_session_finalize text comes back on the close result and is shown as system lines (never a
-  // model turn). `deferMessages`: the caller resets the transcript next and shows them itself afterwards.
-  // A canonical session is the gateway's: the view detaches, it never closes the owner's session.
-  const closeSession = useCallback(
-    async (targetSid?: null | string, deferMessages = false) => {
-      const closed =
-        targetSid && !gw.isCanonical ? await rpc<SessionCloseResponse>('session.close', { session_id: targetSid }) : null
-
-      if (!deferMessages) {
-        closed?.messages?.forEach(message => sys(message))
-      }
-
-      return closed
-    },
-    [gw.isCanonical, rpc, sys]
-  )
-
   const cancelResumeScrollRef = useRef<null | (() => void)>(null)
   const attachmentFlight = useRef(0)
   const pendingAttachments = useRef(new Set<number>())
   const canonicalSubscriptions = useRef(new Map<string, string>())
-  const canonicalDetachFlights = useRef(new Map<string, Promise<void>>())
+  const canonicalDetachFlights = useRef(new Map<string, Promise<null | SessionDetachResponse | undefined>>())
   const staleAttachments = useRef(new Map<string, { session_id: string; subscription_id: string }>())
 
   // `endReason`: main's `session.close` stamp for a view this TUI closes for good (`tui_close` on /new or
@@ -211,6 +194,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             if (result?.detached && canonicalSubscriptions.current.get(sessionId) === subscriptionId) {
               canonicalSubscriptions.current.delete(sessionId)
             }
+
+            return result
           })
           .catch(() => undefined)
 
@@ -227,6 +212,37 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       return pending
     },
     [gw.isCanonical, rpc]
+  )
+
+  // Plugin on_session_finalize text comes back on the close result and is shown as system lines (never a
+  // model turn). `deferMessages`: the caller resets the transcript next and shows them itself afterwards.
+  // A canonical session is the gateway's: the view detaches, it never closes the owner's session.
+  const closeSession = useCallback(
+    async (targetSid?: null | string, deferMessages = false) => {
+      const closed =
+        targetSid && !gw.isCanonical ? await rpc<SessionCloseResponse>('session.close', { session_id: targetSid }) : null
+
+      if (!deferMessages) {
+        closed?.messages?.forEach(message => sys(message))
+      }
+
+      return closed
+    },
+    [gw.isCanonical, rpc, sys]
+  )
+
+  /** The switcher closes a canonical view by detaching the subscription this TUI owns. */
+  const closeActiveSession = useCallback(
+    async (targetSid: string) => {
+      if (!gw.isCanonical) {
+        return closeSession(targetSid)
+      }
+
+      const detached = await detachCanonical(targetSid, canonicalSubscriptions.current.get(targetSid), 'tui_close')
+
+      return detached ? { closed: detached.detached } : null
+    },
+    [closeSession, detachCanonical, gw.isCanonical]
   )
 
   // Exit (`/quit`, Ctrl+D): main's sidecar stamped every session it held `tui_shutdown` at shutdown.
@@ -728,6 +744,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   return useMemo(
     () => ({
       activateLiveSession,
+      closeActiveSession,
       closeForExit,
       closeSession,
       guardBusySessionSwitch,
@@ -740,6 +757,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     }),
     [
       activateLiveSession,
+      closeActiveSession,
       closeForExit,
       closeSession,
       guardBusySessionSwitch,

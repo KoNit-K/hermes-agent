@@ -119,3 +119,15 @@ it('exit closes every held view with tui_shutdown', async () => {
     f.cleanup()
   }
 })
+
+it('the active-session close detaches this viewer with tui_close', async () => {
+  const f = fixture()
+
+  try {
+    await f.initial()
+    await expect(f.lifecycle().closeActiveSession('x')).resolves.toEqual({ closed: true })
+    expect(detaches(f.request)).toEqual([{ session_id: 'x', subscription_id: 'sub-1', end_reason: 'tui_close' }])
+  } finally {
+    f.cleanup()
+  }
+})
