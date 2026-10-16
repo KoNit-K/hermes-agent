@@ -1213,7 +1213,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 # 'custom' resolved without credentials ...") is the diagnosis; /login is not.
                 return _unresolved(f"⚠️ {exc}")
             return _unresolved(t("gateway.errors.no_credentials"))
-        pr = runner._provider_routing
+        # Provider preferences belong to this admission's config, not the gateway-start snapshot.
+        # A new session created after config.yaml changes must route with its own policy.
+        pr = ctx.user_config.get("provider_routing") or {}
         reasoning_config = (policy.current_reasoning_config(runner, ctx.session_key) if policy else
             runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
         runner._service_tier = (policy.current_service_tier(runner, ctx.session_key) if policy else

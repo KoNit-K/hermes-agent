@@ -109,7 +109,7 @@ async def background(connection, ref, params):
         with _side_scope(authority, policy, task_id):
             model, runtime = _resolve_runtime(authority, policy)
             config = policy.config(authority)
-            pr = getattr(runner, '_provider_routing', None) or {}
+            pr = config.get('provider_routing') or {}
             refresh_fallback = getattr(runner, '_refresh_fallback_model', None)
             agent = AIAgent(
                 model=model, **{key: runtime.get(key) for key in _RUNTIME_KEYS if key in runtime},

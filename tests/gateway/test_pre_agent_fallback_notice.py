@@ -107,3 +107,23 @@ def test_model_override_fast_path_clears_stale_notice():
         model, runtime = runner._resolve_session_agent_runtime(session_key="test-session-key")
     assert (model, runtime["provider"]) == ("claude-sonnet-5", "anthropic")
     assert runner._pre_agent_fallback_notice is None
+
+
+def test_turn_uses_its_configured_provider_routing_not_gateway_startup_snapshot():
+    """A session created after a config edit keeps the provider constraints it was admitted with."""
+    from gateway.run_turn_runner import TurnRunner
+
+    runner = _runner_with_real_runtime_resolution()
+    runner._provider_routing = {"only": ["stale-provider"]}
+    ctx = TurnContext(
+        source=SessionSource(platform=Platform.LOCAL, chat_id="c", user_id="u"),
+        message="hi", history=[], session_id="sid", session_key="test-session-key",
+        user_config={"provider_routing": {"only": ["current-provider"]}},
+        AIAgent=_RecordingAgent, resolve_display_setting=lambda *_a: False, _run_still_current=lambda: True,
+        _hooks_ref=SimpleNamespace(loaded_hooks=False),
+    )
+    runner._resolve_session_agent_runtime = MagicMock(return_value=("gpt-5.6-sol", {}))
+
+    TurnRunner(runner, ctx).run_sync()
+
+    assert _RecordingAgent.built_kwargs["providers_allowed"] == ["current-provider"]
