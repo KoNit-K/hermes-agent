@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import json
 from pathlib import Path
@@ -20,6 +21,27 @@ def _load_bootstrap():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_bootstrap_activates_the_launcher_dependency_bridge(monkeypatch):
+    """The direct script entry point needs the same PM activation as ``hermes``.
+
+    Ink invokes this file with the managed store interpreter, not through the
+    launcher command that normally imports ``hermes_bootstrap``.  Without that
+    import, the selected dependency environment (including ``ruamel.yaml``)
+    is absent before ``bootstrap()`` can ensure the first shared gateway.
+    """
+    imported = []
+    original_import = builtins.__import__
+
+    def record_import(name, *args, **kwargs):
+        imported.append(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", record_import)
+    _load_bootstrap()
+
+    assert "hermes_bootstrap" in imported
 
 
 def test_served_secondary_uses_multiplexer_control_home(monkeypatch, tmp_path):

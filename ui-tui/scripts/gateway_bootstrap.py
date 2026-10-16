@@ -14,6 +14,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# Ink executes this script directly with the managed store interpreter.  Unlike
+# the published ``hermes`` launcher, that path would otherwise miss the PM
+# dependency activation before the gateway runtime imports configuration.
+import hermes_bootstrap
+
 
 
 def failure_message(receipt) -> str:
