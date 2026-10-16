@@ -18,6 +18,7 @@ from typing import Any, Optional
 from hermes_bootstrap import _happy_eyeballs_create_connection
 from utils import base_url_hostname, normalize_proxy_url
 from agent.proxy_bypass import first_proxy_env_value, should_bypass_proxy
+from agent.thread_scoped_output import stdio_chain_find
 
 
 _OPENAI_CLS_CACHE = None
@@ -334,7 +335,7 @@ def _install_safe_stdio() -> None:
     """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
-        if stream is not None and not isinstance(stream, _SafeWriter):
+        if stream is not None and stdio_chain_find(stream, _SafeWriter) is None:
             setattr(sys, stream_name, _SafeWriter(stream))
 
 

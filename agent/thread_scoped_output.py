@@ -15,7 +15,46 @@ import sys
 import threading
 from typing import Iterator, TextIO
 
-__all__ = ["thread_scoped_silence"]
+__all__ = ["thread_scoped_silence", "stdio_chain", "stdio_chain_find"]
+
+# Attributes through which Hermes' stdio proxies reference the stream they wrap:
+# ``_SafeWriter._inner``, ``_ThreadRoutingStream._passthrough``, ``_RedactingStdio._stream``.
+_PROXY_LINK_ATTRS = ("_inner", "_passthrough", "_stream")
+_MAX_CHAIN = 64
+
+
+def stdio_chain(stream):  # type: ignore[no-untyped-def]
+    """Yield ``stream`` and every stream it wraps through Hermes' stdio proxies.
+
+    Uses ``object.__getattribute__`` so a proxy's delegating ``__getattr__`` is never
+    triggered, and stops after ``_MAX_CHAIN`` links so a cycle cannot hang the caller.
+    """
+    for _ in range(_MAX_CHAIN):
+        if stream is None:
+            return
+        yield stream
+        nxt = None
+        for attr in _PROXY_LINK_ATTRS:
+            try:
+                nxt = object.__getattribute__(stream, attr)
+                break
+            except AttributeError:
+                continue
+        stream = nxt
+
+
+def stdio_chain_find(stream, cls):  # type: ignore[no-untyped-def]
+    """Return the first ``cls`` instance anywhere in ``stream``'s proxy chain, else None.
+
+    Each stdio installer checks this instead of only the top of the chain: installers
+    that alternate (safe-writer, redaction, thread routing) would otherwise each see
+    "not mine on top" and wrap again, growing the chain on every agent build until
+    attribute lookups raise ``RecursionError`` (#139687).
+    """
+    for link in stdio_chain(stream):
+        if isinstance(link, cls):
+            return link
+    return None
 
 _install_lock = threading.Lock()
 # Proxy installed per attribute ("stdout"/"stderr"): never double-wrap.
@@ -92,12 +131,14 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> _ThreadRoutingStream:
     with _install_lock:
         proxy = _installed.get(attr)
         current = getattr(sys, attr, None)
-        if isinstance(current, _ThreadRoutingStream):
-            # A redirect context may restore an older proxy; adopt it rather
-            # than wrapping it into an unbounded chain.
-            _installed[attr] = current
-            _routing_states[attr] = current._state
-            return current
+        existing = stdio_chain_find(current, _ThreadRoutingStream)
+        if existing is not None:
+            # A redirect context may restore an older proxy, or another installer
+            # may have wrapped ours; adopt it (writes still pass through it)
+            # rather than wrapping the chain again.
+            _installed[attr] = existing
+            _routing_states[attr] = existing._state
+            return existing
         if proxy is not None and current is proxy:
             return proxy
         # Route non-silenced threads to whatever is currently bound (an active
