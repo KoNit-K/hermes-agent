@@ -30,6 +30,12 @@ def failure_message(receipt) -> str:
 
 
 def bootstrap(start: bool, recover: bool = False) -> dict:
+    # The TUI launches this with the PM store interpreter and PYTHONPATH restricted to
+    # the checkout. Select the committed dependency generation before the gateway
+    # runtime imports config (and therefore third-party packages such as ruamel).
+    from pm.environments import activate_dependencies
+
+    activate_dependencies(Path(__file__).resolve().parents[2])
     from hermes_constants import get_hermes_home
     from hermes_cli.gateway_runtime import control_home_for, discover_gateway_endpoint, ensure_gateway_runtime
     from hermes_cli.gateway_runtime_discovery import connect_private

@@ -16,6 +16,7 @@ import pytest
 
 from hermes_cli import gateway_runtime
 import hermes_constants
+import pm.environments
 
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "ui-tui" / "scripts" / "gateway_bootstrap.py"
@@ -100,6 +101,23 @@ def test_failure_names_the_reason_and_its_remedy(monkeypatch, tmp_path):
     assert str(err.value).splitlines() == [
         "gateway incompatible: runtime_protocol",
         "gateway incompatible: the gateway belongs to another Hermes install; stop it there"]
+
+
+def test_start_activates_the_selected_dependency_environment(monkeypatch, tmp_path):
+    """Regression for #139708: the bare launcher Python needs PM's selected dependencies."""
+    module = _load_bootstrap()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    calls = []
+    monkeypatch.setattr(pm.environments, "activate_dependencies", lambda root: calls.append(Path(root)))
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(gateway_runtime, "ensure_gateway_runtime", lambda h, timeout=30, idle_exit=False:
+                        SimpleNamespace(state="starting", endpoint=None, reason_code="deadline", detail=None))
+
+    with pytest.raises(RuntimeError, match="starting"):
+        module.bootstrap(True)
+
+    assert calls == [_SCRIPT.parents[2]]
 
 
 def test_started_daemon_does_not_inherit_the_launch_time_kanban_board(monkeypatch, tmp_path):
