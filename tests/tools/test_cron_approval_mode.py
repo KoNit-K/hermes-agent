@@ -39,6 +39,11 @@ class TestCronApprovalModeParsing:
         with mock_patch("hermes_cli.config.load_config_readonly", return_value={"approvals": {"cron_mode": "approve"}}):
             assert _get_cron_approval_mode() == "approve"
 
+    def test_explicit_transport(self):
+        from unittest.mock import patch as mock_patch
+        with mock_patch("hermes_cli.config.load_config_readonly", return_value={"approvals": {"cron_mode": "transport"}}):
+            assert _get_cron_approval_mode() == "transport"
+
     def test_off_maps_to_approve(self):
         """'off' is an alias for 'approve' (matches --yolo semantics)."""
         from unittest.mock import patch as mock_patch

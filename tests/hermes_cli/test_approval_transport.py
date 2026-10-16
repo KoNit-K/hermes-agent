@@ -349,6 +349,63 @@ def test_execute_code_gateway_uses_selected_transport(monkeypatch):
     assert seen[0].surface == "gateway"
 
 
+@pytest.mark.parametrize(
+    ("context", "entrypoint", "expected_surface"),
+    [
+        ("cron", lambda approval: approval.check_all_command_guards("rm -rf /tmp/example", "local"), "cron"),
+        ("single_query", lambda approval: approval.check_execute_code_guard("print('ok')", "local"), "single_query"),
+        ("unattended", lambda approval: approval.request_tool_approval("terminal", "send mail"), "unattended"),
+    ],
+)
+def test_unattended_transport_mode_uses_selected_transport(
+    monkeypatch, context, entrypoint, expected_surface
+):
+    """An explicit unattended transport never falls back to a local approval surface."""
+    from tools import approval
+
+    manager = PluginManager()
+    seen = []
+    _context(manager).register_approval_transport(
+        "phone", lambda request: seen.append(request) or request.respond("once")
+    )
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(approval_context, "_get_approval_transport_config", lambda: ("phone", "builtin"))
+    monkeypatch.setattr(approval_context, f"_get_{context}_approval_mode", lambda: "transport")
+    monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+    monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+    monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: context == "cron")
+    monkeypatch.setattr(approval, "_is_single_query_approval_context", lambda: context == "single_query")
+    monkeypatch.setattr(approval, "_is_unattended_platform_approval_context", lambda: context == "unattended")
+    monkeypatch.setattr(approval_prompt, "get_plugin_manager", lambda: manager)
+    monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+
+    result = entrypoint(approval)
+
+    assert result["approved"] is True
+    assert len(seen) == 1
+    assert seen[0].surface == expected_surface
+    assert seen[0].allowed_choices == ("once", "deny")
+
+
+def test_unattended_transport_mode_ignores_builtin_fallback(monkeypatch):
+    from tools import approval
+
+    manager = PluginManager()
+    _context(manager).register_approval_transport("phone", lambda request: {"choice": "session"})
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(approval_context, "_get_approval_transport_config", lambda: ("phone", "builtin"))
+    monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "transport")
+    monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+    monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+    monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: True)
+    monkeypatch.setattr(approval_prompt, "get_plugin_manager", lambda: manager)
+
+    result = approval.check_all_command_guards("rm -rf /tmp/example", "local")
+
+    assert result["approved"] is False
+    assert result["outcome"] == "transport_invalid"
+
+
 def test_transport_failure_denies_without_builtin_fallback(monkeypatch):
     from tools import approval
 

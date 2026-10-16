@@ -11,7 +11,7 @@ Leaves read facade-owned state (``_lock``, queues, denial breaker) back through 
 call time; sibling-defined names are imported from their defining module.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import importlib
 import logging
@@ -796,7 +796,8 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
 def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
-                    is_ask: bool, smart: bool = False, pending_body=None) -> dict:
+                    is_ask: bool, smart: bool = False, pending_body=None,
+                    surface: str | None = None, transport_only: bool = False) -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``pattern_keys`` are what :func:`_persist_choice` stores on session/always; a smart-DENY
@@ -835,16 +836,31 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     if spec.transport:
         attempt = _present_with_selected_transport(
             command=command, description=description, pattern_key=pattern_key, pattern_keys=pattern_keys,
-            session_key=session_key, surface="gateway" if (is_gateway or is_ask) else "cli",
-            allow_session=not smart_denied, allow_permanent=allow_permanent,
+            session_key=session_key, surface=surface or ("gateway" if (is_gateway or is_ask) else "cli"),
+            allow_session=not transport_only and not smart_denied,
+            allow_permanent=not transport_only and allow_permanent,
         )
-        choice, denied = _transport_choice(attempt, pattern_key=pattern_key, description=description)
+        if transport_only and not attempt.get("selected"):
+            return _denied(
+                "BLOCKED: approvals mode is transport, but no selected approval transport is available.",
+                pattern_key=pattern_key, description=description, outcome="transport_unavailable", noun=spec.noun,
+            )
+        choice, denied = _transport_choice(
+            attempt, pattern_key=pattern_key, description=description,
+            allow_builtin_fallback=not transport_only,
+        )
         if denied is not None:
             return denied
         if choice is not None:
+            if transport_only and choice not in {"once", "deny"}:
+                return _denied(
+                    "BLOCKED: Selected approval transport returned a disallowed choice.",
+                    pattern_key=pattern_key, description=description, outcome="transport_invalid", noun=spec.noun,
+                )
             if choice == "deny":
                 _record_denial(session_key)
-                return deny(spec.transport_denied, "denied")
+                return deny(spec.transport_denied or "BLOCKED: User denied this action through the selected approval transport.",
+                            "denied")
             return grant(choice)
 
     # Gateway/async approval: block the agent thread until /approve or /deny, mirroring the CLI's synchronous input()
@@ -930,6 +946,18 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     return grant(choice)
 
 
+def _unattended_transport_decision(ctx: _Unattended, spec: _GateSpec, *, command: str,
+                                   description: str, pattern_key: str, pattern_keys: list[str],
+                                   session_key: str, pending_body=None) -> dict:
+    """Ask only the selected transport for an explicit unattended transport mode."""
+    return _human_decision(
+        replace(spec, transport=True), command=command, description=description,
+        pattern_key=pattern_key, pattern_keys=pattern_keys, session_key=session_key,
+        approval_callback=None, is_cli=False, is_gateway=False, is_ask=False,
+        pending_body=pending_body, surface=ctx.name, transport_only=True,
+    )
+
+
 def _presence(approval_callback=None) -> tuple:
     """``(approval_callback, is_cli, is_gateway, is_ask)`` for the current context.
 
@@ -1002,6 +1030,11 @@ def _run_approval_gate(
             "unattended": unattended_deny_message,
         }
         for ctx in _unattended_contexts():
+            if ctx.mode() == "transport":
+                return _unattended_transport_decision(
+                    ctx, _ACTION_GATE, command=display_target, description=description,
+                    pattern_key=pattern_key, pattern_keys=[pattern_key], session_key=session_key,
+                )
             if ctx.mode() == "deny":
                 message = deny_messages[ctx.name]
                 if not message and ctx.name == "unattended":
@@ -1177,6 +1210,15 @@ def check_all_command_guards(command: str, env_type: str,
     # unattended context applies its configured deny/approve mode, else allow.
     if not is_cli and not is_gateway and not is_ask:
         for ctx in _unattended_contexts():
+            if ctx.mode() == "transport":
+                is_dangerous, pattern_key, description = detect_dangerous_command(command)
+                if is_dangerous and not _is_permanently_approved(pattern_key):
+                    return _unattended_transport_decision(
+                        ctx, _COMMAND_GATE, command=command, description=description,
+                        pattern_key=pattern_key, pattern_keys=[pattern_key],
+                        session_key=get_current_session_key(),
+                    )
+                continue
             result = _unattended_deny(command, ctx)
             if result is not None:
                 return result
@@ -1232,6 +1274,14 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # No user is present to approve arbitrary code in -q / cron / unattended
     # sessions: the first active context resolves instantly from its mode.
     for ctx in _unattended_contexts():
+        if ctx.mode() == "transport":
+            command = f"execute_code <<'PY'\n{code}\nPY"
+            return _unattended_transport_decision(
+                ctx, _EXECUTE_CODE_GATE, command=command, description=description,
+                pattern_key=pattern_key, pattern_keys=[pattern_key],
+                session_key=get_current_session_key(),
+                pending_body=lambda: f"**Code:**\n```python\n{code}\n```",
+            )
         if ctx.mode() == "deny":
             return _denied(
                 "BLOCKED: execute_code runs arbitrary local Python (including "

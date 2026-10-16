@@ -305,22 +305,24 @@ def approval_timeout_notice_kwargs() -> dict:
 
 
 def _binary_approval_mode(key: str) -> str:
-    """Read ``approvals.<key>`` as 'approve' or 'deny' (default deny)."""
+    """Read ``approvals.<key>`` as 'approve', 'deny', or 'transport' (default deny)."""
     try:
         from hermes_cli.config import load_config_readonly
         mode = str(cfg_get(load_config_readonly(), "approvals", key, default="deny")).lower().strip()
+        if mode == "transport":
+            return "transport"
         return "approve" if mode in {"approve", "off", "allow", "yes"} else "deny"
     except Exception:
         return "deny"
 
 
 def _get_cron_approval_mode() -> str:
-    """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
+    """Read the cron approval mode from config."""
     return _binary_approval_mode("cron_mode")
 
 
 def _get_single_query_approval_mode() -> str:
-    """Read the single-query (-q) approval mode from config. Returns 'deny' or 'approve'."""
+    """Read the single-query (-q) approval mode from config."""
     return _binary_approval_mode("single_query_mode")
 
 

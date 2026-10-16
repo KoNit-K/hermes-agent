@@ -253,7 +253,8 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
     return _attempt(name, result.choice, result.failure, fallback)
 
 
-def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
+def _transport_choice(attempt: dict, *, pattern_key: str, description: str,
+                      allow_builtin_fallback: bool = True):
     """Interpret a ``_present_with_selected_transport`` attempt into
     ``(choice, denied_result)``: both None when the built-in surfaces should run
     (no transport selected, or a failure with the explicit builtin fallback); a
@@ -263,7 +264,7 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
     failure = attempt.get("failure")
     if not failure:
         return attempt.get("choice"), None
-    if attempt.get("fallback") == "builtin":
+    if attempt.get("fallback") == "builtin" and allow_builtin_fallback:
         logger.warning("Approval transport %r failed (%s); using explicit builtin fallback",
                        attempt.get("name"), failure)
         return None, None
