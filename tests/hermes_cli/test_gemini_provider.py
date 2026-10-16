@@ -136,6 +136,17 @@ class TestGeminiAgentInit:
         assert mock_client.called
         mock_openai.assert_not_called()
 
+    def test_opencode_go_argon_auxiliary_client_uses_native_surface(self, monkeypatch):
+        """#139526: title/compression calls share Go Argon's native-only route."""
+        monkeypatch.setenv("OPENCODE_GO_API_KEY", "test-opencode-go-key")
+        with patch("agent.gemini_native_adapter.GeminiNativeClient") as mock_client, \
+             patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_client.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_provider_client
+            resolve_provider_client("opencode-go", "gemini-4-argon-contributor")
+        assert mock_client.call_args.kwargs["base_url"] == "https://opencode.ai/inference/go/v1"
+        mock_openai.assert_not_called()
+
 
 # ── models.dev Integration ──
 

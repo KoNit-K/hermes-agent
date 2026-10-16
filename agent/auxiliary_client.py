@@ -5298,10 +5298,13 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
     if profile_client is not None:
         logger.debug("resolve_provider_client: %s native client from provider profile (%s)", provider, final_model)
         return _route_client(req, profile_client, final_model)
-    if provider == "gemini":
+    from hermes_cli.models import opencode_go_native_gemini_base_url
+    native_base_url = opencode_go_native_gemini_base_url(provider, final_model, base_url)
+    if provider == "gemini" or native_base_url:
         from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-        if is_native_gemini_base_url(base_url):
-            client = GeminiNativeClient(api_key=api_key, base_url=base_url)
+        if native_base_url or is_native_gemini_base_url(base_url):
+            headers = _endpoint_default_headers(base_url, provider, is_vision=req.is_vision, xai=True)
+            client = GeminiNativeClient(api_key=api_key, base_url=native_base_url or base_url, default_headers=headers)
             logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
             return _route_client(req, client, final_model)
     headers = _endpoint_default_headers(base_url, provider, is_vision=req.is_vision, xai=True)

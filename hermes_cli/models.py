@@ -2553,6 +2553,23 @@ _OPENCODE_API_MODE_PREFIXES: dict[str, tuple[tuple[tuple[str, ...], str], ...]] 
         (("qwen",), "anthropic_messages"))}
 
 
+_OPENCODE_GO_NATIVE_GEMINI_MODELS = frozenset({"gemini-4-argon-contributor"})
+
+
+def opencode_go_native_gemini_base_url(provider_id: Optional[str], model_id: Optional[str], base_url: Optional[str]) -> Optional[str]:
+    """Native Gemini endpoint for Go models that are absent from its OpenAI relay surface."""
+    if opencode_provider_family(provider_id) != "opencode-go":
+        return None
+    if normalize_opencode_model_id(provider_id, model_id).lower() not in _OPENCODE_GO_NATIVE_GEMINI_MODELS:
+        return None
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(str(base_url or ""))
+    if parsed.hostname != "opencode.ai":
+        return None
+    return f"{parsed.scheme or 'https'}://{parsed.netloc}/inference/go/v1"
+
+
 def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str]) -> str:
     """Determine the API mode for an OpenCode Zen / Go model (see ``_OPENCODE_API_MODE_PREFIXES``)."""
     family = opencode_provider_family(provider_id)
