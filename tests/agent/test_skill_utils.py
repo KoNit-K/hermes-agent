@@ -13,8 +13,15 @@ from agent.skill_utils import (
     parse_frontmatter,
     resolve_skill_config_values,
     skill_matches_platform,
+    skill_matches_platform_list,
 )
 
+
+def test_android_skill_platform_is_linux_compatible_without_matching_linux_only_hosts():
+    """Regression for #140004: Android CPython must load Linux-tagged skills."""
+    assert skill_matches_platform_list(["linux"], current_platform="android")
+    assert skill_matches_platform_list(["android"], current_platform="android")
+    assert not skill_matches_platform_list(["android"], current_platform="linux")
 
 
 

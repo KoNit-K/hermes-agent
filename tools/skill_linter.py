@@ -116,7 +116,7 @@ def _check_frontmatter(frontmatter: dict[str, Any], skill_dir: Optional[Path]) -
                     f"or a real contributor name.")
     platforms = frontmatter.get("platforms")
     if platforms:
-        valid = {"linux", "macos", "windows", "darwin"}
+        valid = {"android", "linux", "macos", "windows", "darwin"}
         items = platforms if isinstance(platforms, list) else [platforms]
         bad = [p for p in items if str(p).lower() not in valid]
         if bad:

@@ -86,17 +86,22 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     return frontmatter, body
 
 
-def skill_matches_platform_list(platforms: Any) -> bool:
-    """Return True when *platforms* is compatible with the current OS."""
+def skill_matches_platform_list(platforms: Any, *, current_platform: str | None = None) -> bool:
+    """Return True when *platforms* is compatible with the current OS.
+
+    Android CPython is Linux-compatible for skill frontmatter purposes, while
+    an ``android`` declaration remains specific to Android hosts.
+    """
     if not platforms:
         return True
     if not isinstance(platforms, list):
         platforms = [platforms]
-    current = sys.platform
+    current = current_platform if current_platform is not None else sys.platform
+    current = current.lower()
     for platform in platforms:
         normalized = str(platform).lower().strip()
         mapped = PLATFORM_MAP.get(normalized, normalized)
-        if current.startswith(mapped):
+        if current.startswith(mapped) or (current == "android" and normalized == "linux"):
             return True
     return False
 

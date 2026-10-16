@@ -42,6 +42,11 @@ def test_clean_skill_has_no_findings():
     assert lint_content(CLEAN) == []
 
 
+def test_android_platform_is_recognized():
+    content = CLEAN.replace("version: 1.0.0", "platforms: [android]\nversion: 1.0.0")
+    assert "platforms-value" not in _rules(lint_content(content))
+
+
 def test_description_too_long_is_warning():
     long_desc = "x" * 80
     content = CLEAN.replace(
