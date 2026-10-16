@@ -179,11 +179,25 @@ class _RedactingStdio:
         return getattr(self._stream, name)
 
 
+def _stdio_is_redacted(stream) -> bool:  # type: ignore[no-untyped-def]
+    """Whether a routing proxy already passes through a redacting stream."""
+    seen: set[int] = set()
+    while stream is not None and id(stream) not in seen:
+        seen.add(id(stream))
+        if isinstance(stream, _RedactingStdio):
+            return True
+        try:
+            stream = object.__getattribute__(stream, "_passthrough")
+        except AttributeError:
+            return False
+    return False
+
+
 def redact_detached_stdio() -> None:
     """Route a detached process's stdout/stderr through secret redaction (idempotent)."""
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name)
-        if stream is not None and not isinstance(stream, _RedactingStdio):
+        if stream is not None and not _stdio_is_redacted(stream):
             setattr(sys, name, _RedactingStdio(stream))
 
 
