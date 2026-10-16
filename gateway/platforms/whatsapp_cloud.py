@@ -186,7 +186,11 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         # Match the shared platform setting used by Telegram and Discord: ``off``
         # suppresses the visible quote, ``first`` keeps the existing first-message
         # behavior, and ``all`` anchors every text chunk.
-        self._reply_to_mode: str = getattr(config, "reply_to_mode", "first") or "first"
+        reply_to_mode = getattr(config, "reply_to_mode", "first")
+        # YAML 1.1 parses an unquoted ``off`` as False; normalize before defaulting.
+        if reply_to_mode is False:
+            reply_to_mode = "off"
+        self._reply_to_mode: str = reply_to_mode or "first"
         # Behavior-mixin contract attributes. WHATSAPP_CLOUD_* env vars take precedence so
         # both adapters can run in parallel with independent policies; shared WHATSAPP_*
         # names remain the fallback. Allowlist: config, then legacy ALLOW_FROM, then ALLOWED_USERS.
