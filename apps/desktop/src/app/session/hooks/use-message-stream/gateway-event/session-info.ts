@@ -31,6 +31,7 @@ import {
   setYoloActive
 } from '@/store/session'
 import { reportInstallMethodWarning } from '@/store/updates'
+import type { UsageStats } from '@/types/hermes'
 
 import {
   applySessionInfoStatePatch,
@@ -40,6 +41,53 @@ import {
 } from '../utils'
 
 import type { GatewayEventContext } from './types'
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * Gateway ``session.usage`` frames carry cumulative agent counters, whereas
+ * ``message.complete.usage`` already uses the TUI status-bar shape. Normalize
+ * the live frame at the renderer boundary so a readout does not disappear
+ * until the turn settles.
+ */
+function statusbarUsage(usage: Record<string, unknown>): Partial<UsageStats> {
+  const normalized: Partial<UsageStats> = { ...usage }
+  const value = (key: string) => finiteNumber(usage[key])
+
+  const calls = normalized.calls ?? value('api_calls')
+  const input = normalized.input ?? value('input_tokens') ?? value('prompt_tokens')
+  const output = normalized.output ?? value('output_tokens') ?? value('completion_tokens')
+  const total = normalized.total ?? value('total_tokens')
+  if (calls !== undefined) normalized.calls = calls
+  if (input !== undefined) normalized.input = input
+  if (output !== undefined) normalized.output = output
+  if (total !== undefined) normalized.total = total
+
+  const contextMax = normalized.context_max ?? value('context_length')
+  const contextUsed = normalized.context_used ?? value('last_prompt_tokens')
+  if (contextMax && contextUsed !== undefined) {
+    normalized.context_max = contextMax
+    normalized.context_used = Math.min(contextUsed, contextMax)
+    if (normalized.context_percent === undefined) {
+      normalized.context_percent = Math.max(0, Math.min(100, Math.round(contextUsed / contextMax * 100)))
+    }
+    if (normalized.context_estimated === undefined) {
+      normalized.context_estimated = (usage.context_source || 'provider_usage') !== 'provider_usage'
+    }
+  }
+
+  const promptTokens = value('prompt_tokens')
+  const cacheReadTokens = value('cache_read_tokens')
+  if (normalized.cache_hit_pct === undefined && promptTokens && cacheReadTokens) {
+    normalized.cache_hit_pct = Math.max(0, Math.min(100, Math.round(cacheReadTokens / promptTokens * 100)))
+  }
+  const tps = normalized.avg_tps ?? value('tokens_per_s')
+  if (tps !== undefined) normalized.avg_tps = tps
+
+  return normalized
+}
 
 /**
  * Whether a `session.info` payload's `stored_session_id` may be treated as the
@@ -503,7 +551,7 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     }
 
     if (payload?.usage && (!explicitSid || isActiveEvent)) {
-      const usage = payload.usage
+      const usage = statusbarUsage(payload.usage)
       setCurrentUsage(current => ({
         ...current,
         ...usage,
@@ -536,15 +584,16 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     // _start_usage_ticker) so the status-bar context window tracks growth
     // during the turn instead of only jumping at message.complete.
     if (payload?.usage && sessionId) {
+      const usage = statusbarUsage(payload.usage)
       // Per-session twin first: a focused secondary tile reads this cache,
       // while the primary-only global mirrors the active session.
       updateSessionState(sessionId, state => ({
         ...state,
-        usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...payload.usage }
+        usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...usage }
       }))
 
       if (isActiveEvent) {
-        setCurrentUsage(current => ({ ...current, ...payload.usage }))
+        setCurrentUsage(current => ({ ...current, ...usage }))
       }
     }
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { cacheHitLabel, contextBarLabel, tokensPerSecondLabel, usageContextLabel } from '@/lib/statusbar'
 import { $currentUsage } from '@/store/session'
 
 import { type MessageStreamHarness, renderMessageStream } from './test-harness'
@@ -50,6 +51,45 @@ describe('useMessageStream status-bar usage scoping', () => {
       input: 1200,
       total: 1280
     })
+  })
+
+  it('normalizes gateway cumulative usage for the status bar while a turn is live', () => {
+    mountStream()
+
+    act(() =>
+      stream.handleEvent({
+        payload: {
+          usage: {
+            api_calls: 4,
+            cache_read_tokens: 950,
+            context_length: 2_000,
+            context_source: 'provider_usage',
+            input_tokens: 1_000,
+            last_prompt_tokens: 500,
+            output_tokens: 80,
+            prompt_tokens: 1_000,
+            tokens_per_s: 42.4,
+            total_tokens: 1_080
+          }
+        },
+        session_id: SID,
+        type: 'session.usage'
+      })
+    )
+
+    const usage = $currentUsage.get()
+    expect(usage).toMatchObject({
+      cache_hit_pct: 95,
+      calls: 4,
+      context_max: 2_000,
+      context_percent: 25,
+      context_used: 500,
+      avg_tps: 42.4
+    })
+    expect(cacheHitLabel(usage)).toBe('95%')
+    expect(tokensPerSecondLabel(usage)).toBe('42 t/s')
+    expect(usageContextLabel(usage)).toBe('500/2k')
+    expect(contextBarLabel(usage)).toBe('[███░░░░░░░] 25%')
   })
 
   it('caches a background session.usage tick without overwriting the primary status bar', () => {
