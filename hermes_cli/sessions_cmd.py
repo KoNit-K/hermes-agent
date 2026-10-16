@@ -735,6 +735,9 @@ def _cmd_prune_or_archive(db, args, action):
 
     # Prune skips archived rows unless --include-archived; archive only targets not-yet-archived rows.
     filters["archived"] = None if prune and getattr(args, "include_archived", False) else False
+    # Deletion stays ended-only. Archive is reversible, so an explicit opt-in may also hide an
+    # open desktop session that matches the supplied filter.
+    filters["include_open"] = not prune and getattr(args, "include_open", False)
     filters["include_pinned"] = getattr(args, "include_pinned", False)
     # Archive flips a compression lineage as a unit, matched through its tip (an old ancestor alone
     # never qualifies); the preview must show the same rows the archive will touch.

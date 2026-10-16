@@ -97,3 +97,15 @@ def test_bulk_archive_matches_a_lineage_through_its_tip_only(db):
     assert {s: db.get_session(s)["archived"] for s in (live_root, live_tip)} == {live_root: 0, live_tip: 0}
     assert {s: db.get_session(s)["archived"] for s in (stale_root, stale_tip)} == {stale_root: 1, stale_tip: 1}
     assert [s["id"] for s in db.list_sessions_rich(order_by_last_active=True)] == [live_tip]
+
+
+def test_bulk_archive_can_explicitly_include_open_matching_sessions(db):
+    """An explicit archive opt-in may hide an open desktop-style session; prune remains ended-only."""
+    db.create_session("desktop-open", source="desktop")
+    db.set_session_title("desktop-open", "Review Hermes projects")
+
+    assert db.archive_sessions(title_like="Review Hermes", include_open=True) == 1
+    assert db.get_session("desktop-open")["archived"] == 1
+    assert db.count_open_prune_matches(title_like="Review Hermes") == 1
+    with pytest.raises(ValueError, match="only supported by archive_sessions"):
+        db.prune_sessions(title_like="Review Hermes", include_open=True)

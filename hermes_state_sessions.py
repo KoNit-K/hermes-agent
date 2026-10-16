@@ -1942,13 +1942,16 @@ class SessionSessionsMixin:
         return count
 
     def archive_sessions(
-        self, older_than_days: Optional[float] = None, source: str | None = None, **filters,
+        self, older_than_days: Optional[float] = None, source: str | None = None, *,
+        include_open: bool = False, **filters,
     ) -> int:
         """Bulk soft-hide with prune_sessions' filter surface, via set_session_archived so each lineage
         flips as a unit; idempotent. Returns matches. A lineage is matched through its TIP only: an
         old compression ancestor never qualifies on its own age, or the fan-out would hide an open,
-        recently active continuation (#115489)."""
+        recently active continuation (#115489). ``include_open`` is an explicit archive-only opt-in;
+        pruning never accepts it."""
         filters.setdefault("archived", False)
+        filters["include_open"] = include_open
         filters["lineage_tips_only"] = True
         rows = self.list_prune_candidates(older_than_days=older_than_days, source=source, **filters)
         for row in rows:

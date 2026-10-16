@@ -69,6 +69,35 @@ def test_sessions_delete_with_unfinished_turn_points_to_discard(tmp_path, monkey
     reopened.close()
 
 
+def test_sessions_archive_include_open_archives_matching_desktop_session(tmp_path, monkeypatch, capsys):
+    """The CLI opt-in reaches a never-ended desktop row without changing archive's default."""
+    import hermes_cli.main as main_mod
+    from hermes_state import SessionDB
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("desktop-open", source="desktop")
+    db.set_session_title("desktop-open", "Review Hermes projects")
+    db.close()
+
+    monkeypatch.setattr(sys, "argv", ["hermes", "sessions", "archive", "--title", "Review Hermes", "--yes"])
+    main_mod.main()
+    assert "No sessions match" in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", [
+        "hermes", "sessions", "archive", "--title", "Review Hermes", "--include-open", "--yes",
+    ])
+    main_mod.main()
+    assert "Archived 1 session" in capsys.readouterr().out
+
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        assert db.get_session("desktop-open")["archived"] == 1
+        assert db.get_session("desktop-open")["ended_at"] is None
+    finally:
+        db.close()
+
+
 def _run_prune(monkeypatch, capsys, argv_tail, candidates=None, skipped_open=0):
     """Run `hermes sessions prune <argv_tail>` against a FakeDB, capturing
     the filter kwargs passed to list_prune_candidates. Auto-confirms."""

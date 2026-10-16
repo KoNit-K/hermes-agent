@@ -73,7 +73,9 @@ _PRUNE_FILTERS = (
     ("min_tool_calls", "notnone", _one("COALESCE(s.tool_call_count, 0) >= ?")),
     ("max_tool_calls", "notnone", _one("COALESCE(s.tool_call_count, 0) <= ?")),
 )
-_PRUNE_FILTER_NAMES = frozenset(name for name, _, _ in _PRUNE_FILTERS) | {"archived", "include_pinned", "lineage_tips_only"}
+_PRUNE_FILTER_NAMES = frozenset(name for name, _, _ in _PRUNE_FILTERS) | {
+    "archived", "include_open", "include_pinned", "lineage_tips_only",
+}
 
 # Child ``c`` continues compression-ended ``p`` (same predicate as compression's child lookup).
 _CONTINUATION_EDGE_SQL = "p.end_reason = 'compression'\n" + _non_continuation_child_sql("c.", "p.id")
@@ -216,11 +218,13 @@ class SessionMaintenanceMixin:
         return self._execute_write(_do) or []
 
     @staticmethod
-    def _prune_filter_where(*, archived: Optional[bool] = None, include_pinned: bool = False,
-                            lineage_tips_only: bool = False, **filters) -> tuple[str, list]:
+    def _prune_filter_where(*, archived: Optional[bool] = None, include_open: bool = False,
+                            include_pinned: bool = False, lineage_tips_only: bool = False,
+                            **filters) -> tuple[str, list]:
         """Shared WHERE clause for bulk prune/archive selection (alias ``s``): ``_PRUNE_FILTERS``
-        AND together, only ended sessions are ever candidates, ``archived`` is tri-state
-        (None = both), ``*_like`` are case-insensitive substrings, the rest exact.
+        AND together; candidates are ended sessions unless archive explicitly opts into open ones.
+        ``archived`` is tri-state (None = both), ``*_like`` are case-insensitive substrings, the
+        rest exact.
         ``lineage_tips_only`` (bulk archive) drops compression ancestors: they are archived with
         their tip, never on their own age — matching an old ancestor would fan out over the lineage
         and hide its OPEN, recently active tip (#115489)."""
@@ -228,7 +232,7 @@ class SessionMaintenanceMixin:
         if unknown:
             raise TypeError("SessionMaintenanceMixin._prune_filter_where() got an unexpected "
                             f"keyword argument {min(unknown)!r}")
-        clauses = ["s.ended_at IS NOT NULL"]
+        clauses = [] if include_open else ["s.ended_at IS NOT NULL"]
         if lineage_tips_only:
             clauses.append("COALESCE(s.end_reason, '') <> 'compression'")
         params: list = []
@@ -335,6 +339,8 @@ class SessionMaintenanceMixin:
         ancestor is deleted only together with every continuation after it (``whole_lineages``).
         ``deleted_ids`` (the owning gateway) receives the removed ids, so it can retire their
         in-memory routes and live sessions after the commit."""
+        if filters.pop("include_open", False):
+            raise ValueError("include_open is only supported by archive_sessions")
         where, where_params = self._prune_where(older_than_days, source, filters, whole_lineages=True)
         removed_ids: list[str] = []
         def _do(conn):
