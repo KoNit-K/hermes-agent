@@ -9,9 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * (#36784). Unlike source-text assertions, these render ChatPage and observe
  * what assistive technology would observe:
  *
- *   - the xterm `Terminal` is CONSTRUCTED with `screenReaderMode: true`, the
- *     option that makes xterm create the offscreen textarea VoiceOver/NVDA
- *     need to discover and drive the composer;
+ *   - the xterm `Terminal` keeps `screenReaderMode` for desktop assistive
+ *     technology, but disables its input gate on mobile IMEs;
  *   - the terminal host element is exposed in the accessibility tree as a
  *     labelled region (`role="region"` + non-empty `aria-label`);
  *   - the single registered custom key handler lets Tab/Shift-Tab escape the
@@ -281,6 +280,25 @@ describe("ChatPage composer screen-reader accessibility (#36784)", () => {
     // The constructor option, not a post-hoc DOM patch: xterm only creates
     // the offscreen textarea screen readers need when this is true.
     expect(FakeTerminal.instances[0].options.screenReaderMode).toBe(true);
+  });
+
+  it("keeps the xterm input path open and exposes its tap target on mobile", async () => {
+    Object.defineProperty(window.navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (Linux; Android 10; HarmonyOS) AppleWebKit/537.36 ArkWeb/7.0 Mobile",
+    });
+    const { default: ChatPage } = await import("./ChatPage");
+    await render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    expect(FakeTerminal.instances[0].options.screenReaderMode).toBe(false);
+    expect(
+      container.querySelector(".hermes-chat-xterm-host")?.classList.contains("hermes-mobile-ime"),
+    ).toBe(true);
   });
 
   it("exposes the terminal host as a labelled region in the accessibility tree", async () => {

@@ -124,6 +124,10 @@ import { SGR_MOUSE_RE } from "@/lib/pty-mouse-report";
 // second tab — including a Chrome "Duplicate tab" — gets its own PTY instead of
 // taking over this one. See #115304.
 
+function isMobileTerminalUserAgent(userAgent: string): boolean {
+  return /Android|iPhone|iPad|iPod|Mobile|OpenHarmony|ArkWeb|HarmonyOS/i.test(userAgent);
+}
+
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termWrapRef = useRef<HTMLDivElement | null>(null);
@@ -515,6 +519,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
 
     const tierW0 = terminalTierWidthPx(host);
+    // xterm's screen-reader input mode suppresses its insertText path. Mobile
+    // IMEs can commit through that path without composition events, so preserve
+    // the desktop AT textarea while letting mobile text reach the PTY.
+    const isMobileLike =
+      typeof navigator !== "undefined" &&
+      isMobileTerminalUserAgent(navigator.userAgent);
     const term = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
@@ -539,7 +549,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // Browser-embedded chat runs the TUI in inline mode. Keep transcript
       // history in xterm.js so the browser wheel can scroll it directly.
       scrollback: 5000,
-      screenReaderMode: true, // AT textarea; composer a11y (#36784)
+      screenReaderMode: !isMobileLike, // Desktop AT textarea; mobile IME input (#140017)
       theme: terminalTheme,
     });
     termRef.current = term;
@@ -821,6 +831,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     };
     host.addEventListener("keydown", _imeCompositionGuard, true);
 
+    host.classList.toggle("hermes-mobile-ime", isMobileLike);
     const textarea = term.textarea;
     if (textarea) {
       textarea.setAttribute("autocomplete", "off");
@@ -828,9 +839,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       textarea.setAttribute("autocapitalize", "off");
       textarea.setAttribute("spellcheck", "false");
 
-      const isMobileLike =
-        typeof navigator !== "undefined" &&
-        /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
       const markReplacementInput = (ev: Event) => {
         const input = ev as InputEvent;
         if (
@@ -1584,6 +1592,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       wsRef.current?.close();
       wsRef.current = null;
       host.removeEventListener("keydown", _imeCompositionGuard, true);
+      host.classList.remove("hermes-mobile-ime");
       // Every reconnect rebuilds this terminal; the WebGL addon leaves its GL
       // context alive on dispose, so a reconnect storm hits the browser's
       // context cap and blanks the live terminal (#111909).
