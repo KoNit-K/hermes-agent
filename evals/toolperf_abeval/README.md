@@ -67,8 +67,16 @@ export ABEVAL_HOME=/tmp/abeval-home
 The default guidance matrix runs `all_on`, `tool_use_off`, `execution_off`,
 and `all_off` for each code arm. To run only a comparison, set (for example)
 `ABEVAL_GUIDANCE_ARMS=all_on,execution_off`. Each guidance arm includes
-tool-action and write/read-back tasks (where the guidance must help) plus a
-trivial edit (where excess verification is measurable cost).
+tool-action and local write/read-back instruction-following tasks plus a
+trivial edit (where excess verification is measurable cost). The first requires
+`read_file`; the second explicitly requires `write_file` followed by `read_file`.
+Success requires matching completed ATOF tool spans for the exact target, a
+successful result, the expected read content, and (for read-back) a read started
+after the write completed. Missing traces and failed runs cannot pass. These
+local-file tasks measure compliance with an explicit user requirement; they do
+not establish that execution guidance supplies external-state verification.
+Arm configuration uses the normal comment-preserving YAML writer and keeps
+unrelated settings, including inline mappings and non-default indentation.
 
 Re-print tables any time (pass the arms that were run):
 

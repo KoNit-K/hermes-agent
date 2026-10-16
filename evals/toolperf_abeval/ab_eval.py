@@ -75,8 +75,8 @@ TASKS = {
     # Guidance ablations need both sides of the trade-off.  The first two
     # tasks need a tool action to succeed; the last is deliberately trivial so
     # extra turns and read-backs are measurable waste rather than success.
-    "guidance_tool_action": "Use a tool to read {WORK}/proj/action_token.txt and reply TOKEN=<the exact token>. Do not guess the token.",
-    "guidance_write_readback": "Set {WORK}/proj/release.txt to exactly `release=ready` using a file-editing tool. Then use a tool to read it back and reply with its exact contents.",
+    "guidance_tool_action": "Use read_file to read {WORK}/proj/action_token.txt and reply TOKEN=<the exact token>. Do not guess the token.",
+    "guidance_write_readback": "Set {WORK}/proj/release.txt to exactly `release=ready` using write_file. Then use read_file to read it back and reply with its exact contents.",
     "guidance_trivial_edit": "Create {WORK}/proj/flag.txt containing exactly `enabled`. Reply DONE after the edit; no verification is needed.",
 }
 
@@ -142,7 +142,7 @@ def make_sandbox(work: Path):
              for i in range(6000)]
     lines[4200] = "ANOMALY: checksum drift detected in shard 7 (code X99Q)"
     (proj / "records.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    # Guidance-ablation tasks: tool-use and external-write read-back must fire,
+    # Guidance tasks explicitly require tool-use and local write/read-back,
     # while the flag edit should make needless verification visible in traces.
     (proj / "action_token.txt").write_text("tool_action_2c47\n", encoding="utf-8")
     (proj / "release.txt").write_text("release=pending\n", encoding="utf-8")
@@ -177,24 +177,19 @@ def _home_for_guidance_arm(work: Path, guidance_arm: str) -> Path:
     arm_home = work / "hermes-home"
     shutil.copytree(HOME, arm_home, dirs_exist_ok=True)
     config_path = arm_home / "config.yaml"
-    config = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    agent_match = re.search(r"(?m)^agent:\s*(?:#.*)?$", config)
-    if agent_match:
-        next_section = re.search(r"(?m)^\S", config[agent_match.end():])
-        end = agent_match.end() + (next_section.start() if next_section else len(config[agent_match.end():]))
-        agent_text = config[agent_match.end():end]
-        for key, value in GUIDANCE_ARMS[guidance_arm].items():
-            line = f"  {key}: {str(value).lower()}"
-            pattern = rf"(?m)^  {re.escape(key)}:.*$"
-            agent_text = (re.sub(pattern, line, agent_text) if re.search(pattern, agent_text)
-                          else agent_text.rstrip("\n") + f"\n{line}")
-        agent_text = agent_text.rstrip("\n") + "\n"
-        config = config[:agent_match.end()] + agent_text + config[end:]
-    else:
-        additions = "\n".join(
-            f"  {key}: {str(value).lower()}" for key, value in GUIDANCE_ARMS[guidance_arm].items())
-        config = config.rstrip() + f"\nagent:\n{additions}\n"
-    config_path.write_text(config, encoding="utf-8")
+    import hermes_yaml as yaml
+    from hermes_cli.config import atomic_config_write
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise ValueError("guidance config must be a mapping")
+    agent = config.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        raise ValueError("agent config must be a mapping")
+    agent.update(GUIDANCE_ARMS[guidance_arm])
+    atomic_config_write(config_path, config)
     return arm_home
 
 
@@ -314,6 +309,73 @@ def score_run(atof: Path):
             "retries": retries, "kb": result_bytes // 1024}
 
 
+
+def _tool_payload(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _tool_succeeded(event):
+    metadata = event.get("metadata") or {}
+    if metadata.get("status") not in (None, "ok", "success") or metadata.get("otel.status_code") == "ERROR":
+        return False
+    result = _tool_payload(event.get("data"))
+    return result is not None and not (isinstance(result, dict) and (
+        result.get("error") or result.get("success") is False or result.get("exit_code", 0) != 0))
+
+
+def _target_matches(args, target, work):
+    if not isinstance(args, dict) or not isinstance(args.get("path"), str):
+        return False
+    path = Path(args["path"])
+    return (path if path.is_absolute() else work / path).resolve() == target.resolve()
+
+
+def guidance_trace_success(task, work, trace):
+    """Require completed, correlated tool calls to the requested file.
+
+    Local read-back is an explicit task requirement, not evidence that the
+    execution-guidance prompt requires verification of an internal file edit.
+    """
+    if not trace.exists():
+        return False
+    filename, marker = ("action_token.txt", "tool_action_2c47") if task == "guidance_tool_action" else (
+        "release.txt", "release=ready")
+    target = work / "proj" / filename
+    pending = {}
+    written = False
+    for line in trace.read_text(encoding="utf-8-sig").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("kind") != "scope" or event.get("category") != "tool":
+            continue
+        identity = event.get("uuid")
+        if not isinstance(identity, str) or not identity:
+            continue
+        if event.get("scope_category") == "start":
+            pending[identity] = (event, written)
+            continue
+        if event.get("scope_category") != "end":
+            continue
+        start, read_after_write = pending.pop(identity, (None, False))
+        if not start or start.get("name") != event.get("name") or not _tool_succeeded(event):
+            continue
+        if not _target_matches(_tool_payload(start.get("data")), target, work):
+            continue
+        if event["name"] == "write_file":
+            written = True
+        elif event["name"] == "read_file" and (task == "guidance_tool_action" or read_after_write):
+            if marker in json.dumps(_tool_payload(event.get("data"))):
+                return True
+    return False
+
+
 def report(models, arms):
     for model in models:
         mdir = ROOT / "results" / model.replace("/", "_")
@@ -325,10 +387,13 @@ def report(models, arms):
                 continue
             for line in meta_path.read_text(encoding="utf-8-sig").splitlines():
                 m = json.loads(line)
-                s = score_run(mdir / arm / f"{m['run_id']}.atof.jsonl") or {}
+                trace = mdir / arm / f"{m['run_id']}.atof.jsonl"
+                s = score_run(trace) or {}
                 work = ROOT / "runs" / model.replace("/", "_") / arm / m["run_id"]
                 try:
-                    ok = SUCCESS[m["task"]](m.get("tail", ""), work)
+                    ok = m.get("exit") == 0 and SUCCESS[m["task"]](m.get("tail", ""), work)
+                    if ok and m["task"] in {"guidance_tool_action", "guidance_write_readback"}:
+                        ok = guidance_trace_success(m["task"], work, trace)
                 except Exception:
                     ok = False
                 table.setdefault(m["task"], {}).setdefault(arm, []).append(
