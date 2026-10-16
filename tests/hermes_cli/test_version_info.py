@@ -280,6 +280,40 @@ def test_old_updater_version_stub_reads_the_same_stamp_as_version_info(tmp_path)
     assert read(unstamped)[0] == "0.0.0"
 
 
+def test_release_date_uses_the_packaged_build_timestamp(tmp_path):
+    """Packaged banners must not keep the source tree's historical fallback date."""
+    import sys
+
+    repo = Path(__file__).resolve().parents[2]
+    stamp = {
+        "builtAt": "2026-10-15T04:03:02+00:00",
+        "commit": "c" * 40,
+        "source": "ci",
+        "updateMechanism": "external",
+    }
+    (tmp_path / "install-stamp.json").write_text(json.dumps(stamp), encoding="utf-8")
+    probe = f"import sys; sys.path.insert(0, {str(repo)!r}); import hermes_cli; print(hermes_cli.__release_date__)"
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        env={**os.environ, "HERMES_INSTALL_ROOT": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "2026.10.15"
+
+
+def test_release_date_ignores_an_invalid_legacy_stamp(tmp_path):
+    import hermes_cli
+
+    stamp = tmp_path / "install-stamp.json"
+    stamp.write_text('{"builtAt": "not-a-date"}', encoding="utf-8")
+
+    assert hermes_cli._release_date_from_stamp(stamp) is None
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="the blocking untracked scan uses a FIFO")
 def test_a_timed_out_status_probe_never_strands_index_lock(tmp_path):
     """The update opens its receipt with this probe; killed by its 3 s timeout while refreshing

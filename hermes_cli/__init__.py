@@ -1,8 +1,29 @@
 """Hermes CLI - Unified command-line interface for Hermes Agent."""
 
+import json
+import os
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
-__release_date__ = "2026.9.24"
+
+_RELEASE_DATE_FALLBACK = "2026.9.24"
+
+
+def _release_date_from_stamp(path: Path) -> str | None:
+    """Return a packaged build's UTC date without importing the PM runtime."""
+    try:
+        built_at = json.loads(path.read_text(encoding="utf-8-sig")).get("builtAt")
+        if not isinstance(built_at, str):
+            return None
+        date = datetime.fromisoformat(built_at).astimezone(UTC).date()
+    except (OSError, ValueError, AttributeError):
+        return None
+    return f"{date.year}.{date.month}.{date.day}"
+
+
+_INSTALL_ROOT = Path(os.environ.get("HERMES_INSTALL_ROOT", Path(__file__).resolve().parents[1]))
+__release_date__ = _release_date_from_stamp(_INSTALL_ROOT / "install-stamp.json") or _RELEASE_DATE_FALLBACK
 # Declared for type checkers and the old-updater surface audit; served lazily by __getattr__.
 __version__: str
 
