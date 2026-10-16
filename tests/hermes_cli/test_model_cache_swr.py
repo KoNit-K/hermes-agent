@@ -162,6 +162,57 @@ class TestProviderModelsSWR:
             assert mod.cached_provider_model_ids("openai-codex", non_blocking=True) == []
         spawn.assert_called_once_with("openai-codex")
 
+    def test_auth_json_rewrite_keeps_other_provider_nonblocking_catalog(self, tmp_path, monkeypatch):
+        """An unrelated auth-store write must not hide a provider's live-only models."""
+        import hermes_cli.models as mod
+
+        auth_path = tmp_path / "auth.json"
+        auth_path.write_text(json.dumps({
+            "version": 1,
+            "providers": {"nous": {"access_token": "nous-token"}},
+        }), encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        fp = mod._credential_fingerprint("anthropic")
+        mod._store_cache_entry("anthropic", mod._cache_entry(fp, ["live-only-model"]))
+
+        # Saving a different provider's auth state rewrites the shared file, but cannot change
+        # Anthropic's credential boundary or discard its warmed catalog.
+        auth_path.write_text(json.dumps({
+            "version": 1,
+            "providers": {
+                "nous": {"access_token": "nous-token"},
+                "openai": {"access_token": "openai-token"},
+            },
+        }), encoding="utf-8")
+
+        with patch.object(mod, "_spawn_swr_refresh") as spawn:
+            assert mod.cached_provider_model_ids("anthropic", non_blocking=True) == ["live-only-model"]
+        spawn.assert_not_called()
+
+    def test_provider_auth_change_invalidates_nonblocking_catalog(self, tmp_path, monkeypatch):
+        import hermes_cli.models as mod
+
+        auth_path = tmp_path / "auth.json"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        auth_path.write_text(json.dumps({
+            "version": 1,
+            "providers": {"anthropic": {"access_token": "old-token"}},
+        }), encoding="utf-8")
+        fp = mod._credential_fingerprint("anthropic")
+        mod._store_cache_entry("anthropic", mod._cache_entry(fp, ["old-account-model"]))
+
+        auth_path.write_text(json.dumps({
+            "version": 1,
+            "providers": {"anthropic": {"access_token": "new-token"}},
+        }), encoding="utf-8")
+
+        with patch.object(mod, "_spawn_swr_refresh") as spawn:
+            assert mod.cached_provider_model_ids("anthropic", non_blocking=True) == []
+        spawn.assert_called_once_with("anthropic")
+
     def test_force_refresh_bypasses_swr(self):
         import hermes_cli.models as mod
 

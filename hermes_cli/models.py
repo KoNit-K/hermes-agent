@@ -1949,12 +1949,32 @@ def _provider_models_cache_path() -> Path:
     return get_hermes_home() / "provider_models_cache.json"
 
 
+def _provider_auth_json_identity(provider: str) -> str:
+    """The provider-scoped auth.json state that can change a discovered catalog.
+
+    ``auth.json`` is shared across providers and is atomically rewritten for routine updates.
+    Its file mtime therefore says nothing about a particular provider's entitlement boundary.
+    The auth accessors preserve profile/global fallback semantics, so this identity changes only
+    when the selected provider state or credential pool changes.
+    """
+    try:
+        from hermes_cli.auth import get_provider_auth_state, read_credential_pool
+
+        state = get_provider_auth_state(provider)
+        pool = read_credential_pool(provider)
+        if state or pool:
+            return json.dumps({"state": state, "pool": pool}, sort_keys=True, default=str)
+    except Exception:
+        pass
+    return ""
+
+
 def _credential_fingerprint(provider: str) -> str:
     """Short hash of the credentials ``provider_model_ids(provider)`` would see right now.
 
-    API-key providers include their configured values and credential-file mtimes. Codex uses the
-    stable principal selected by its read-only resolver: routine token and pool-state writes must
-    not discard an account-scoped catalog, while a real account switch must invalidate it.
+    API-key providers include their configured values and provider-scoped credential state. Codex
+    uses the stable principal selected by its read-only resolver: routine token and pool-state
+    writes must not discard an account-scoped catalog, while a real account switch must invalidate it.
     """
     import hashlib
 
@@ -2032,10 +2052,12 @@ def _credential_fingerprint(provider: str) -> str:
 
         parts.append(f"codex_identity={codex_catalog_credential_identity()}")
     else:
+        auth_identity = _provider_auth_json_identity(provider)
+        if auth_identity:
+            parts.append(f"auth_identity={auth_identity}")
         try:
             from hermes_constants import get_hermes_home
-            for rel in ("auth.json", "credentials.json"):
-                _mtime_part(rel, get_hermes_home() / rel)
+            _mtime_part("credentials.json", get_hermes_home() / "credentials.json")
         except Exception:
             pass
         for rel in ("~/.codex/auth.json", "~/.claude/.credentials.json",
