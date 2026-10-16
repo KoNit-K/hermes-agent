@@ -16,6 +16,28 @@ def test_browser_closure_and_bundle_ship_full_chromium_only():
     assert "chromium-headless-shell" not in closure | bundled
 
 
+def test_chromium_only_ignores_its_windows_runtime_log():
+    package = Chromium()
+    assert package.runtime_digest_paths("win32-x64") == ("chrome-win64/debug.log",)
+    assert package.runtime_digest_paths("win32-arm64") == ("chrome-win64/debug.log",)
+    assert package.runtime_digest_paths("linux-x64") == ()
+
+
+def test_windows_chromium_runtime_log_does_not_change_package_digest(tmp_path):
+    package = Chromium()
+    entry = tmp_path / "chromium-1208"
+    executable = entry / "chrome-win64" / "chrome.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"browser")
+    before = package.tree_digest(entry, "win32-x64")
+
+    (executable.parent / "debug.log").write_text("crashpad registration error")
+    assert package.tree_digest(entry, "win32-x64") == before
+
+    (executable.parent / "unexpected.log").write_text("not declared runtime state")
+    assert package.tree_digest(entry, "win32-x64") != before
+
+
 @pytest.mark.parametrize(("target", "relative"), [
     ("linux-x64", "chrome-linux64/chrome"),
     ("linux-arm64", "chrome-linux/chrome"),

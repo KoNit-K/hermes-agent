@@ -419,6 +419,35 @@ def test_doctor_flags_tampered_entry_bytes(pm_env, capsys):
     assert cmd_doctor(None) == 0
 
 
+def test_doctor_and_explicit_install_ignore_declared_runtime_log(pm_env, monkeypatch, capsys):
+    """A package runtime log is not corruption, but neighboring files still are."""
+    from pm import cli as pm_cli
+    from pm.cli import cmd_doctor
+    from pm.install import _entry_verified, ensure
+
+    class RuntimeLogTool(FakeTool):
+        def runtime_digest_paths(self, target):
+            return ("chrome-win64/debug.log",)
+
+    package = RuntimeLogTool()
+    ensure("faketool", base_env={})
+    fact = Facts(paths.facts_path()).get("faketool")
+    store = Store(paths.store_root())
+    entry = store.entry(fact["entry"])
+    debug_log = entry / "chrome-win64" / "debug.log"
+    debug_log.parent.mkdir()
+    debug_log.write_text("crashpad error")
+
+    monkeypatch.setattr(pm_cli, "get_package", lambda name: package)
+    assert cmd_doctor(None) == 0
+    assert _entry_verified(package, fact, store, current_target())
+
+    (debug_log.parent / "other.log").write_text("unexpected")
+    assert cmd_doctor(None) == 1
+    assert "realized bytes do not match recorded digest" in capsys.readouterr().out
+    assert not _entry_verified(package, fact, store, current_target())
+
+
 def test_tree_digest_ignores_pycache(pm_env, monkeypatch):
     """Bytecode caches are runtime state, not package bytes: the staged
     python entry runs (uv venv/uv sync in a bundle build, first boot of a

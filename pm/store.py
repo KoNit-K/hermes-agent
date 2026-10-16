@@ -302,7 +302,7 @@ def merge_tree(src: Path, dst: Path) -> None:
         retry_held(lambda: item.replace(target))
 
 
-def tree_digest(root: Path) -> str:
+def tree_digest(root: Path, *, ignored_paths: tuple[str, ...] = ()) -> str:
     """Deterministic sha256 over a directory tree: walk every file, sort
     by posix relpath, hash `relpath\\0<content>` per entry. No mtimes, no
     mode bits. Symlinks contribute their LINK TARGET TEXT (os.readlink),
@@ -312,9 +312,12 @@ def tree_digest(root: Path) -> str:
     ``__pycache__`` directories are skipped: CPython writes .pyc caches
     into them the first time the staged interpreter runs (uv venv/uv sync
     in a bundle build; first boot of a shipped app), so they are runtime
-    state, not package bytes — the digest is over what pm published."""
+    state, not package bytes — the digest is over what pm published.
+    ``ignored_paths`` is for an exact package-declared runtime file; it never
+    ignores a directory or a path prefix."""
     import hashlib
 
+    ignored = set(ignored_paths)
     files: list[tuple[str, Path]] = []
     for dirpath, dirnames, filenames in os.walk(root):
         descend = []
@@ -327,7 +330,9 @@ def tree_digest(root: Path) -> str:
         dirnames[:] = descend
         for fname in filenames:
             path = Path(dirpath) / fname
-            files.append((path.relative_to(root).as_posix(), path))
+            rel = path.relative_to(root).as_posix()
+            if rel not in ignored:
+                files.append((rel, path))
     files.sort(key=lambda item: item[0])
 
     digest = hashlib.sha256()

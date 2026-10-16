@@ -1059,6 +1059,11 @@ class Chromium(Package):
     }
     _MIRROR = {"linux-arm64": "linux-arm64"}
 
+    def runtime_digest_paths(self, target: str) -> tuple[str, ...]:
+        # Chromium's Windows crashpad process writes this beside chrome.exe.
+        # It is runtime logging, not a file PM published from the archive.
+        return ("chrome-win64/debug.log",) if target.startswith("win32") else ()
+
     def store_entry(self, version: str, target: str) -> str:
         revision = version.partition("+")[0]
         return f"{self.name.replace('-', '_')}-{revision}"

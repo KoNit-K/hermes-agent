@@ -70,8 +70,6 @@ def _discard_build_locks(root: Path) -> None:
 def record_tools(root: Path, lock_path: Path, target: str, entries: dict[str, str]) -> None:
     from pm.lock import Facts, Lockfile
     from pm.registry import get_package
-    from pm.store import tree_digest
-
     store = root / "tools"
     facts, lock = Facts(_payload_file(root, "tools/facts.json")), Lockfile(lock_path)
     for name, entry_name in entries.items():
@@ -79,8 +77,10 @@ def record_tools(root: Path, lock_path: Path, target: str, entries: dict[str, st
         version, artifacts = lock.version(name), lock.artifacts(name, target)
         if not entry.is_dir() or not version or not artifacts:
             raise ValueError(f"incomplete payload tool: {name}")
-        facts.record(name, version, entry_name, get_package(name).env(entry, target), store,
-                     target=target, artifacts=[a["sha256"] for a in artifacts], digest=tree_digest(entry))
+        package = get_package(name)
+        facts.record(name, version, entry_name, package.env(entry, target), store,
+                     target=target, artifacts=[a["sha256"] for a in artifacts],
+                     digest=package.tree_digest(entry, target))
     if entries:
         _share_metadata(facts.path)
 

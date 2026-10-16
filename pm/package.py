@@ -90,6 +90,21 @@ class Package:
     # The arch guard accepts the x64 PE on these targets.
     emulated_arch_targets: frozenset[str] = frozenset()
 
+    def runtime_digest_paths(self, target: str) -> tuple[str, ...]:
+        """Paths a package itself may create after PM publishes its tree.
+
+        These paths are package-specific runtime state, not shipped bytes.
+        Keep the declaration exact: every other added or modified path must
+        continue to make the realized-tree digest differ.
+        """
+        return ()
+
+    def tree_digest(self, entry: Path, target: str) -> str:
+        """Digest a realized entry while excluding declared runtime state."""
+        from pm.store import tree_digest
+
+        return tree_digest(entry, ignored_paths=self.runtime_digest_paths(target))
+
     def missing_reason(self, target: str) -> Optional[str]:
         return self.gaps.get(target)
 
