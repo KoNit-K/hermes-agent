@@ -107,6 +107,12 @@ async def admit_peer_turn(runner, session_id, message, author):
     tip = bot_chat_tip(authority, session_id)
     if tip is None:
         return None
+    # Older gateways could create the canonical title through the ordinary API route.  That
+    # conversation is already API-owned, so it must use the ordinary API admission below rather
+    # than the local Bot Chat FIFO.  Other non-local rows remain refused by ``deliver``: accepting
+    # one would bind remote input to a history whose owner is unknown.
+    if tip['source'] == 'api_server' and not str(tip.get('chat_id') or '').startswith('local-'):
+        return None
     home = Path(authority.db.db_path).parent.resolve()
     # The API key already authenticated the peer; the turn enters the chat as its owner's own
     # input, the way owner recovery re-admits queued deliveries (``recover_bot_deliveries``).

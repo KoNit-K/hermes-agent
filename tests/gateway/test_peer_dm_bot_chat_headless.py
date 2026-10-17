@@ -4,7 +4,7 @@
 missing. With no Desktop/CLI in the loop that create used to mint an API row nothing can ever bind
 (the peer is a remote sender, never a native ticket), so every DM answered 502 "admission refused:
 not_found" (#139370). The titled create now goes through the owner's own Bot Chat creation step;
-a peer-created API row left over from before is refused by a named reason, never a bare not_found.
+an ordinary API-created Bot Chat left over from before remains reachable through API admission.
 """
 from types import SimpleNamespace
 
@@ -125,17 +125,18 @@ async def test_concurrent_peer_creates_mint_one_local_bot_chat(headless):
 
 
 @pytest.mark.asyncio
-async def test_peer_created_api_bot_chat_is_refused_by_name(headless):
-    # A row an older gateway minted through the plain API create: no FIFO can own it.
+async def test_peer_created_api_bot_chat_runs_as_an_api_conversation(headless):
+    # A row an older gateway minted through the plain API create remains API-owned.  It must not
+    # be sent to the local Bot Chat FIFO, but peer DM can still run it through the API admission.
     db = headless.authority.db
-    db.create_session('api_1_stale', 'bot_peer_dm')
+    db.create_session('api_1_stale', 'api_server')
     db.set_session_title('api_1_stale', 'Bot Chat')
     resp = await headless.cli.post("/api/sessions/api_1_stale/chat", json={"message": "ping", "author": AUTHOR})
     body = await resp.json()
-    assert resp.status == 502, body
-    assert body['error']['code'] == 'bot_chat_not_local', body
-    assert 'not_found' not in body['error']['message']
-    assert headless.executed == [] and _api_admissions(headless.authority) == []
+    assert resp.status == 200, body
+    assert body['message']['content'] == 'pong', body
+    assert headless.executed == [('api_1_stale', 'api', 'ping')]
+    assert len(_api_admissions(headless.authority)) == 1
 
 
 async def _peer_minted(headless):
