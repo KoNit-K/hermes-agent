@@ -775,7 +775,18 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 if resp.status == 200:
                     data = await resp.json()
                     return SendResult(success=True, message_id=data.get("messageId"), raw_response=data)
-                return SendResult(success=False, error=await resp.text())
+                try:
+                    data = await resp.json()
+                except Exception:
+                    return SendResult(success=False, error=await resp.text())
+                if isinstance(data, dict):
+                    return SendResult(
+                        success=False,
+                        error=str(data.get("error") or data),
+                        raw_response=data,
+                        retryable=data.get("retryable") is True,
+                    )
+                return SendResult(success=False, error=str(data))
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
@@ -795,7 +806,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     payload["replyTo"] = reply_to  # Reply-to on the first chunk only.
                 result = await self._post_bridge_message("send", payload, timeout=30)
                 if not result.success:
-                    return SendResult(success=False, error=result.error)
+                    return SendResult(success=False, error=result.error, raw_response=result.raw_response,
+                                      retryable=result.retryable)
                 last_message_id = result.message_id
                 if last_message_id:
                     sent_message_ids.append(str(last_message_id))

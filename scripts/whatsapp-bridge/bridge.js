@@ -436,6 +436,10 @@ async function startSocket() {
         }
         process.exit(1);
       } else {
+        // The HTTP adapter can safely retry only after Baileys has committed
+        // to reconnecting. A plain disconnected state also covers logout and
+        // startup, where repeating a delivery would only hide a fatal error.
+        connectionState = 'reconnecting';
         // 515 = restart requested (common after pairing). Always reconnect.
         emitPairEvent({ event: 'disconnected', reason });
         if (!PAIR_JSON) {
@@ -840,7 +844,10 @@ app.get('/messages', (req, res) => {
 // Send a message
 app.post('/send', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
-    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+    return res.status(503).json({
+      error: 'Not connected to WhatsApp',
+      retryable: connectionState === 'reconnecting',
+    });
   }
 
   const { chatId, message, replyTo, mentions } = req.body;
