@@ -78,7 +78,7 @@ def test_verify_budget_covers_the_watchers_own_wait_when_the_old_pid_is_still_al
 @pytest.mark.parametrize("mapped", [True, False])
 def test_target_verification_receives_watcher_budget(monkeypatch, tmp_path, mapped):
     from gateway import status
-    from hermes_cli import gateway_windows, profiles, update_cmd_windows
+    from hermes_cli import gateway_windows_attestation, gateway_windows, profiles, update_cmd_windows
 
     old_pid = 14980
     entry = {"pid": old_pid, "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"]}
@@ -96,6 +96,6 @@ def test_target_verification_receives_watcher_budget(monkeypatch, tmp_path, mapp
 
     monkeypatch.setattr(update_cmd_windows, "_poll_until_ready", poll)
     monkeypatch.setattr(gateway_windows, "_write_start_attestation", lambda *_a, **_kw: None)
-    monkeypatch.setattr(gateway_windows, "_write_unmapped_start_attestation", lambda *_a: None)
+    monkeypatch.setattr(gateway_windows_attestation, "_write_unmapped_start_attestation", lambda *_a: None)
     update_cmd_windows._verify_relaunched_gateways_alive(token, selected_profiles, replays)
     assert observed == [GATEWAY_RESTART_WATCHER_TIMEOUT_S + 30.0]

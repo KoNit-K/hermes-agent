@@ -17,6 +17,8 @@ from pathlib import Path
 
 from hermes_cli.update_cmd_common import _best_effort
 
+from hermes_cli import gateway_windows_attestation
+
 logger = logging.getLogger("hermes_cli.update_cmd")  # log-record parity with the origin module
 
 _BACKEND_PURPOSES = ("serve", "dashboard")
@@ -1455,6 +1457,7 @@ def _recover_windows_gateway_via_schtasks(
     try:
         state = gateway_windows._task_registration_state(home=home)
     except Exception:
+        logger.debug("Could not query Windows gateway Scheduled Task", exc_info=True)
         print("  ⚠ Windows gateway Scheduled Task query failed during post-update recovery")
         return []
     if state != "registered":
@@ -1486,6 +1489,7 @@ def _recover_windows_gateway_via_schtasks(
             print("  ⚠ Windows gateway Scheduled Task Action could not be verified as Hermes-managed")
             return []
     except Exception:
+        logger.debug("Could not verify Windows gateway Scheduled Task Action", exc_info=True)
         print("  ⚠ Windows gateway Scheduled Task Action could not be verified as Hermes-managed")
         return []
     # XML lookup may also race a successful direct start. Probe once more,
@@ -1502,6 +1506,7 @@ def _recover_windows_gateway_via_schtasks(
             else gateway_windows._run_scheduled_task_once()
         )
     except Exception:
+        logger.debug("Could not trigger Windows gateway Scheduled Task", exc_info=True)
         print("  ⚠ Windows gateway Scheduled Task trigger rejected during post-update recovery")
         return []
     if code != 0:
@@ -1640,7 +1645,7 @@ def _verify_relaunched_gateways_alive(token: dict, profiles: dict, unmapped: lis
     unmapped_pids = [ready[("unmapped", i)][0] for i in range(len(unmapped)) if ("unmapped", i) in ready]
     if unmapped_pids:
         with suppress(Exception):
-            gateway_windows._write_unmapped_start_attestation(unmapped_pids, "post-update unmapped relaunch")
+            gateway_windows_attestation._write_unmapped_start_attestation(unmapped_pids, "post-update unmapped relaunch")
     if ready_profiles:
         print(f"\n  ✓ Restarting Windows gateway profile(s): {', '.join(ready_profiles)}")
     if ready_unmapped:

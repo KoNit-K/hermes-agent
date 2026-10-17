@@ -21,12 +21,8 @@ from unittest.mock import patch
 
 import pytest
 
-import hermes_cli.gateway as gateway
-import hermes_cli.gateway_windows as gateway_windows
 import hermes_cli.main as hm
-import hermes_cli.main_install_repair as main_install_repair
-import hermes_cli.update_inventory as update_inventory
-from hermes_cli import update_cmd, update_cmd_windows
+from hermes_cli import gateway, gateway_windows, main_install_repair, update_cmd, update_cmd_windows, update_inventory, gateway_windows_attestation
 from hermes_cli.update_cmd import _resume_windows_gateways_after_update
 from hermes_cli.update_cmd_windows import _verify_relaunched_gateways_alive
 
@@ -892,7 +888,7 @@ class TestRegisteredTaskRecoveryFollowups:
         assert not (tmp_path / "state" / "gateway.start-attestation.json").exists()
         assert token["unmapped"] == []
         assert token["resume_needed"] is False
-        warning = gateway_windows.check_unmapped_start_attestation(current_pids=[])
+        warning = gateway_windows_attestation.check_unmapped_start_attestation(current_pids=[])
         assert warning is not None and "PID 202" in warning
         assert "Task Scheduler" not in warning
 
@@ -1281,12 +1277,12 @@ class TestUnmappedStartAttestation:
     @staticmethod
     def _write_attestation(monkeypatch, tmp_path) -> None:
         monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: str(tmp_path))
-        gateway_windows._write_unmapped_start_attestation([777], "post-update recovery")
+        gateway_windows_attestation._write_unmapped_start_attestation([777], "post-update recovery")
 
     def test_unrelated_live_profile_does_not_suppress_dead_unmapped_warning(self, monkeypatch, tmp_path):
         self._write_attestation(monkeypatch, tmp_path)
 
-        warning = gateway_windows.check_unmapped_start_attestation(current_pids=[101])
+        warning = gateway_windows_attestation.check_unmapped_start_attestation(current_pids=[101])
 
         assert warning is not None
         assert "PID 777" in warning
@@ -1294,12 +1290,12 @@ class TestUnmappedStartAttestation:
     def test_live_attested_pid_suppresses_unmapped_warning(self, monkeypatch, tmp_path):
         self._write_attestation(monkeypatch, tmp_path)
 
-        assert gateway_windows.check_unmapped_start_attestation(current_pids=[777, 101]) is None
+        assert gateway_windows_attestation.check_unmapped_start_attestation(current_pids=[777, 101]) is None
 
     def test_all_dead_pids_return_unmapped_warning(self, monkeypatch, tmp_path):
         self._write_attestation(monkeypatch, tmp_path)
 
-        warning = gateway_windows.check_unmapped_start_attestation(current_pids=[])
+        warning = gateway_windows_attestation.check_unmapped_start_attestation(current_pids=[])
 
         assert warning is not None
         assert "PID 777" in warning

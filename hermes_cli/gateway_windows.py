@@ -7,6 +7,7 @@ hidden-console launcher instead of ``schtasks /Run`` so start/restart behavior i
 
 from __future__ import annotations
 
+import codecs
 import ctypes
 import json
 import locale
@@ -19,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
@@ -96,6 +97,11 @@ def _decode_schtasks_output(data: bytes) -> str:
     Scheduled-Task drift check could never settle (#116193). Strict UTF-8 first (ASCII and genuine
     UTF-8 output pass; legacy multi-byte text fails loudly), then the native code pages, then a lossy
     fallback so a reader thread never raises."""
+    if data[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
+        try:
+            return data.decode("utf-16")  # a genuine UTF-16 write (BOM) decodes as such, never as a code page
+        except UnicodeDecodeError:
+            pass  # malformed UTF-16 falls through to the same fallbacks as any other bytes
     for encoding in ("utf-8", *_windows_console_encodings()):
         try:
             return data.decode(encoding)
@@ -182,7 +188,7 @@ def _quote_vbs_string(value: str) -> str:
 
 # ── schtasks.exe wrapper
 
-def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
+def _exec_schtasks(args: list[str], timeout: float = _SCHTASKS_TIMEOUT_S) -> tuple[int, str, str]:
     """Run ``schtasks.exe`` with a hard timeout. Return (code, stdout, stderr); a wedge returns
     code=124 with a synthetic stderr so the fallback regex matches."""
     _assert_windows()
@@ -194,7 +200,7 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
         # UnicodeDecodeError from subprocess' reader threads. CREATE_NO_WINDOW: no flashing console under a TUI.
         proc = subprocess.run(
             [schtasks, *args], capture_output=True, text=False,
-            timeout=_SCHTASKS_TIMEOUT_S, creationflags=windows_hide_flags(),
+            timeout=timeout, creationflags=windows_hide_flags(),
             check=False,
         )
         return (
@@ -203,7 +209,7 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
             _decode_schtasks_output(proc.stderr or b""),
         )
     except subprocess.TimeoutExpired:
-        return (124, "", f"schtasks timed out after {_SCHTASKS_TIMEOUT_S}s")
+        return (124, "", f"schtasks timed out after {timeout}s")
     except OSError as e:
         return (1, "", f"schtasks invocation failed: {e}")
 
@@ -1076,7 +1082,6 @@ def _wait_for_gateway_ready(
 # ---------------------------------------------------------------------------
 
 _START_ATTESTATION_RELATIVE = ("state", "gateway.start-attestation.json")
-_UNMAPPED_START_ATTESTATION_RELATIVE = ("state", "gateway.unmapped-start-attestation.json")
 
 
 def _start_attestation_path(home: Path | None = None) -> Path:
@@ -1108,42 +1113,6 @@ def _write_start_attestation(pids: list[int], via: str, home: Path | None = None
         tmp.replace(path)
     except Exception:
         logger.debug("Failed to write gateway start attestation", exc_info=True)
-
-
-def _write_unmapped_start_attestation(pids: list[int], via: str) -> None:
-    """Persist a diagnostic without assigning an unmapped gateway a profile."""
-    try:
-        path = _hermes_home().joinpath(*_UNMAPPED_START_ATTESTATION_RELATIVE)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "pids": [int(p) for p in pids], "via": via,
-            "ts": datetime.now(timezone.utc).isoformat(), "generation": uuid.uuid4().hex,
-            "identity": "unmapped",
-        }
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(path)
-    except Exception:
-        logger.debug("Failed to write unmapped gateway start attestation", exc_info=True)
-
-
-def _unmapped_start_attestation_path() -> Path:
-    """A neutral marker for a process that could not be assigned a profile/home."""
-    return _hermes_home().joinpath(*_UNMAPPED_START_ATTESTATION_RELATIVE)
-
-
-def _read_unmapped_start_attestation() -> object | None:
-    try:
-        return json.loads(_unmapped_start_attestation_path().read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-
-
-def _clear_unmapped_start_attestation() -> None:
-    try:
-        _unmapped_start_attestation_path().unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _clear_start_attestation(home: Path | None = None) -> None:
@@ -1299,41 +1268,6 @@ def check_start_attestation(current_pids: list[int] | None = None) -> str | None
     return _format_attestation_warning(attested, data)
 
 
-def check_unmapped_start_attestation(current_pids: list[int] | None = None) -> str | None:
-    """Surface a one-shot diagnostic for a previously verified unmapped gateway.
-
-    This intentionally does not use a profile's ledger or task hint: an
-    unmapped process has no trustworthy home and must not be represented as
-    the active/default profile.  It is diagnostic-only, unlike profile
-    attestations which can participate in a cold-start plan.
-    """
-    data = _read_unmapped_start_attestation()
-    if not isinstance(data, dict) or data.get("identity") != "unmapped":
-        if data is not None:
-            _clear_unmapped_start_attestation()
-        return None
-    attested = _attested_pids_from(data)
-    if not attested or not _attestation_within_horizon(data):
-        _clear_unmapped_start_attestation()
-        return None
-    if current_pids is None:
-        try:
-            from hermes_cli.gateway import find_gateway_pids
-
-            current_pids = list(find_gateway_pids(all_profiles=True))
-        except Exception:
-            return None
-    _clear_unmapped_start_attestation()
-    if set(attested) & set(current_pids):
-        return None
-    via = data.get("via") or "post-update recovery"
-    ts = data.get("ts") or "unknown time"
-    return (
-        f"⚠ A previously verified unmapped gateway ({via}, {ts}) is no longer running "
-        f"(PID {', '.join(map(str, attested))}). Its profile could not be determined."
-    )
-
-
 def _format_attestation_warning(attested: list[int], data: dict) -> str:
     via = data.get("via") or "direct spawn"
     ts = data.get("ts") or "unknown time"
@@ -1371,12 +1305,16 @@ def _print_start_attestation_warning() -> None:
     try:
         warning = check_start_attestation()
     except Exception:
+        logger.debug("Could not check gateway start attestation", exc_info=True)
         warning = None
     if warning:
         print(warning)
     try:
+        from hermes_cli.gateway_windows_attestation import check_unmapped_start_attestation
+
         warning = check_unmapped_start_attestation()
     except Exception:
+        logger.debug("Could not check unmapped gateway attestation", exc_info=True)
         return
     if warning:
         print(warning)
@@ -1452,12 +1390,10 @@ def uninstall() -> None:
 # ── Status / start / stop / restart
 
 def _task_registration_state(*, home: Path | None = None) -> str:
-    """``registered`` or conservative ``query-failed`` for a task lookup.
+    """Return ``registered`` or ``query-failed`` for a task lookup.
 
-    ``schtasks /Query`` uses the same non-zero code for a missing task and
-    several transport failures.  The bool public API remains intentionally
-    lossy, but update recovery must never turn an indeterminate lookup into a
-    claim that no task exists.
+    ``schtasks /Query`` conflates missing tasks with transport errors. The
+    bool API is lossy; recovery must treat an uncertain lookup as failure.
     """
     task_name = get_task_name(home) if home is not None else get_task_name()
     code, _out, _err = _exec_schtasks(["/Query", "/TN", task_name])
@@ -1494,6 +1430,29 @@ def _query_scheduled_task_xml(task_name: str) -> str | None:
         logger.debug("Could not query Scheduled Task XML for %r: %s", task_name, (err or out).strip())
         return None
     return out
+
+
+# The install probe runs before the desktop backend says ready: a wedged schtasks must not hold that.
+_TASK_PROBE_TIMEOUT_S = 5
+
+
+def registered_task_launchers() -> list[str]:
+    """The scripts this OS user's ``Hermes_Gateway*`` Scheduled Tasks start (``install_state``). A task
+    install removes the Startup-folder entries, so for a custom home the task is all that still names
+    it. Empty off Windows, and when Task Scheduler does not answer, as for an unreadable Startup entry."""
+    if sys.platform != "win32":
+        return []
+    from hermes_cli.gateway_service_owner import service_definition_launchers
+
+    code, listing, _err = _exec_schtasks(["/Query", "/FO", "CSV", "/NH"], timeout=_TASK_PROBE_TIMEOUT_S)
+    names = re.findall(rf'^"\\({_TASK_NAME_DEFAULT}[^"\\]*)"', listing, flags=re.MULTILINE) if code == 0 else []
+    launchers: list[str] = []
+    for name in dict.fromkeys(names):
+        code, xml, _err = _exec_schtasks(["/Query", "/TN", name, "/XML"], timeout=_TASK_PROBE_TIMEOUT_S)
+        leaves = (_task_xml_leaf_values(xml) if code == 0 else None) or {}
+        command = leaves.get("Task/Actions/Exec/Command", "").strip('"')
+        launchers += service_definition_launchers(f'"{command}" {leaves.get("Task/Actions/Exec/Arguments", "")}')
+    return launchers
 
 
 def _task_xml_leaf_values(xml: str) -> dict[str, str] | None:
