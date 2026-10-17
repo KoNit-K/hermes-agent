@@ -950,6 +950,27 @@ const SELF_PROFILE_QUERY_KEYS_BY_PATH: Record<string, string[]> = {
   '/api/profiles/sessions/sidebar': ['recents_profile']
 }
 
+// These are the only `/api/profiles/<suffix>` routes where the suffix is a
+// collection operation rather than a profile name. Keep this aligned with the
+// native grant router: named-profile paths mint a ticket for the path segment,
+// so adding the ambient sidebar profile would make the request self-contradict.
+const PROFILE_COLLECTION_ROUTES = new Set([
+  'active', 'import', 'projects/tree', 'sessions', 'sessions/pull-requests', 'sessions/sidebar'
+])
+
+function namesProfileInPath(pathname: string): boolean {
+  const prefix = '/api/profiles/'
+
+  if (!pathname.startsWith(prefix)) {
+    return false
+  }
+
+  const suffix = pathname.slice(prefix.length).replace(/\/+$/, '')
+  const name = suffix.split('/', 1)[0]
+
+  return Boolean(name) && !PROFILE_COLLECTION_ROUTES.has(suffix)
+}
+
 /**
  * Translate an explicit self-profile query from a Desktop routing alias to the
  * backend's own profile namespace (a managed SSH `remoteProfile` can map local
@@ -1028,7 +1049,7 @@ function pathWithProfileScope(path, profile) {
     return path
   }
 
-  if (parsed.searchParams.has('profile')) {
+  if (parsed.searchParams.has('profile') || namesProfileInPath(parsed.pathname)) {
     return path
   }
 

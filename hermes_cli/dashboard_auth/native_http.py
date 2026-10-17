@@ -14,6 +14,10 @@ from starlette.responses import JSONResponse
 
 HEADER = 'x-hermes-gateway-ticket'
 
+_PROFILE_COLLECTION_ROUTES = frozenset({
+    'active', 'import', 'projects/tree', 'sessions', 'sessions/pull-requests', 'sessions/sidebar',
+})
+
 
 @contextmanager
 def native_profile_scope(request):
@@ -61,8 +65,10 @@ async def _check_profile_scope(request, profile_id):
     path = request.url.path.rstrip('/')
     current = not path.startswith(('/api/profiles/', '/api/cron/jobs', '/api/sessions',
                                    '/api/fs/download', '/api/fs/read-data-url'))
-    for value in request.query_params.getlist('profile'):
-        _own_profile(value, profile_id, current=current)
+    named_profile = _named_profile_in_path(path)
+    if named_profile is None:
+        for value in request.query_params.getlist('profile'):
+            _own_profile(value, profile_id, current=current)
     content_type = request.headers.get('content-type', '').split(';', 1)[0].strip().lower()
     if not content_type or content_type == 'application/json' or (
             content_type.startswith('application/') and content_type.endswith('+json')):
@@ -70,7 +76,7 @@ async def _check_profile_scope(request, profile_id):
             body = await request.json()
         except (ValueError, UnicodeError):
             body = None  # Route validation still owns malformed JSON.
-        if isinstance(body, dict) and 'profile' in body:
+        if isinstance(body, dict) and 'profile' in body and named_profile is None:
             _own_profile(body['profile'], profile_id, current=current)
     if path.startswith('/api/cron/jobs') and not request.query_params.get('profile'):
         # Job-id discovery and the default list scan other profiles. Require an
@@ -98,10 +104,27 @@ async def _check_profile_scope(request, profile_id):
         elif suffix in {'active', 'import'}:
             raise PermissionError('profile_scope_mismatch')
         else:
-            _own_profile(suffix.split('/', 1)[0], profile_id, current=False)
-            if request.method in {'PATCH', 'DELETE'}:
+            _own_profile(named_profile, profile_id, current=False)
+            if request.method in {'PATCH', 'DELETE'} and named_profile == 'default':
                 # Moving/deleting the reserved home is not an in-place operation.
                 raise PermissionError('profile_scope_mismatch')
+
+
+def _named_profile_in_path(path):
+    """Return the path-bound profile, or None for collection routes.
+
+    A native ticket for a named profile route is minted for that path segment.
+    The route handlers likewise resolve their target from the path, so an
+    ambient profile selector cannot broaden authority and must not reject a
+    correctly routed Desktop request.
+    """
+    prefix = '/api/profiles/'
+    if not path.startswith(prefix):
+        return None
+    suffix = path.removeprefix(prefix).strip('/')
+    if not suffix or suffix in _PROFILE_COLLECTION_ROUTES:
+        return None
+    return suffix.split('/', 1)[0] or None
 
 
 def _redeem_http_ticket(store, ticket, request):
