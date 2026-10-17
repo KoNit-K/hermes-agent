@@ -409,6 +409,31 @@ def test_atomic_write_leaves_no_staging_file_when_swap_fails(monkeypatch, tmp_pa
     assert sorted(p.name for p in startup.iterdir()) == []
 
 
+def test_atomic_write_marks_vbs_launchers_as_utf16(tmp_path):
+    """WSH needs a BOM to preserve a non-ASCII HERMES_HOME (#140683)."""
+    launcher = tmp_path / "Hermes_Gateway.vbs"
+    gateway_windows._atomic_write(launcher, 'WScript.Echo "个人程序"\r\n', launcher.with_suffix(".tmp"))
+
+    data = launcher.read_bytes()
+    assert data.startswith(b"\xff\xfe")
+    assert data.decode("utf-16") == 'WScript.Echo "个人程序"\r\n'
+
+
+def test_atomic_write_uses_windows_ansi_for_cmd_launchers(monkeypatch, tmp_path):
+    """cmd.exe reads its generated compatibility wrapper through the ANSI code page (#140683)."""
+    seen = {}
+    launcher = tmp_path / "Hermes_Gateway.cmd"
+    staging = launcher.with_suffix(".tmp")
+
+    monkeypatch.setattr(gateway_windows.os, "name", "nt")
+    monkeypatch.setattr(Path, "write_text", lambda _path, _content, **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(Path, "replace", lambda *_args: None)
+
+    gateway_windows._atomic_write(launcher, "@echo off\r\n", staging)
+
+    assert seen["encoding"] == "mbcs"
+
+
 def test_uninstall_and_reinstall_sweep_stale_startup_staging_file(monkeypatch, tmp_path):
     """Debris from a pre-fix failed swap is removed by uninstall() and by an install() that takes the
     Scheduled Task path (which never rewrites the Startup folder itself)."""

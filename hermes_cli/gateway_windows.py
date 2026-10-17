@@ -488,7 +488,17 @@ def _atomic_write(path: Path, content: str, tmp: Path) -> None:
     ``Hermes_Gateway.tmp`` pops up in Notepad after every sign-in (#114093).
     """
     try:
-        tmp.write_text(content, encoding="utf-8", newline="")
+        # WSH only recognizes Unicode launchers when they carry a UTF-16 BOM; otherwise it
+        # decodes .vbs through the system ANSI code page. cmd.exe likewise reads its wrapper
+        # through that ANSI code page, so neither launcher can safely be BOM-less UTF-8.
+        suffix = path.suffix.lower()
+        if suffix == ".vbs":
+            encoding = "utf-16"
+        elif suffix == ".cmd" and os.name == "nt":
+            encoding = "mbcs"
+        else:
+            encoding = "utf-8"
+        tmp.write_text(content, encoding=encoding, newline="")
         tmp.replace(path)
     finally:
         try:

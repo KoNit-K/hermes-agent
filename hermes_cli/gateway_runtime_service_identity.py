@@ -28,6 +28,13 @@ def _unverified() -> NoReturn:
     raise ValueError("service_identity_unverified")
 
 
+def _decode_vbs_definition(data: bytes) -> str:
+    """Decode the supported on-disk forms of a Windows gateway launcher."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    return data.decode("utf-8")
+
+
 def _absolute(value: str) -> Path:
     if not value or not Path(value).is_absolute():
         _unverified()
@@ -379,6 +386,6 @@ def verify_windows_task(xml: str | bytes, home: Path, account: str, sid: str) ->
     script = _absolute(match[1])
     if script.suffix.lower() != '.vbs':
         _unverified()
-    configured, argv = _vbs_identity(read_definition(script).decode("utf-8"))
+    configured, argv = _vbs_identity(_decode_vbs_definition(read_definition(script)))
     verify_home(home, configured)
     verify_gateway_argv(argv, home)

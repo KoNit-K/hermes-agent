@@ -251,7 +251,7 @@ def _as_schtasks_exports(xml):
 
 
 @pytest.mark.parametrize("case,reason", [
-    ("bound", None), ("utf16", None), ("wrong_home", "profile_mismatch"),
+    ("bound", None), ("utf16", None), ("utf16_launcher", None), ("wrong_home", "profile_mismatch"),
     ("wrong_user", "service_account_mismatch"), ("missing_user", "service_identity_unverified"),
     ("extra_action", "service_identity_unverified"), ("disabled", "service_disabled"),
     ("unknown_script", "service_identity_unverified"), ("malformed_xml", "service_identity_unverified"),
@@ -284,6 +284,8 @@ def test_task_xml_binds_actual_action_and_principal(case, reason, tmp_path):
         xml = xml.replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>')
     if case == 'utf16':
         xml = xml.encode('utf-16')
+    if case == 'utf16_launcher':
+        script.write_text(script.read_text(encoding='utf-8'), encoding='utf-16')
     if case == 'malformed_xml':
         xml = '<Task>'
     if case == 'unknown_script':
