@@ -252,6 +252,14 @@ def nous_rate_limit_guard(
             _anonymous = anon_auth.is_anonymous_agent(agent)
             _nous_remaining = nous_rate_limit_remaining(anonymous=_anonymous)
             if _nous_remaining is not None and _nous_remaining > 0:
+                if getattr(agent, "_provider_fallback_active", False) and agent._restore_primary_runtime():
+                    # The shared breaker belongs to the Nous fallback. Rebuild this iteration
+                    # for an eligible primary instead of ending it on that fallback's cooldown.
+                    active_system_prompt = _arm_fallback_restart(
+                        agent, api_messages, active_system_prompt, _retry)
+                    _retry.has_retried_429 = False
+                    retry_count = compression_attempts = 0
+                    return _verdict("break")
                 reset = _fmt_nous_remaining(_nous_remaining)
                 if _anonymous:
                     _nous_msg = anon_auth.FREE_TIER_RATE_LIMIT_CHAT.format(

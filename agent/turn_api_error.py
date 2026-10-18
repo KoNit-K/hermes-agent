@@ -181,6 +181,20 @@ def handle_api_error(
     _is_zai_coding_overload = _ce.is_zai_coding_overload
     if _ce.provider_overflow_recovery_pending:
         _provider_overflow_recovery_pending = True
+    if (
+        is_rate_limited
+        and _wrapped_output_cap_budget is None
+        and _ce.action in ("continue", "fallthrough")
+        and getattr(agent, "_provider_fallback_active", False)
+        and agent._restore_primary_runtime()
+    ):
+        # Routing records a genuine Nous 429 before its early return. Restore before either
+        # that guard handoff or ordinary backoff, rebuilding for the primary's context window.
+        from agent.conversation_loop import _arm_fallback_restart
+        active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
+        _retry.has_retried_429 = False
+        retry_count = compression_attempts = 0
+        return _verdict("break")
     if _ce.action != "fallthrough":
         return _verdict(_ce.action, _ce.result)
 
@@ -356,17 +370,6 @@ def settle_unrecovered_error(
     # An attended session on the free model does not sit through a long cooldown: end the attempt
     # cycle now (fallback, else the reset time and the ways forward); the copy counts attempts made.
     attempts_made = min(retry_count, max_retries)
-    if (
-        is_rate_limited
-        and getattr(agent, "_provider_fallback_active", False)
-        and agent._restore_primary_runtime()
-    ):
-        # The fallback's cooldown belongs to that route, not the original primary. Re-probe a
-        # recovered primary before parking this turn on the fallback's Retry-After window.
-        logger.info("Fallback rate-limited; restored the primary runtime for an immediate retry")
-        _retry.has_retried_429 = False
-        retry_count = 0
-        return _verdict("continue")
     if is_rate_limited and retry_count < max_retries and free_tier_cooldown_ends_turn(agent, api_error, _base):
         logger.info("%sFree-tier cooldown outlasts the attended wait — ending retries after attempt %s",
                     agent.log_prefix, retry_count)
