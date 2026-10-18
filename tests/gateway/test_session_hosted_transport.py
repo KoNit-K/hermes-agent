@@ -1,5 +1,6 @@
 """Real private owner sockets; no public identity or foreign database access."""
 import asyncio
+import hashlib
 import json
 import threading
 from dataclasses import asdict
@@ -39,7 +40,9 @@ def test_authenticated_owner_transport_rechecks_source_and_cold_binding(hosted_o
         if operation in {'submit', 'execute'}:
             assert params['task'] == asdict(task)
             assert params['execution_generation'] == 1
-            if operation == 'submit' and params['prompt'] != 'input':
+            if operation == 'submit' and (params.get('prompt') != 'input'
+                                          and params.get('prompt_sha256')
+                                          != hashlib.sha256(b'input').hexdigest()):
                 raise RuntimeStoreError('permission_denied')
         return {'owner': 'room-owner', 'target_home': authority.profile_id, 'prompt': 'input', 'attachments': []}
     servers = [_server(source), _server(target)]
@@ -91,7 +94,7 @@ def test_authenticated_owner_transport_rechecks_source_and_cold_binding(hosted_o
 class _SourceTask:
     """One committed attachment bound to a running task on a real source owner."""
 
-    def __init__(self, tmp_path, monkeypatch, data, *, name='note.txt', mime='text/plain', kind='file'):
+    def __init__(self, tmp_path, monkeypatch, data, *, prompt='frozen', name='note.txt', mime='text/plain', kind='file'):
         import time
         from types import SimpleNamespace
         from gateway.session_hosted_service import CanonicalHostedRoomService
@@ -120,7 +123,7 @@ class _SourceTask:
         self.bound = [{**manifest[0], 'event_id': 'event'}]
         self.identity = tasks.TaskIdentity('room', 'task', 'thread', 'turn')
         payload = {'target_profile': 'other', 'target_member_id': 'two', 'source_event_seq': 1,
-                   'prompt': 'frozen', 'attachments': self.bound}
+                   'prompt': prompt, 'attachments': self.bound}
         tasks.admit_task(db.db_path, self.identity, payload=payload, clock=time.time)
         lease = tasks.acquire_lease(db.db_path, room_id='room', gateway_id=self.gateway, authority_epoch=1,
                                     process_generation='test', ttl_seconds=30, clock=time.time)
@@ -128,7 +131,7 @@ class _SourceTask:
         self.task, = tasks.list_tasks(db.db_path, room_id='room')
         self.selector = dict(room_id='room', member_id='two', profile='other')
         self.params = dict(task=asdict(self.identity), execution_generation=self.task['execution_generation'],
-                           prompt='frozen', attachments=self.bound, _target_home=self.homes['other'])
+                           prompt=prompt, attachments=self.bound, _target_home=self.homes['other'])
         self.binding = {'source_home': str(tmp_path), 'target_home': self.homes['other'], 'selector': self.selector}
 
 
@@ -181,6 +184,38 @@ def test_source_attestation_binds_bytes_to_task_member_and_current_home(tmp_path
         homes.clear()
         with pytest.raises(RuntimeStoreError, match='permission_denied'):
             service._resolve_member_transport(binding, task)
+
+
+def test_cjk_prompt_within_room_budget_is_admitted_over_private_owner_socket(hosted_owner, tmp_path, monkeypatch):
+    """Regression for #141014: JSON escaping must not spend the owner request budget."""
+    import hashlib
+    from gateway import session_hosted_transport as transport
+    from gateway.session_hosted_transport import HostedRoomOwnerRPC
+    from hermes_state_runtime import RuntimeStoreError
+    prompt = '漢' * 22000
+    assert len(prompt.encode()) < 128 * 1024
+    source = _SourceTask(tmp_path, monkeypatch, b'document bytes', prompt=prompt)
+    digest = hashlib.sha256(prompt.encode()).hexdigest()
+    with source.db:
+        assert source.service.attest(source.selector, 'submit', {
+            **source.params, 'prompt_sha256': digest, 'prompt': None})['prompt'] == prompt
+        with pytest.raises(RuntimeStoreError, match='permission_denied'):
+            source.service.attest(source.selector, 'submit', {
+                **source.params, 'prompt_sha256': '0' * 64, 'prompt': None})
+        captured = []
+        monkeypatch.setattr(transport, 'owner_request', lambda home, verb, params: captured.append(params) or {
+            'admission_id': 'admission'})
+        rpc = HostedRoomOwnerRPC(home=tmp_path, source_home=tmp_path, **source.selector)
+        receipt = rpc._call('submit', profile='other', source='bot_room', session_id='session', prompt=prompt,
+                            task=source.identity, execution_generation=1, attachments=source.bound)
+        assert receipt['admission_id'] == 'admission'
+        sent = captured[0]['params']
+        assert sent['prompt_sha256'] == digest
+        assert 'prompt' not in sent
+        assert len(json.dumps({'protocol': 1, 'id': 1, 'verb': 'hosted-producer', 'params': {
+            **captured[0], 'params': {**sent, 'prompt': prompt}}}).encode()) > 65536
+        assert len(json.dumps({'protocol': 1, 'id': 1, 'verb': 'hosted-producer',
+                               'params': captured[0]}).encode()) < 65536
 
 
 def test_source_chunk_reads_only_the_requested_slice(tmp_path, monkeypatch):

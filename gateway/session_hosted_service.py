@@ -1,6 +1,7 @@
 """Authority-bound hosted service; no legacy session server is constructed."""
 import asyncio
 from contextlib import nullcontext
+import hashlib
 from pathlib import Path
 
 from gateway.session_contract import Principal
@@ -63,7 +64,10 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
                        and t['payload'].get('target_member_id', t['payload']['target_profile']) == member
                        and t['payload']['target_profile'] == profile
                        and (operation == 'execute' or (
-                           t['payload']['prompt'] == params.get('prompt')
+                           (t['payload']['prompt'] == params.get('prompt') or (
+                               type(params.get('prompt_sha256')) is str
+                               and hashlib.sha256(t['payload']['prompt'].encode()).hexdigest()
+                               == params['prompt_sha256']))
                            and t['payload'].get('attachments', []) == (params.get('attachments') or [])))]
             if len(matches) != 1:
                 raise RuntimeStoreError('permission_denied')

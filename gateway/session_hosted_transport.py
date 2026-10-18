@@ -33,6 +33,15 @@ _CAPS = frozenset({'session:create', 'session:read', 'session:submit',
                    'session:control', 'session:approve'})
 
 
+def _attestation_params(params):
+    """Bind prompt bytes without repeating them in a capped control request."""
+    prompt = params.get('prompt')
+    if not isinstance(prompt, str):
+        return params
+    return {**{key: value for key, value in params.items() if key != 'prompt'},
+            'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest()}
+
+
 def owner_request(home, verb, params, *, timeout=30):
     """Authenticated private socket exchange; no owner-start or storage fallback."""
     home = Path(home)
@@ -85,7 +94,7 @@ def _attest(binding, operation, params):
     try:
         result = owner_request(binding['source_home'], 'hosted-attest', {
             'selector': binding['selector'], 'operation': operation,
-            'params': {**params, '_target_home': binding['target_home']}})
+            'params': {**_attestation_params(params), '_target_home': binding['target_home']}})
     except RuntimeStoreError:
         raise
     except (OSError, ValueError) as exc:
@@ -250,6 +259,8 @@ def install_hosted_transport(server, authority, loop, *, attest):
         if operation == 'submit':
             rpc.hosted_attachment_data = _attachment_data(binding, attested, params)
             params['attachments'] = attested['attachments'] or None
+            params['prompt'] = attested['prompt']
+            params.pop('prompt_sha256', None)
             params['task'] = TaskIdentity(**params['task'])
             params['on_terminal'] = lambda value: None
         result = rpc._call(operation, **params)
@@ -317,7 +328,7 @@ class HostedRoomOwnerRPC(HostedRoomAuthorityRPC):
         if isinstance(params.get('task'), TaskIdentity):
             params['task'] = asdict(params['task'])
         result = owner_request(self.home, 'hosted-producer', {
-            **self.binding, 'operation': operation, 'params': params})
+            **self.binding, 'operation': operation, 'params': _attestation_params(params)})
         if operation in {'create', 'resume', 'resolve_exact'} and result is not None:
             from gateway.session_contract import SessionRef
             self.ref = SessionRef(str(self.home), result['session_id'])
