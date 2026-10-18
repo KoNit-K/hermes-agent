@@ -110,7 +110,7 @@ class TestSignalConnectCleanup:
         mock_client.get = AsyncMock(return_value=MagicMock(status_code=200))
         mock_client.aclose = AsyncMock()
 
-        with patch("gateway.platforms.signal.httpx.AsyncClient", return_value=mock_client), \
+        with patch("plugins.platforms.signal.adapter.httpx.AsyncClient", return_value=mock_client), \
              patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
              patch.object(adapter, "_write_runtime_status_safe") as write_status:
             try:
