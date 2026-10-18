@@ -108,6 +108,15 @@ describe('ContextUsagePanel', () => {
     expect(screen.getByText('Conversation')).toBeTruthy()
   })
 
+  it('offers a compact action that targets the session behind the meter', () => {
+    const onCompress = vi.fn()
+
+    render(<ContextUsagePanel breakdown={breakdown} loading={false} onCompress={onCompress} usage={usage} />)
+
+    screen.getByRole('button', { name: 'Compress conversation' }).click()
+    expect(onCompress).toHaveBeenCalledOnce()
+  })
+
   it('reports the live compression count, zero included, and never invents one', () => {
     const { rerender } = render(<ContextUsagePanel breakdown={breakdown} loading={false} usage={usage} />)
 

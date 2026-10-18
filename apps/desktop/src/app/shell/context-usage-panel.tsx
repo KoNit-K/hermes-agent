@@ -9,6 +9,8 @@ import type { ContextBreakdown, ContextUsageCategory, UsageStats } from '@/types
 interface ContextUsagePanelProps {
   breakdown: ContextBreakdown | null
   loading: boolean
+  /** Runs the existing session compression flow for the session this meter describes. */
+  onCompress?: () => void
   usage: UsageStats
 }
 
@@ -17,7 +19,7 @@ interface ContextUsagePanelProps {
  *  popover opens with its numbers already in hand. `usage` is the gauge's
  *  merged figure — measured occupancy when the backend has it, the estimate
  *  otherwise — so the header and the bar can never disagree. */
-export function ContextUsagePanel({ breakdown, loading, usage }: ContextUsagePanelProps) {
+export function ContextUsagePanel({ breakdown, loading, onCompress, usage }: ContextUsagePanelProps) {
   const { t } = useI18n()
   const copy = t.shell.statusbar.contextUsagePanel
   const contextMax = usage.context_max ?? 0
@@ -66,6 +68,16 @@ export function ContextUsagePanel({ breakdown, loading, usage }: ContextUsagePan
       </p>
 
       <ContextUsageBar categories={categories} segmentTotal={segmentTotal} />
+
+      {onCompress && (
+        <button
+          className="self-start text-[0.6875rem] font-medium text-primary hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          onClick={onCompress}
+          type="button"
+        >
+          {t.assistant.thread.errorCompressConversation}
+        </button>
+      )}
 
       <ul className="flex flex-col gap-1.5">
         {categories.map(category => (

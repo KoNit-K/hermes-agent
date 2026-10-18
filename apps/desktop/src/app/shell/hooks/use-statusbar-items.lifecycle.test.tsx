@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { renderMessageStream } from '@/app/session/hooks/use-message-stream/test-harness'
 import { $activeSessionId, $busy, $currentUsage, $selectedStoredSessionId } from '@/store/session'
+import { setSessionTileDelegate } from '@/store/session-states'
 import { $statusbarHiddenIds } from '@/store/statusbar-prefs'
 import type { ContextBreakdown, UsageStats } from '@/types/hermes'
 
@@ -81,6 +82,7 @@ describe('statusbar context usage lifecycle', () => {
 
   afterEach(() => {
     cleanup()
+    setSessionTileDelegate(null as never)
     $statusbarHiddenIds.set(hidden)
     $activeSessionId.set(null)
     $selectedStoredSessionId.set(null)
@@ -121,6 +123,18 @@ describe('statusbar context usage lifecycle', () => {
 
     await act(async () => pending[1].resolve(breakdown(45_000)))
     expect(meter().label).toBe('45k/100k')
+  })
+
+  it('runs the existing compression command for the session shown by the meter', () => {
+    const executeSlash = vi.fn().mockResolvedValue(undefined)
+    setSessionTileDelegate({ executeSlash } as never)
+    const { meter } = mountStatusbar()
+    const content = meter().menuContent
+    const panel = render(typeof content === 'function' ? content(vi.fn()) : content)
+
+    panel.getByRole('button', { name: 'Compress conversation' }).click()
+
+    expect(executeSlash).toHaveBeenCalledWith('/compress', 'runtime-a', { typed: false })
   })
 
   it('does not restore the pre-turn snapshot when the idle refresh fails', async () => {

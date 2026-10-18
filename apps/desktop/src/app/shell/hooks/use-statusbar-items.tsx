@@ -20,6 +20,7 @@ import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import { statusBarGatewayHealth } from '@/lib/gateway-health-pill'
+import { triggerHaptic } from '@/lib/haptics'
 import {
   Activity,
   AlertCircle,
@@ -46,6 +47,7 @@ import { $freeTierSignInOpen, $freeTierStatus, FREE_TIER_MODEL } from '@/store/f
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
 import { requestGatewayForProfile } from '@/store/gateway'
 import { revealFileInTree } from '@/store/layout'
+import { notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $profileRailVisible } from '@/store/profile-rail-prefs'
 import { $projectTree, projectNameForCwd } from '@/store/projects'
@@ -63,7 +65,13 @@ import {
   idsShareLineage
 } from '@/store/session'
 import { $focusedStoredSessionId } from '@/store/session-focus'
-import { $focusedRuntimeId, $focusedSessionState, $sessionTiles, isSessionRemote } from '@/store/session-states'
+import {
+  $focusedRuntimeId,
+  $focusedSessionState,
+  $sessionTiles,
+  isSessionRemote,
+  sessionTileDelegate
+} from '@/store/session-states'
 import { $statusbarHiddenIds } from '@/store/statusbar-prefs'
 import { $subagentsBySession, activeSubagentCount, failedSubagentCount } from '@/store/subagents'
 import { $gatewayRestarting } from '@/store/system-actions'
@@ -339,6 +347,24 @@ export function useStatusbarItems({
 
   const contextUsage = useMemo(() => usageContextLabel(gaugeUsage), [gaugeUsage])
   const contextBar = useMemo(() => contextBarLabel(gaugeUsage), [gaugeUsage])
+
+  const compactCurrentSession = useCallback(() => {
+    if (!activeSessionId) {
+      return
+    }
+
+    const delegate = sessionTileDelegate()
+
+    if (!delegate) {
+      return
+    }
+
+    triggerHaptic('submit')
+    void delegate.executeSlash('/compress', activeSessionId, { typed: false }).catch(error => {
+      notifyError(error, t.assistant.thread.errorCompressFailed)
+    })
+  }, [activeSessionId, t.assistant.thread.errorCompressFailed])
+
   // Both ride the same usage payload the context meter does (session.usage
   // ticks mid-turn, message.complete after) — no extra RPC, no polling.
   const cacheHit = cacheHitLabel(currentUsage)
@@ -684,7 +710,12 @@ export function useStatusbarItems({
         menuAlign: 'end',
         menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
         menuContent: (
-          <ContextUsagePanel breakdown={contextBreakdown} loading={contextBreakdownLoading} usage={gaugeUsage} />
+          <ContextUsagePanel
+            breakdown={contextBreakdown}
+            loading={contextBreakdownLoading}
+            onCompress={activeSessionId ? compactCurrentSession : undefined}
+            usage={gaugeUsage}
+          />
         ),
         toggleLabel: copy.toggleContextUsage,
         variant: 'menu'
@@ -738,6 +769,7 @@ export function useStatusbarItems({
     ],
     [
       approvalModeItem,
+      activeSessionId,
       backendVersionItem,
       busy,
       cacheHit,
@@ -747,6 +779,7 @@ export function useStatusbarItems({
       contextBreakdown,
       contextBreakdownLoading,
       contextUsage,
+      compactCurrentSession,
       copy,
       currentUsage.compressions,
       gaugeUsage,
