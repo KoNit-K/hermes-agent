@@ -483,6 +483,24 @@ def test_auto_azure_shortcut_missing_category_does_not_fallback(monkeypatch):
     assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
 
 
+def test_azure_anthropic_missing_key_is_configuration_error(monkeypatch):
+    """Configured Azure Anthropic without a key must not spend a fallback provider."""
+    from hermes_cli import runtime_provider
+
+    monkeypatch.setattr(runtime_provider, "get_secret_str", lambda *_a, **_k: "")
+
+    with pytest.raises(AuthError) as exc_info:
+        runtime_provider._anthropic_env_runtime(
+            "anthropic",
+            {
+                "provider": "anthropic",
+                "base_url": "https://example.services.ai.azure.com",
+            },
+        )
+
+    assert exc_info.value.category == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+
+
 def test_azure_explicit_shortcut_preserves_preexisting_empty_key_behavior(monkeypatch):
     """Keep the Azure Anthropic shortcut behavior unchanged; this PR only classifies producers."""
     from hermes_cli import runtime_provider
