@@ -1148,16 +1148,25 @@ describe('overlayLiveLanes', () => {
     expect(overlaid.sessionCount).toBe(1)
   })
 
-  it('lists an unclaimed session with an unplaceable cwd in Home', () => {
-    // The backend files unplaceable cwd values (such as the bare home dir or
-    // a deleted workspace) in Home. The unhydrated all-profiles snapshot has
-    // no rows to establish that ownership, so the live overlay must retain
-    // every session no named project claims.
+  it('leaves Home alone for a session that has a cwd', () => {
+    // A cwd-carrying row the backend hasn't placed yet (junk root, deleted
+    // workspace) needs its probes — guessing here would flicker it into Home
+    // and back out on the next snapshot.
     const home = homeNode([])
 
-    const overlaid = overlayLiveLanes(home, [makeCwdSession('/Users/nolan', { id: 'fresh' })])
+    expect(overlayLiveLanes(home, [makeCwdSession('/www/app', { id: 'fresh' })])).toBe(home)
+  })
 
-    expect(overlaid.repos[0].groups[0].sessions.map(session => session.id)).toEqual(['fresh'])
+  it('lists a cwd-carrying chat the snapshot filed in Home (#139909)', () => {
+    // A Desktop chat stamped with the bare home dir: the backend files it in
+    // Home, but the unhydrated tree carries only its id (`sessionIds`), so the
+    // overlay is the only thing that can paint its row.
+    const stamped = makeCwdSession('C:\\Users\\wrain', { id: 'stamped' })
+    const home = { ...homeNode([]), previewSessions: [stamped], sessionCount: 1, sessionIds: ['stamped'] }
+
+    const overlaid = overlayLiveLanes(home, [stamped], new Set(), projectOwnerBySessionId([home]))
+
+    expect(overlaid.repos[0].groups[0].sessions.map(s => s.id)).toEqual(['stamped'])
     expect(overlaid.sessionCount).toBe(1)
   })
 
@@ -1480,5 +1489,18 @@ describe('project filter row rule (#97762)', () => {
     expect(sessionMatchesProjectFilter(sibling, ['p_app'], explicit, owners)).toBe(true)
     expect(sessionBucketId(sibling, explicit, owners)).toBe('p_app')
     expect(sessionProjectColor(sibling, explicit, owners)).toBe('#abc')
+  })
+
+  // #139909: the backend files a home-dir-stamped chat in Home; its cwd alone
+  // would make it a phantom project named after the home dir.
+  it('files a row the backend placed in Home under Home, cwd or not', () => {
+    const stamped = makeCwdSession('/home/me', { id: 'stamped', git_repo_root: null })
+
+    const owners = projectOwnerBySessionId([
+      projectNode({ id: NO_PROJECT_ID, isNoProject: true, sessionIds: ['stamped'] })
+    ])
+
+    expect(sessionBucketId(stamped, projects, owners)).toBe(NO_PROJECT_ID)
+    expect(sessionMatchesProjectFilter(stamped, [NO_PROJECT_ID], projects, owners)).toBe(true)
   })
 })
