@@ -359,13 +359,13 @@ def test_session_create_isolation_dispatch_failure_still_starts_inline_build(iso
     assert "_metadata_message_count" not in session
 
     local_interrupt_entered = threading.Event()
-    real_sess = server._sess
+    real_sess = server._sess_nowait
 
     def _track_local_sess(params, rid):
         local_interrupt_entered.set()
         return real_sess(params, rid)
 
-    monkeypatch.setattr(server, "_sess", _track_local_sess)
+    monkeypatch.setattr(server, "_sess_nowait", _track_local_sess)
     interrupt_responses: list[dict] = []
     interrupt_thread = threading.Thread(
         target=lambda: interrupt_responses.append(server.handle_request({
