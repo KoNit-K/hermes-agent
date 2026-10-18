@@ -19,12 +19,12 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_process_hermes_home
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -132,14 +132,16 @@ def start_loop_liveness_watchdog(
                     "Gateway event loop missed %d consecutive liveness probes; dumping all thread "
                     "stacks and exiting with code %d so the service supervisor can restart it.",
                     strikes, exit_code)
-            try:
-                faulthandler.dump_traceback(all_threads=True)
-            except Exception:
-                logger.debug("Loop liveness faulthandler dump failed", exc_info=True)
+            # File + stderr: a console-less launcher (Windows .vbs login item) discards stderr, so a
+            # liveness death used to leave no stack anywhere (#120356, #91097).
+            _write_watchdog_dump(
+                get_shutdown_watchdog_dump_path(), delay_s=probe_timeout * strikes,
+                snapshot={"strikes": strikes, "probe_interval_s": probe_interval},
+                event="loop_liveness_watchdog_fired")
             if stop_event.is_set():
                 return
             _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
-            os._exit(exit_code)
+            _hard_exit(exit_code)
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
     try:
         thread.start()
@@ -149,17 +151,39 @@ def start_loop_liveness_watchdog(
     return _LoopLivenessWatchdogHandle(stop_event, thread)
 
 
+def _hard_exit(exit_code: int) -> None:
+    """``os._exit`` skips every cleanup: SIGKILL in-flight foreground commands first, they run in their
+    own process group and would outlive the gateway, reparented to init."""
+    with contextlib.suppress(Exception):
+        from tools.environments.base import kill_live_foreground_processes
+        kill_live_foreground_processes(now=True)
+    os._exit(exit_code)
+
+
 def _mark_exited_quietly(exit_code: int, reason: str) -> None:
-    """Best-effort lifecycle-ledger stamp so the next boot names the watchdog, not SIGKILL/OOM."""
+    """Best-effort terminal stamp on BOTH lifecycle records before ``os._exit`` skips teardown:
+    the lifecycle ledger (so the next boot names the watchdog, not SIGKILL/OOM) and
+    ``gateway_state.json`` (so ``hermes gateway status`` and every other reader of that file stop
+    seeing ``running`` for a process the watchdog killed — #113372). The runtime-status write goes
+    LAST: it is the record housekeeping refreshes, so nothing may overwrite it after we stamp it."""
     with contextlib.suppress(Exception):
         from gateway.lifecycle_ledger import mark_exited
         mark_exited(exit_code, reason=reason)
+    with contextlib.suppress(Exception):  # os._exit skips atexit: stamp the exit-metrics marker now
+        from hermes_cli.observability.shared_metrics_process import stamp_exit
+        stamp_exit("watchdog")
+    with contextlib.suppress(Exception):
+        from gateway.status import write_runtime_status
+        # Only the supervisor-restart code asserts a restart; other codes leave the recorded
+        # operator intent (a restart-drain that wedged is still a requested restart) untouched.
+        restart = {"restart_requested": True} if exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE else {}
+        write_runtime_status(
+            gateway_state="degraded", exit_reason=reason, wait_timeout=0.25, **restart)
 
 
 def _process_hermes_home() -> Path:
     """HERMES_HOME for process-level identity files (ignore profile overrides)."""
-    val = os.environ.get("HERMES_HOME", "").strip()
-    return Path(val) if val else get_hermes_home()
+    return get_process_hermes_home() if os.environ.get("HERMES_HOME", "").strip() else get_hermes_home()
 
 
 def _home(home: Optional[Path]) -> Path:
@@ -189,12 +213,12 @@ def get_shutdown_watchdog_dump_path(home: Optional[Path] = None) -> Path:
 
 def write_loop_heartbeat(
     *, pid: Optional[int] = None, start_time: Optional[float] = None,
-    home: Optional[Path] = None, extra: Optional[Dict[str, Any]] = None) -> Path:
+    home: Optional[Path] = None, extra: Optional[dict[str, Any]] = None) -> Path:
     """Atomically rewrite the loop-liveness heartbeat file; never raises.
     ``start_time`` (process start, epoch seconds) lets supervisors detect PID reuse."""
     path = get_loop_heartbeat_path(home)
-    payload: Dict[str, Any] = {"pid": int(pid if pid is not None else os.getpid()),
-                               "updated_at": datetime.now(timezone.utc).isoformat(),
+    payload: dict[str, Any] = {"pid": int(pid if pid is not None else os.getpid()),
+                               "updated_at": datetime.now(UTC).isoformat(),
                                "monotonic": time.monotonic()}
     if start_time is not None:
         payload["start_time"] = float(start_time)
@@ -237,17 +261,14 @@ def _write_asyncio_task_dump(fh, loop: asyncio.AbstractEventLoop) -> None:
     fh.write("--- end asyncio task diagnostics ---\n")
 
 
-def _write_watchdog_dump(
-    dump_path: Path, *, delay_s: float, snapshot: Optional[Dict[str, Any]],
-    loop: Optional[asyncio.AbstractEventLoop] = None,
-) -> None:
-    """Best-effort faulthandler + metadata dump before hard-exit."""
-    try:
+def _write_watchdog_dump(dump_path: Path, *, delay_s: float, snapshot: Optional[dict[str, Any]],
+                         event: str = "shutdown_watchdog_fired",
+                         loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+    """Best-effort faulthandler + metadata dump before hard-exit (file, then stderr)."""
+    header = {"event": event, "pid": os.getpid(), "delay_s": delay_s,
+              "fired_at": datetime.now(UTC).isoformat(), "snapshot": snapshot or {}}
+    with contextlib.suppress(OSError):  # unwritable dir: skip only the file copy, stderr still runs
         dump_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
-    header = {"event": "shutdown_watchdog_fired", "pid": os.getpid(), "delay_s": delay_s,
-              "fired_at": datetime.now(timezone.utc).isoformat(), "snapshot": snapshot or {}}
     with contextlib.suppress(Exception), open(dump_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(header, default=str) + "\n--- faulthandler dump (all threads) ---\n")
         fh.flush()
@@ -260,7 +281,7 @@ def _write_watchdog_dump(
             _write_asyncio_task_dump(fh, loop)
         fh.flush()
     with contextlib.suppress(Exception):  # stderr too: journald/launchd get it if disk is wedged
-        sys.stderr.write(f"Gateway shutdown watchdog fired after {delay_s:.0f}s "
+        sys.stderr.write(f"Gateway {event.replace('_', ' ')} after {delay_s:.0f}s "
                          f"(pid={os.getpid()}); dumping all thread stacks.\n")
         sys.stderr.flush()
         faulthandler.dump_traceback(all_threads=True)
@@ -268,7 +289,7 @@ def _write_watchdog_dump(
 
 def arm_shutdown_watchdog(
     delay_s: float, *, done_event: Optional[threading.Event] = None,
-    snapshot_fn: Optional[Callable[[], Dict[str, Any]]] = None, exit_code: int = 1,
+    snapshot_fn: Optional[Callable[[], dict[str, Any]]] = None, exit_code: int = 1,
     dump_path: Optional[Path] = None, name: str = "gateway-shutdown-watchdog",
     loop: Optional[asyncio.AbstractEventLoop] = None,
     reason: str = "shutdown_watchdog",
@@ -293,7 +314,13 @@ def arm_shutdown_watchdog(
         except Exception as exc:
             snapshot = {"snapshot_error": repr(exc)}
         target = dump_path if dump_path is not None else get_shutdown_watchdog_dump_path()
-        _write_watchdog_dump(target, delay_s=delay, snapshot=snapshot, loop=loop)
+        _write_watchdog_dump(
+            target,
+            delay_s=delay,
+            snapshot=snapshot,
+            event=f"{reason}_fired",
+            loop=loop,
+        )
         with contextlib.suppress(Exception):
             if reason == "post_teardown_exit_backstop":
                 logger.critical(
@@ -306,18 +333,22 @@ def arm_shutdown_watchdog(
         for stream in (sys.stdout, sys.stderr):
             with contextlib.suppress(Exception):
                 stream.flush()
+        # Mirror _exit_after_graceful_shutdown: release PID file + runtime lock BEFORE the log drain
+        # (never strand locks), then drain the log queue so logger.critical lands before os._exit.
         with contextlib.suppress(Exception):
-            from hermes_logging import drain_log_queue
-            drain_log_queue(timeout=1.0)
-        if done.is_set():  # a clean exit that won during diagnostics must not be pre-empted
-            return
-        # Release identity before ledger I/O: a stuck mark must not strand the pid/lock.
-        with contextlib.suppress(Exception):
+            # Mirror _exit_after_graceful_shutdown: release PID file + runtime lock BEFORE the log drain
+            # (locks must never be stranded), then drain the async log queue so the logger.critical above
+            # actually reaches the file before os._exit bypasses atexit. (#66892)
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
             release_gateway_runtime_lock()
+        with contextlib.suppress(Exception):
+            from hermes_logging import drain_log_queue
+            drain_log_queue(timeout=1.0)
+        if done.is_set():
+            return
         _mark_exited_quietly(exit_code, reason)
-        os._exit(exit_code)
+        _hard_exit(exit_code)
     try:
         threading.Thread(target=_watchdog, daemon=True, name=name).start()
     except Exception:
@@ -328,7 +359,7 @@ def arm_shutdown_watchdog(
 def arm_process_exit_backstop(
     *, delay_s: float = DEFAULT_PROCESS_EXIT_BACKSTOP_S,
     loop: Optional[asyncio.AbstractEventLoop] = None,
-    snapshot_fn: Optional[Callable[[], Dict[str, Any]]] = None,
+    snapshot_fn: Optional[Callable[[], dict[str, Any]]] = None,
     exit_code: int = 1,
     dump_path: Optional[Path] = None,
 ) -> threading.Event:
@@ -404,14 +435,15 @@ async def loop_heartbeat_forever(
     loop-scheduling witness (``_tick_socket_handler``, flagged as ``loop_tick_socket``); probes must
     require the witness to agree before classifying WEDGED."""
     interval = _coerce_float(interval_s, DEFAULT_HEARTBEAT_INTERVAL_S, floor=1.0)
-    # Arm the witness, best-effort: a failed bind only disables it and the payload flag makes
-    # probes classify UNKNOWN, never WEDGED (drain backstop stays). asyncio AF_UNIX is POSIX-only
-    # (ungated it raised AttributeError on native Windows), so non-POSIX binds TCP loopback and
-    # publishes ``loop_tick_tcp_port``.
+    # The witness exposes only a scheduling ping, not control/auth operations. Reuse its
+    # loopback transport when AF_UNIX is unavailable or the encoded address will not fit;
+    # consumers already discover this port in the heartbeat, independent of their TMPDIR.
+    from gateway.control_socket import _fits_sun_path
     tick_server = tick_socket_path = tick_tcp_port = None
     try:
-        if os.name == "posix":
-            tick_socket_path = get_loop_tick_socket_path(home)
+        unix_path = get_loop_tick_socket_path(home) if os.name == "posix" else None
+        if unix_path is not None and _fits_sun_path(unix_path):
+            tick_socket_path = unix_path
             tick_socket_path.parent.mkdir(parents=True, exist_ok=True)
             _sweep_stale_tick_sockets(tick_socket_path)
             tick_server = await asyncio.start_unix_server(_tick_socket_handler,
