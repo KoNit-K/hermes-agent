@@ -81,10 +81,10 @@ def harness(tmp_path, monkeypatch):
            "BH_RUNTIME_DIR": runtime.name, "BH_RUNTIME_DIR_SHARED": "1",
            "BH_REQUIRE_EXISTING_DAEMON": "1", "ANONYMIZED_TELEMETRY": "false"}
     monkeypatch.setattr(bu, "_base_subprocess_env", lambda: dict(env))
-    monkeypatch.setattr(bu, "_blocked_url_in_code", lambda code: None)
+    monkeypatch.setattr(bu, "_code_url_verdict", lambda code: bu._CodeUrlVerdict(None, False))
     monkeypatch.setattr(bu, "_read_browser_cfg", lambda: {"backend": "browser-use"})
     monkeypatch.setattr(bu, "_attach_vault_supervisor", lambda *args: None)
-    def route(child_env, *args):
+    def route(child_env, *args, **kwargs):
         child_env[bu._PRIVATE_BROWSER_SENTINEL] = True
     monkeypatch.setattr(bu, "_route_backend", route)
     monkeypatch.setattr(bt, "_active_sessions", {})
@@ -128,7 +128,7 @@ def harness(tmp_path, monkeypatch):
 @pytest.mark.platforms("posix", "windows")
 @pytest.mark.parametrize("session", ["research", ""])
 def test_calls_preserve_tab_workspace_and_stop_at_task_end(harness, session):
-    env, start = harness
+    _env, start = harness
     proc, state, endpoint = start(session or "default")
     first = json.loads(bu.browser_exec('print(cdp("Probe.navigate", url="about:blank?first"))',
                                      session=session, task_id="worker"))
