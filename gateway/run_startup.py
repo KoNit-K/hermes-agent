@@ -1515,12 +1515,10 @@ class GatewayStartupMixin:
         await self.hooks.emit("gateway:startup", {"platforms": [p.value for p in self.adapters]})
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
-        # Initial channel directory for send_message name resolution
+        # Initial channel directory for send_message name resolution.
         with _log_suppressed(logging.WARNING, "Channel directory build failed: %s"):
-            from gateway.channel_directory import build_channel_directory
-            directory = await build_channel_directory(self.adapters)
-            ch_count = sum(len(chs) for chs in directory.get("platforms", {}).values())
-            logger.info("Channel directory built: %d target(s)", ch_count)
+            from gateway.run import _build_channel_directories
+            await _build_channel_directories(self)
         # Restarting after a /update still in progress: keep watching so we notify when it finishes.
         notified = await self._send_update_notification()
         if not notified and any(

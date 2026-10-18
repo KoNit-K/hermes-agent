@@ -85,6 +85,69 @@ def _run_60_ticks(runner):
     gateway_run._start_gateway_housekeeping(_Ticks(60), interval=0, runner=runner)
 
 
+def test_multiplexed_channel_directory_refresh_uses_each_profile_scope_and_adapters(two_homes, monkeypatch):
+    """A timed refresh writes each served profile's directory from its own live adapters."""
+    from agent.secret_scope import set_multiplex_active
+    from gateway.config import Platform
+    from hermes_constants import get_hermes_home
+
+    a, b = two_homes
+    calls = []
+
+    async def build(adapters):
+        calls.append((get_hermes_home(), adapters))
+        return {"platforms": {"slack": [{"id": "C1"}]}}
+
+    runner = SimpleNamespace(
+        config=SimpleNamespace(multiplex_profiles=True),
+        adapters={Platform.TELEGRAM: object()},
+        _profile_adapters={"b": {Platform.SLACK: object()}},
+    )
+    loop = SimpleNamespace()
+    monkeypatch.setattr(gateway_run, "safe_schedule_threadsafe", lambda coro, _loop, **_kw: SimpleNamespace(
+        result=lambda timeout: __import__("asyncio").run(coro)))
+    monkeypatch.setattr("gateway.channel_directory.build_channel_directory", build)
+
+    set_multiplex_active(True)
+    try:
+        gateway_run._housekeeping_channel_directories(runner, loop)
+    finally:
+        set_multiplex_active(False)
+
+    assert calls == [(a, runner.adapters), (b, runner._profile_adapters["b"])]
+
+
+def test_multiplexed_startup_channel_directory_uses_each_profile_scope_and_adapters(two_homes, monkeypatch):
+    """Startup immediately refreshes the same per-profile directories as housekeeping."""
+    import asyncio
+
+    from agent.secret_scope import set_multiplex_active
+    from gateway.config import Platform
+    from hermes_constants import get_hermes_home
+
+    a, b = two_homes
+    calls = []
+
+    async def build(adapters):
+        calls.append((get_hermes_home(), adapters))
+        return {"platforms": {}}
+
+    runner = SimpleNamespace(
+        config=SimpleNamespace(multiplex_profiles=True),
+        adapters={Platform.TELEGRAM: object()},
+        _profile_adapters={"b": {Platform.SLACK: object()}},
+    )
+    monkeypatch.setattr("gateway.channel_directory.build_channel_directory", build)
+
+    set_multiplex_active(True)
+    try:
+        asyncio.run(gateway_run._build_channel_directories(runner))
+    finally:
+        set_multiplex_active(False)
+
+    assert calls == [(a, runner.adapters), (b, runner._profile_adapters["b"])]
+
+
 def test_multiplexed_credential_chores_run_once_per_profile_in_its_own_scope(two_homes, monkeypatch, caplog):
     """Under multiplex every credential-reading chore visits each served profile inside ITS scope:
     A's tick reads A's override, B's reads B's (B never sees A's), and no fail-closed credential

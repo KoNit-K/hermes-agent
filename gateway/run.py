@@ -4351,6 +4351,32 @@ def _housekeeping_channel_directory(adapters, loop) -> None:
             fut.result(timeout=30)
 
 
+async def _build_channel_directories(runner) -> None:
+    """Refresh each served profile's directory with its own adapters and runtime scope."""
+    from gateway.channel_directory import build_channel_directory
+    if not getattr(getattr(runner, "config", None), "multiplex_profiles", False):
+        await build_channel_directory(runner.adapters)
+        return
+    primary = getattr(runner, "_primary_profile_name", None) or "default"
+    profile_adapters = getattr(runner, "_profile_adapters", {}) or {}
+    for profile_name, profile_home in _multiplex_profile_homes(runner.config):
+        adapters = runner.adapters if profile_name == primary else profile_adapters.get(profile_name, {})
+        async with _async_profile_runtime_scope(profile_home):
+            directory = await build_channel_directory(adapters)
+        ch_count = sum(len(channels) for channels in directory.get("platforms", {}).values())
+        logger.info("Channel directory built for profile %s: %d target(s)", profile_name, ch_count)
+
+
+def _housekeeping_channel_directories(runner, loop) -> None:
+    if loop is None:
+        return
+    fut = safe_schedule_threadsafe(
+        _build_channel_directories(runner), loop, logger=logger,
+        log_message="Channel directory refresh scheduling error")
+    if fut is not None:
+        fut.result(timeout=30)
+
+
 def _housekeeping_paste_sweep() -> None:
     from hermes_cli.debug import _sweep_expired_pastes
     deleted, remaining = _sweep_expired_pastes()
@@ -4518,7 +4544,9 @@ def _start_gateway_housekeeping(
         # whichever gateway is live; drained here (not the scheduler tick) so external providers get it too.
         chores.append((1, DRAIN_LABEL, lambda: _drain_restart_safe_cron_deliveries(adapters, loop, runner)))
     chores += [
-        (5, "Channel directory refresh", lambda: adapters and _housekeeping_channel_directory(adapters, loop)),
+        (5, "Channel directory refresh", lambda: (
+            _housekeeping_channel_directories(runner, loop) if runner is not None
+            else adapters and _housekeeping_channel_directory(adapters, loop))),
         (60, "Media cache cleanup", housekeeping_media_caches),
         (60, "Paste sweep", _housekeeping_paste_sweep)]
     # Low disk + auto-prune undecided: ask on the home channel (two syscalls; snoozed per post).
