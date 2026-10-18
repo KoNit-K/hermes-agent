@@ -1544,10 +1544,10 @@ def test_doctor_reports_auxiliary_blocks_that_do_not_resolve(tmp_path, monkeypat
 def test_doctor_checks_auto_auxiliary_blocks_for_placeholder_credentials(tmp_path, monkeypatch, capsys, block):
     """#118721: ``provider: auto`` means the main route, so doctor must not skip a placeholder
     credential that would be sent by runtime-less auxiliary calls."""
-    import yaml
+    import json
 
     cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text(yaml.safe_dump({"auxiliary": {"title_generation": block}}), encoding="utf-8")
+    cfg_file.write_text(json.dumps({"auxiliary": {"title_generation": block}}), encoding="utf-8")
     calls = []
 
     def resolve_runtime_provider(**kwargs):
@@ -1659,11 +1659,11 @@ def test_cron_store_check_reports_writability_and_low_space(
 @pytest.mark.parametrize("provider", ["auto", "", None])
 @pytest.mark.parametrize("endpoint", ["http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"])
 def test_doctor_accepts_keyless_local_auto_route(tmp_path, monkeypatch, capsys, provider, endpoint):
-    import yaml
+    import json
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text(yaml.safe_dump({
+    cfg_file.write_text(json.dumps({
         "model": {"provider": "custom:local", "default": "test-model"},
         "providers": {"local": {"api": endpoint}},
         "auxiliary": {"compression": {"provider": provider}},
@@ -1680,7 +1680,7 @@ def test_doctor_accepts_keyless_local_auto_route(tmp_path, monkeypatch, capsys, 
 @pytest.mark.parametrize("credential_location", ["entry", "model"])
 @pytest.mark.parametrize("provider", ["auto", "custom:primary"])
 def test_doctor_warns_for_declared_unset_entry_key(tmp_path, monkeypatch, capsys, endpoint, credential_location, provider):
-    import yaml
+    import json
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("BOUNDARY_UNSET_KEY", raising=False)
@@ -1695,7 +1695,7 @@ def test_doctor_warns_for_declared_unset_entry_key(tmp_path, monkeypatch, capsys
     else:
         cfg["model"].pop("api_key")
         cfg["model"]["key_env"] = "BOUNDARY_UNSET_KEY"
-    cfg_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
     issues = []
     doctor_config._validate_auxiliary_config(cfg_file, issues)
     out = capsys.readouterr().out
@@ -1703,3 +1703,35 @@ def test_doctor_warns_for_declared_unset_entry_key(tmp_path, monkeypatch, capsys
     assert "may require authentication" in out
     assert "test-model-credential" not in out
     assert issues == []  # Static diagnostics do not assert a real HTTP rejection.
+
+
+@pytest.mark.platforms("any")  # the wrapper name differs per host (.bat on Windows)
+def test_profile_alias_status_follows_the_wrapper_the_profile_really_has(monkeypatch, tmp_path):
+    """#131753: doctor said "no alias" for every Windows profile (``.bat`` wrapper) and for any
+    profile reachable only through a custom alias name; a bare (pre-``.bat`` on Windows) wrapper counts."""
+    import hermes_cli.gateway_migrate as gm
+    from hermes_cli import profiles
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
+    monkeypatch.setattr(gm, "duplicate_credential_findings", list)
+    for name in ("dev", "ops", "work", "old"):
+        (tmp_path / ".hermes" / "profiles" / name).mkdir(parents=True)
+        (tmp_path / ".hermes" / "profiles" / name / "config.yaml").write_text("model: m\n", encoding="utf-8")
+    profiles.create_wrapper_script("dev")
+    profiles.create_wrapper_script("w", target="work")
+    (tmp_path / ".local" / "bin" / "old").write_text('#!/bin/sh\nexec hermes -p old "$@"\n', encoding="utf-8")
+    for foreign in ("ops.bat", "old.bat"):  # same-named non-Hermes commands
+        (tmp_path / ".local" / "bin" / foreign).write_text("@echo off\r\nnotepad %*\r\n", encoding="utf-8")
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        doctor_state._check_profiles(False)
+    lines = out.getvalue().splitlines()
+    status = {name: next(ln for ln in lines if f" {name}:" in ln) for name in ("dev", "ops", "work", "old")}
+
+    assert not any("no alias" in status[n] for n in ("dev", "work", "old"))
+    assert "no alias" in status["ops"]  # a foreign ops.bat is not ops's alias
+    old = next(p for p in profiles.list_profiles() if p.name == "old")
+    assert old.alias_path == tmp_path / ".local" / "bin" / "old"  # never the foreign old.bat (uninstall unlinks it)

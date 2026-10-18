@@ -691,7 +691,7 @@ def test_real_openai_key_is_never_routed_or_sent_to_openrouter(monkeypatch):
     from hermes_cli.runtime_provider_backends import _resolve_openrouter_runtime
     monkeypatch.setattr(rp, "_get_model_config", dict)
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {}})
-    monkeypatch.setattr("agent.bedrock_adapter.has_aws_credentials", lambda: False)
+    monkeypatch.setattr("agent.bedrock_adapter.has_aws_credentials", lambda *_a, **_kw: False)
     for var in ("OPENAI_BASE_URL", "OPENROUTER_BASE_URL", "OPENROUTER_API_KEY", "CUSTOM_BASE_URL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-real-openai-key")
@@ -1978,7 +1978,7 @@ def _patch_bedrock(monkeypatch, config_default=""):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "bedrock")
     monkeypatch.setattr(rp, "_get_model_config", lambda: {"default": config_default})
     monkeypatch.setattr(rp, "load_config", lambda: {"bedrock": {}})
-    monkeypatch.setattr(ba, "has_aws_credentials", lambda: True)
+    monkeypatch.setattr(ba, "has_aws_credentials", lambda *_a, **_kw: True)
     monkeypatch.setattr(ba, "resolve_aws_auth_env_var", lambda: "AWS_PROFILE")
     monkeypatch.setattr(ba, "resolve_bedrock_region", lambda: "eu-north-1")
 
@@ -2404,7 +2404,7 @@ def test_openai_alias_without_base_url_pairs_openai_key_with_openai_base_url(mon
 ])
 def test_named_main_credential_boundary_real_config(tmp_path, monkeypatch, case):
     """Exercise both real runtime routers against the same isolated config, without API calls."""
-    import yaml
+    import json
     from agent import auxiliary_client as aux
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -2467,7 +2467,7 @@ def test_named_main_credential_boundary_real_config(tmp_path, monkeypatch, case)
         entry["key_cmd"] = "test-command"
         monkeypatch.setattr("agent.command_token_source.build_command_token_provider", lambda *a: lambda: entry_key)
         expected = entry_key
-    (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(json.dumps(cfg), encoding="utf-8")
     runtime = rp.resolve_runtime_provider(requested=requested, target_model="test-model", **kwargs)
     actual = runtime["api_key"]
     assert (actual() if callable(actual) else actual) == expected
