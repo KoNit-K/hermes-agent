@@ -104,3 +104,38 @@ def test_boot_hands_the_router_the_derived_cap(tmp_path, monkeypatch, configured
     config = {"local_runtime": {"enabled": True, "models_max": configured}}
     assert bs.ensure_local_runtime(config) is not None
     assert captured["models_max"] == expected
+
+
+def test_boot_hands_the_router_the_configured_idle_unload_timeout(tmp_path, monkeypatch):
+    """The persisted local-runtime setting reaches the machine-scoped supervisor."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    import hermes_cli.local_runtime.bootstrap as bs
+    from hermes_cli.local_runtime import binaries, endpoint, supervisor
+
+    mdir = tmp_path / "models"
+    mdir.mkdir()
+    (mdir / "long-context.gguf").touch()
+    monkeypatch.setattr(bs, "models_dir", lambda: mdir)
+    monkeypatch.setattr(bs, "_SUPERVISOR", None)
+    monkeypatch.setattr(bs, "_generate_presets", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bs, "_admitted_models_max", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(endpoint, "_state_endpoint", lambda: None)
+    monkeypatch.setattr(binaries, "installed_engine", lambda *args, **kwargs:
+                        binaries.Engine("cpu", "build-1", tmp_path / "llama-server"))
+
+    captured: dict = {}
+
+    class FakeSupervisor:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            self.proc = None
+            self.base_url = "http://127.0.0.1:1/v1"
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(supervisor, "LlamaServerSupervisor", FakeSupervisor)
+    assert bs.ensure_local_runtime({"local_runtime": {
+        "enabled": True, "unload_after_idle_seconds": 0,
+    }}) is not None
+    assert captured["idle_unload_s"] == 0

@@ -532,6 +532,22 @@ def test_idle_sweep_unloads_idle_models(tmp_path, monkeypatch, stub_server):
     assert sorted(handler.unloaded) == ["model-a", "model-b"]
 
 
+def test_idle_sweep_keeps_models_when_idle_unload_is_disabled(tmp_path, monkeypatch):
+    """A configured zero preserves the loaded model and its in-memory prompt cache."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
+
+    sup = LlamaServerSupervisor(tmp_path / "i", tmp_path / "m", port=1, idle_unload_s=0)
+    monkeypatch.setattr(sup, "models", lambda: {"long-context": "loaded"})
+    monkeypatch.setattr(sup, "_probe_idle", lambda model_id: True)
+    unloaded: list[str] = []
+    monkeypatch.setattr(sup, "unload_model", unloaded.append)
+
+    assert sup.sweep_idle(now=1000.0) == []
+    assert sup.sweep_idle(now=1000.0 + LlamaServerSupervisor.IDLE_UNLOAD_S + 1) == []
+    assert unloaded == []
+
+
 def test_idle_sweep_busy_model_resets_clock(tmp_path, monkeypatch, stub_server):
     """A model seen busy (C5: busy slot) restarts its idle clock — an
     active conversation never trips the sweep."""

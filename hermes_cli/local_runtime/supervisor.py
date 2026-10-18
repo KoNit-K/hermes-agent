@@ -111,14 +111,13 @@ def _direct_io_args(executable: Path) -> tuple[str, ...]:
 class LlamaServerSupervisor:
     """Own one llama-server router process for the life of a Hermes session."""
 
-    # A model that has gone quiet gets its VRAM back after this long. A constant, not a knob:
-    # long enough that an active conversation never trips it, short enough that a wandered-off
-    # session frees ~20 GiB within the hour. No exemptions: demand reloads anything the user
-    # comes back to.
+    # The default releases VRAM from forgotten sessions. ``0`` is a supported opt-out for long
+    # conversations whose prompt cache should survive idle periods.
     IDLE_UNLOAD_S = 15 * 60
 
     def __init__(self, binary: Path, models_dir: Path, *,
                  models_max: int = 4, port: int | None = None,
+                 idle_unload_s: int = IDLE_UNLOAD_S,
                  extra_args: list[str] | None = None,
                  log_path: Path | None = None,
                  preset_path: Path | None = None):
@@ -129,6 +128,7 @@ class LlamaServerSupervisor:
         self.models_dir = Path(models_dir)
         self.models_max = models_max
         self.port = port or _stable_port()
+        self.idle_unload_s = max(0, idle_unload_s)
         self.api_key = _stable_api_key()
         self.extra_args = list(extra_args or [])
         self.log_path = log_path or (self.models_dir.parent / "logs" / "llama-server.log")
@@ -399,6 +399,8 @@ class LlamaServerSupervisor:
         cannot pin a resident model (and its VRAM) indefinitely."""
         now = time.monotonic() if now is None else now
         unloaded: list[str] = []
+        if self.idle_unload_s == 0:
+            return unloaded
         try:
             statuses = self.models()
         except Exception:
@@ -416,7 +418,7 @@ class LlamaServerSupervisor:
                 self._idle_since.pop(model_id, None)
                 continue
             first_idle = self._idle_since.setdefault(model_id, now)
-            if now - first_idle < self.IDLE_UNLOAD_S:
+            if now - first_idle < self.idle_unload_s:
                 continue
             try:
                 self.unload_model(model_id)

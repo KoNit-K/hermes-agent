@@ -19,6 +19,7 @@ from hermes_cli.local_runtime.gguf import SPLIT_PART_RE, model_id_from_stem
 logger = logging.getLogger(__name__)
 
 _SUPERVISOR = None  # process-wide singleton; one router per Hermes process
+_DEFAULT_IDLE_UNLOAD_S = 15 * 60
 # The engine that singleton runs (or is booting). Budgets price ITS devices: the server is shared by
 # every profile this process hosts, so another profile's ``local_runtime.backend`` must not resize it.
 _SERVING_ENGINE = None
@@ -463,10 +464,16 @@ def ensure_local_runtime(config: dict, force: bool = False) -> object | None:
             models_max = _admitted_models_max(mdir, int(section.get("models_max", 4)), engine.tag)
             preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini", models_max,
                                             engine_tag=engine.tag)
+            configured_idle_unload = section.get("unload_after_idle_seconds", _DEFAULT_IDLE_UNLOAD_S)
+            try:
+                idle_unload_s = max(0, int(configured_idle_unload))
+            except (TypeError, ValueError):
+                idle_unload_s = _DEFAULT_IDLE_UNLOAD_S
 
             sup = LlamaServerSupervisor(engine.binary, mdir, preset_path=preset_path,
                                         models_max=models_max,
-                                        port=int(section.get("port", 0)) or None)
+                                        port=int(section.get("port", 0)) or None,
+                                        idle_unload_s=idle_unload_s)
             try:
                 sup.start()
             except Exception:
