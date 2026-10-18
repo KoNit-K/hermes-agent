@@ -40,11 +40,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
 import { isBackfilledFacePng } from './avatar-image'
-import { groupCreationSource, groupExecutionMode } from './canonical-group-capabilities'
+import { groupExecutionMode } from './canonical-group-capabilities'
 import type { GroupExecutionMode } from './canonical-group-capabilities'
 import { $canonicalGroupBindings, registerCanonicalGroup } from './canonical-group-registry'
 import { CanonicalGroupWorkspace } from './canonical-group-workspace'
-import { canonicalGroupRequest, createCanonicalGroup } from './canonical-groups'
+import { canonicalGroupRequest, discoverCanonicalGroups } from './canonical-groups'
 import {
   $botMeta,
   $lastRoster,
@@ -592,7 +592,7 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
   const [capability, setCapability] = useState<{ source: string; mode: GroupExecutionMode } | null>(null)
   const mode = capability?.source === source ? capability.mode : 'checking'
   const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [refresh, setRefresh] = useState(0)
   useEffect(() => {
     let cancelled = false
     setCapability(null)
@@ -604,8 +604,39 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
       return
     }
 
-    void canonicalGroupRequest<unknown>({ connectionId: connectionId ?? '', profile }, 'groups.capabilities')
-      .then(result => { if (!cancelled) {setCapability({ source, mode: groupExecutionMode(result) })} })
+    const route = { connectionId: connectionId ?? '', profile }
+    void canonicalGroupRequest<unknown>(route, 'groups.capabilities')
+      .then(result => {
+        if (cancelled) {return}
+
+        const nextMode = groupExecutionMode(result)
+        if (nextMode !== 'canonical') {
+          setCapability({ source, mode: nextMode })
+
+          return
+        }
+
+        void discoverCanonicalGroups(route)
+          .then(groups => {
+            if (cancelled) {return}
+
+            const room = groups.rooms.find(candidate => candidate.name === props.group)
+            if (room) {
+              registerCanonicalGroup(route, room)
+
+              return
+            }
+
+            setCapability({ source, mode: 'canonical' })
+            setError('Gateway group not found. Retry to refresh the room list.')
+          })
+          .catch(e => {
+            if (!cancelled) {
+              setCapability({ source, mode: 'unavailable' })
+              setError(String(e))
+            }
+          })
+      })
       .catch(e => {
         if (!cancelled) {
           setCapability({ source, mode: 'unavailable' })
@@ -614,32 +645,15 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
       })
 
     return () => { cancelled = true }
-  }, [connectionId, profile, gateway, source])
+  }, [connectionId, profile, gateway, props.group, refresh, source])
 
   if (mode === 'legacy') {return <LegacyGroupChatWorkspace {...props} />}
 
   return <div className="grid gap-3 p-3">
     <h2>{props.group}</h2>
-    <p>{mode === 'canonical' ? 'This is a legacy Desktop room. Start a gateway-owned group with these members; the old history stays here and is not replayed.' : mode === 'unavailable' ? b.canonical.driverUnavailable : 'Checking group driver…'}</p>
+    <p>{mode === 'canonical' ? 'This gateway group could not be found. Retry to refresh the room list.' : mode === 'unavailable' ? b.canonical.driverUnavailable : 'Checking group driver…'}</p>
     {error && <p role="alert">{error}</p>}
-    <Button disabled={mode !== 'canonical' || busy} onClick={() => {
-      const route = { connectionId: connectionId ?? '', profile }
-
-      const sourceCurrent = groupCreationSource(route, activationEpoch)
-
-      if (mode !== 'canonical' || !sourceCurrent()) {
-        setError(b.canonical.driverUnavailable)
-
-        return
-      }
-
-      setBusy(true)
-      void createCanonicalGroup(route, props.group, props.members)
-        .then(({ room }) => {
-          if (sourceCurrent()) {openGroupChat(registerCanonicalGroup(route, room))}
-        })
-        .catch(e => { if (sourceCurrent()) {setError(String(e))} }).finally(() => setBusy(false))
-    }}>Start gateway group</Button>
+    <Button disabled={mode !== 'canonical'} onClick={() => setRefresh(value => value + 1)}>Retry</Button>
   </div>
 }
 
