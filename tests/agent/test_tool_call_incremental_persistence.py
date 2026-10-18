@@ -390,8 +390,7 @@ def test_execute_tool_calls_sequential_flushes_each_tool_result_before_next_disp
 
 def test_spilled_result_lazily_initializes_configured_docker_env_before_persisting(monkeypatch):
     """A first large non-terminal result must advertise a sandbox-readable spill path."""
-    import tools.terminal_tool as terminal_tool
-    import tools.terminal_tool_backends as terminal_backends
+    from tools import terminal_tool, terminal_tool_backends
 
     agent = _make_agent()
     messages: list = []
@@ -407,7 +406,7 @@ def test_spilled_result_lazily_initializes_configured_docker_env_before_persisti
     try:
         with (
             patch("model_tools.handle_function_call", return_value="x" * 120_000),
-            patch.object(terminal_backends, "_create_environment", return_value=sandbox) as create,
+            patch.object(terminal_tool_backends, "_create_environment", return_value=sandbox) as create,
             patch(
                 "agent.tool_executor.maybe_persist_tool_result",
                 side_effect=lambda **kwargs: "persisted" if kwargs["env"] is sandbox else "host path",
@@ -1002,7 +1001,7 @@ def test_flush_atomic_mixed_repair_and_append_rollback_on_failure(tmp_path, monk
     agent = _make_agent()
     db_path = tmp_path / "state.db"
     session_id = "sess-atomic-rollback"
-    db = _attach_real_session_db(agent, db_path, session_id)
+    _attach_real_session_db(agent, db_path, session_id)
 
     messages = [
         {"role": "user", "content": "summarize"},
