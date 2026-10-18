@@ -24,6 +24,17 @@ def tmp_cron_dir(tmp_path, monkeypatch):
 
 class TestCronCommandLifecycle:
 
+    def test_pause_forwards_reason(self, tmp_cron_dir, capsys):
+        job = create_job(prompt="Daily report", schedule="every 1h")
+        parser = argparse.ArgumentParser(prog="hermes")
+        subparsers = parser.add_subparsers(dest="command")
+        build_cron_parser(subparsers, cmd_cron=cron_command)
+
+        args = parser.parse_args(["cron", "pause", job["id"], "--reason", "operator request"])
+        assert cron_command(args) == 0
+        assert get_job(job["id"])["paused_reason"] == "operator request"
+        assert "Paused job" in capsys.readouterr().out
+
     def test_edit_persists_user_owned_inference_pins(self, tmp_cron_dir, capsys):
         job = create_job(prompt="Daily report", schedule="every 1h")
         parser = argparse.ArgumentParser(prog="hermes")

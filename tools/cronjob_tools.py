@@ -958,7 +958,8 @@ _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
 _JOB_ACTIONS = {
     "remove": _action_remove, "update": _action_update,
     "run": _action_run, "run_now": _action_run, "trigger": _action_run,
-    "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
+    "pause": lambda job, a: _job_state_result(
+        pause_job(job["id"], reason=a.get("reason") or a.get("paused_reason"))),
     "resume": lambda job, a: _job_state_result(resume_job(job["id"])),
 }
 
@@ -1064,7 +1065,8 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
         "type": "object",
         "properties": {
             "paused": {"type": "boolean", "description": "Create only: persist disabled atomically. Resume to schedule; explicit run remains available. Default false."},
-            "paused_reason": {"type": "string", "description": "Create only: auditable reason; requires paused=true."},
+            "paused_reason": {"type": "string", "description": "Auditable reason. For create, requires paused=true. For pause, this is an alias for reason and is stored on the job."},
+            "reason": {"type": "string", "description": "For pause: why the job is paused; stored as paused_reason."},
             "action": {
                 "type": "string",
                 "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' and 'prompt' fields are REQUIRED."

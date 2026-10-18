@@ -53,3 +53,15 @@ def test_invalid_creation_is_rejected_without_writes(tmp_path):
                                paused=False, paused_reason="orphan")
         assert cmd_cron(args) == 1
         assert jobs.load_jobs() == []
+
+
+def test_pause_persists_schema_paused_reason(tmp_path):
+    """The model-facing pause field reaches the durable pause audit record."""
+    with jobs.use_cron_store(tmp_path / "cron"):
+        created = json.loads(cronjob_tools.registry.dispatch("cronjob_manage", {
+            "action": "create", "schedule": "every 1h", "prompt": "canary"}))
+        paused = json.loads(cronjob_tools.registry.dispatch("cronjob_manage", {
+            "action": "pause", "job_id": created["job_id"], "paused_reason": "operator request"}))
+
+    assert paused["success"]
+    assert paused["job"]["paused_reason"] == "operator request"
