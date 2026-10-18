@@ -516,10 +516,23 @@ def _spawn_hermes_action(
     # Named-profile actions get a scrubbed, pinned environment so the child cannot inherit the
     # dashboard profile's credentials; see _profile_action_environment (also drops _HERMES_GATEWAY).
     action_env = _profile_action_environment(subcommand, env_overrides)
-    proc = detached_popen(
-        cmd, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
-        env=action_env,
-    )
+
+    def _record_breakaway_denial(exc: OSError) -> None:
+        log_file.write(
+            f"{name}: breakaway spawn refused ({exc}); retrying without CREATE_BREAKAWAY_FROM_JOB\n".encode()
+        )
+
+    try:
+        proc = detached_popen(
+            cmd, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
+            env=action_env, on_breakaway_denied=_record_breakaway_denial,
+        )
+    except OSError as exc:
+        # Without this the action log would hold only the started-header for a spawn that never
+        # happened; close the handle the child would have owned and let the endpoint report it.
+        log_file.write(f"{name}: spawn failed: {exc}\n".encode())
+        log_file.close()
+        raise
     log_file.close()  # child holds its own dup'd fd; keeping ours leaks one per action
     _ACTION_RESULTS.pop(name, None)
     _ACTION_COMMANDS[name] = tuple(subcommand)

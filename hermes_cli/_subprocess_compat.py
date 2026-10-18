@@ -15,7 +15,7 @@ import subprocess
 import sys
 import logging
 from pathlib import Path
-from typing import Mapping, NoReturn, Sequence
+from typing import Callable, Mapping, NoReturn, Sequence
 
 __all__ = [
     "FILTER_DISCOVERY_FAILED",
@@ -278,7 +278,9 @@ def windows_detach_popen_kwargs() -> dict:
     return {"start_new_session": True}
 
 
-def detached_popen(args, **kwargs) -> subprocess.Popen:
+def detached_popen(
+    args, *, on_breakaway_denied: Callable[[OSError], None] | None = None, **kwargs
+) -> subprocess.Popen:
     """Start a detached child, retrying Windows breakaway denial without that flag.
 
     A parent Job Object can reject ``CREATE_BREAKAWAY_FROM_JOB`` with
@@ -297,6 +299,8 @@ def detached_popen(args, **kwargs) -> subprocess.Popen:
     except OSError as exc:
         if getattr(exc, "winerror", None) != 5:
             raise
+        if on_breakaway_denied is not None:
+            on_breakaway_denied(exc)
         logger.warning(
             "Detached spawn with CREATE_BREAKAWAY_FROM_JOB was access denied; "
             "retrying without breakaway"
