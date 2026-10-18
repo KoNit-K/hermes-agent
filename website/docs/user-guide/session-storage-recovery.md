@@ -105,6 +105,11 @@ run. Keep retention runs frequent and small, and schedule a large backlog cleanu
 a quiet period. See SQLite's [WAL concurrency](https://www.sqlite.org/wal.html#concurrency)
 and [rollback journal locking](https://www.sqlite.org/lockingv3.html) documentation.
 
+`hermes sessions prune` is the exception while the gateway is running: the gateway owns
+`state.db`, so prune shows its preview from a read-only view and the gateway itself deletes
+the selected sessions (skipping any with a turn still running). It refuses as above only when
+no gateway is running and some other process holds the database.
+
 ## Files you may find beside `state.db`
 
 | File or directory | What it is | What to do |
