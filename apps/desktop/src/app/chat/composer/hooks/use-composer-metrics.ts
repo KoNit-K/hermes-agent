@@ -67,19 +67,26 @@ export function useComposerMetrics({
   const [expanded, setExpanded] = useState(false)
   const [fit, setFit] = useState<ComposerFit>(ROOMY)
 
-  // Edge signal, not the live text: this only re-renders when a non-trailing
-  // newline appears or disappears, so typing within a line costs nothing here.
+  // Edge signals avoid re-rendering for every keystroke within a line.
+  const isEmpty = useAuiState(s => s.composer.text.length === 0)
   const hasHardNewline = useAuiState(s => s.composer.text.trimEnd().includes('\n'))
+  const isEmptyRef = useRef(isEmpty)
+  isEmptyRef.current = isEmpty
 
   // Expansion (input on its own full-width row, controls below) is driven by
   // the editor's *actual* rendered height via the ResizeObserver in
   // syncComposerMetrics — it only fires when the text genuinely wraps to a
   // second line, so the layout flips exactly at the wrap point rather than at
-  // a guessed character count. We only handle the two cases the observer
-  // can't: an explicit newline (expand before layout settles). We never read
-  // scrollHeight per keystroke, and do not collapse on an empty draft because
-  // a customized resting min-height can itself require the stacked layout.
+  // a guessed character count. Handle explicit newlines before layout settles
+  // and remeasure an emptied draft even if its box size did not change. A
+  // custom resting min-height can still require the stacked layout.
   useEffect(() => {
+    if (isEmpty) {
+      setExpanded((editorRef.current?.scrollHeight ?? 0) > COMPOSER_SINGLE_LINE_MAX_PX)
+
+      return
+    }
+
     if (expanded) {
       return
     }
@@ -90,7 +97,7 @@ export function useComposerMetrics({
     if (hasHardNewline) {
       setExpanded(true)
     }
-  }, [expanded, hasHardNewline])
+  }, [editorRef, expanded, hasHardNewline, isEmpty])
 
   // Bucket measured heights so we only invalidate the global CSS var when
   // the size crosses a meaningful threshold. Without bucketing, the editor
@@ -134,13 +141,17 @@ export function useComposerMetrics({
     // Expand once the input has actually wrapped past a single line. The
     // observer only fires on real size changes, so this reads scrollHeight at
     // most once per wrap (not per keystroke). One line ≈ 28px (1.625rem
-    // min-height + padding); a second line clears ~36px. The rendered height
-    // is the sole layout authority: a custom resting min-height above that
-    // threshold stays stacked even after the draft is emptied.
+    // min-height + padding); a second line clears ~36px. Only empty drafts
+    // may collapse: stacking widens the input and can unwrap a nonempty draft,
+    // so collapsing that draft would oscillate across the wrap boundary.
     const editor = editorRef.current
 
     if (editor) {
-      setExpanded(editor.scrollHeight > COMPOSER_SINGLE_LINE_MAX_PX)
+      const tallerThanOneLine = editor.scrollHeight > COMPOSER_SINGLE_LINE_MAX_PX
+
+      if (tallerThanOneLine || isEmptyRef.current) {
+        setExpanded(tallerThanOneLine)
+      }
     }
 
     // Floats still need their width-driven controls, but no pane reserves
