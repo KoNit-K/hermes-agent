@@ -73,6 +73,21 @@ def test_caller_extra_body_reasoning_wins_over_reasoning_config():
     assert out["reasoning"] == {"effort": "none"}
 
 
+def test_build_call_kwargs_generic_fallback_keeps_caller_extra_body():
+    kwargs = _build_call_kwargs(
+        provider="unknown",
+        model="test-model",
+        messages=[{"role": "user", "content": "test"}],
+        extra_body={"reasoning": {"effort": "none"}, "thinking": {"type": "disabled"}, "metadata": "caller"},
+        reasoning_config={"enabled": True, "effort": "high"},
+    )
+    assert kwargs["extra_body"] == {
+        "reasoning": {"effort": "none"},
+        "thinking": {"type": "disabled"},
+        "metadata": "caller",
+    }
+
+
 def test_build_call_kwargs_deepseek_vision_honors_caller_thinking_disabled():
     kwargs = _build_call_kwargs(
         provider="deepseek",
