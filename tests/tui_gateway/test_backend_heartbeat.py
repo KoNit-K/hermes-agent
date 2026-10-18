@@ -32,6 +32,17 @@ def db(tmp_path):
 
 
 class TestBackendHeartbeatRefresher:
+    def test_default_refresh_waits_for_the_idle_session_window(self):
+        """An idle backend should not commit a liveness row every minute.
+
+        The orphan sweep accepts a heartbeat for two session-TTL windows, so
+        refreshing once per idle window still leaves a full window for a
+        sibling backend to observe the owner before considering it stale.
+        """
+        from tui_gateway import server
+
+        assert server._HEARTBEAT_REFRESH_S == IDLE_S
+
     def test_first_call_registers_row_in_db(self, db, monkeypatch, tmp_path):
         from tui_gateway import server
 
