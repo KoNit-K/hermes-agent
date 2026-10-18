@@ -33,7 +33,7 @@ def _cprint(text: str) -> None:
 
 def _git(args, cwd, timeout: float = 10, **kwargs):
     """Run ``git *args`` in *cwd* capturing UTF-8 text; raises like ``subprocess.run``."""
-    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",
+    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",  # noqa: PLW1510 -- forwarding wrapper: callers pass subprocess kwargs via **kwargs (check may arrive through it); an explicit check=False would raise TypeError
                           errors="replace", timeout=timeout, cwd=cwd, **kwargs)
 
 
@@ -415,13 +415,14 @@ def _worktree_add(repo_root: str, wt_path: Path, branch_name: str, base_ref: str
     return base_ref, base_label
 
 
-def _setup_worktree(repo_root: str = None, sync_base: bool = True,
-                    name: Optional[str] = None) -> Optional[Dict[str, str]]:
+def _setup_worktree(repo_root: str | None = None, sync_base: bool = True,
+                    name: Optional[str] = None, retain_db=None) -> Optional[dict[str, str]]:
     """Create an isolated git worktree -> ``{path, branch, repo_root, base}``, or None on failure.
 
     *sync_base* branches from the fetched remote tip (``_resolve_worktree_base``), else local
     HEAD. *name* replaces the random ``hermes-<id>``; named trees lack the ``hermes-`` prefix so
-    the pruner ages them on its slower schedule.
+    the pruner ages them on its slower schedule. *retain_db* (``--tui -w``) names the profile
+    store in the lock: the tree outlives its launcher while a session there can resume in it.
 
     Set ``worktree_sync: false`` in config to branch from local ``HEAD`` (the pre-#10760-followup behavior).
     """
@@ -459,11 +460,14 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
 
     # Lock so other processes (and `git worktree remove`) see it is in use; fail-soft.
     try:
-        _git(["worktree", "lock", "--reason", f"hermes pid={os.getpid()}", str(wt_path)], repo_root)
+        reason = f"hermes pid={os.getpid()}" + (f" db={retain_db}" if retain_db is not None else "")
+        _git(["worktree", "lock", "--reason", reason, str(wt_path)], repo_root)
         logger.debug("Worktree locked: %s (pid=%s)", wt_path, os.getpid())
     except Exception as e:
         logger.debug("git worktree lock failed (non-fatal): %s", e)
 
+    from hermes_cli.worktree_registry import record_worktree_repo
+    record_worktree_repo(repo_root)
     _cprint(f"\033[32m✓ Worktree created:\033[0m {wt_path}")
     print(f"  Branch: {branch_name}")
     print(f"  Base:   {base_label}")
@@ -554,7 +558,9 @@ def _worktree_is_dirty(worktree_path: str, repo_root, timeout: int = 10) -> bool
 
     Untracked ``.worktreeinclude`` directory symlinks back to the main checkout *repo_root* are
     ignored: they are our own scaffolding, and counting them would keep every worktree of such a
-    repo forever.
+    repo forever. ``status.showUntrackedFiles=no`` is overridden (it would hide new files), and
+    skip-worktree / assume-unchanged files whose bytes differ from the index count as changes
+    (``git status`` trusts both flags).
     """
     from hermes_cli._subprocess_compat import noninteractive_repo_git_env
     try:
@@ -562,13 +568,14 @@ def _worktree_is_dirty(worktree_path: str, repo_root, timeout: int = 10) -> bool
         env = noninteractive_repo_git_env(worktree_path)
         if env is None:
             return True
-        result = _git(["status", "--porcelain", "-z"], worktree_path, timeout=timeout,
-                      stdin=subprocess.DEVNULL, env=env)
+        result = _git(["status", "--porcelain", "-z", "--untracked-files=normal"], worktree_path,
+                      timeout=timeout, stdin=subprocess.DEVNULL, env=env)
         if result.returncode != 0:
             return True
         entries = [e for e in result.stdout.split("\0") if e]
         if not entries:
-            return False
+            from hermes_cli.worktree_retention import hidden_index_edits
+            return bool(hidden_index_edits(worktree_path))
         if any(not e.startswith("?? ") for e in entries):
             return True
         include_links = _include_symlink_paths(worktree_path, repo_root)
@@ -639,7 +646,7 @@ def _worktree_merge_cache_path() -> Path:
     return get_hermes_home() / "cache" / "worktree_merge_verdicts.json"
 
 
-def _load_worktree_merge_cache() -> Dict[str, bool]:
+def _load_worktree_merge_cache() -> dict[str, bool]:
     """Load the ``git cherry`` verdict cache. Missing/corrupt cache = empty."""
     try:
         entries = json.loads(_worktree_merge_cache_path().read_text(encoding="utf-8-sig")).get("verdicts")
@@ -649,7 +656,7 @@ def _load_worktree_merge_cache() -> Dict[str, bool]:
     return {k: v for k, v in entries.items() if isinstance(v, bool)} if isinstance(entries, dict) else {}
 
 
-def _save_worktree_merge_cache(verdicts: Dict[str, bool]) -> None:
+def _save_worktree_merge_cache(verdicts: dict[str, bool]) -> None:
     """Atomically persist the newest ``_WORKTREE_MERGE_CACHE_MAX`` verdicts. Never raises."""
     try:
         items = list(verdicts.items())[-_WORKTREE_MERGE_CACHE_MAX:]
@@ -659,7 +666,7 @@ def _save_worktree_merge_cache(verdicts: Dict[str, bool]) -> None:
 
 
 def _worktree_commits_all_merged_upstream(
-    worktree_path: str, timeout: int = 30, max_ahead: int = 20, cache: Optional[Dict[str, bool]] = None,
+    worktree_path: str, timeout: int = 30, max_ahead: int = 20, cache: Optional[dict[str, bool]] = None,
 ) -> bool:
     """Whether every local-only commit is patch-equivalent (``git cherry``) to upstream. Fails SAFE -> False.
 
@@ -714,7 +721,7 @@ def _worktree_current_branch(worktree_path: str, timeout: int) -> Optional[str]:
 
 
 def _worktree_branch_pr_merged(
-    worktree_path: str, timeout: int = 15, cache: Optional[Dict[str, bool]] = None,
+    worktree_path: str, timeout: int = 15, cache: Optional[dict[str, bool]] = None,
 ) -> bool:
     """Whether the branch's PR is MERGED on GitHub (``gh pr list``). Fails SAFE toward False.
 
@@ -737,6 +744,7 @@ def _worktree_branch_pr_merged(
         result = subprocess.run(
             ["gh", "pr", "list", "--head", branch, "--state", "merged", "--json", "number", "--limit", "1"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, cwd=worktree_path,
+            check=False,
         )
         if result.returncode != 0:
             return False
@@ -749,7 +757,7 @@ def _worktree_branch_pr_merged(
         return False
 
 
-def _fetch_remote_branch_heads(repo_root: str, timeout: int = 20) -> Optional[Dict[str, str]]:
+def _fetch_remote_branch_heads(repo_root: str, timeout: int = 20) -> Optional[dict[str, str]]:
     """``{branch: sha}`` for every branch on origin (one ``ls-remote``), or None = cannot verify, preserve.
 
     Managed installs fetch a single-branch refspec, so pushed PR branches have no
@@ -769,7 +777,7 @@ def _fetch_remote_branch_heads(repo_root: str, timeout: int = 20) -> Optional[Di
 
 
 def _worktree_branch_pushed_exact(
-    worktree_path: str, remote_heads: Optional[Dict[str, str]], timeout: int = 10,
+    worktree_path: str, remote_heads: Optional[dict[str, str]], timeout: int = 10,
 ) -> bool:
     """Whether the branch head is EXACTLY what origin holds (tree redundant; reap it, keep the branch).
 
@@ -787,58 +795,145 @@ def _worktree_branch_pushed_exact(
         return False
 
 
+# ``hermes pid=<pid>`` (classic launch), ``hermes pid=<pid> db=<state.db>`` (``--tui -w`` launch)
+# and ``hermes session=<id> db=<state.db>`` (re-lock when the TUI exits). Read raw from the admin
+# dir: plain ``list --porcelain`` C-quotes a reason holding a backslash, a quote, a control or a
+# non-ASCII byte (every Windows path), and the ``db=`` path would never parse.
+_HERMES_LOCK_RE = re.compile(r"hermes (?:pid=(\d+)|session=\S+)(?: db=(.+))?", re.DOTALL)
+
+
+def _retain_worktree_for_session(repo_root: str, worktree_path: str, session_id: str, db_path) -> bool:
+    """Re-lock a ``--tui -w`` tree its exiting launcher retains, naming the session that uses it.
+
+    The tree stays live while any resumable session of that store works inside it
+    (``_retained_tree_is_live``), not only the named one: ``/new`` leaves the older session's
+    history in the same checkout.
+    """
+    _git_quiet(["worktree", "unlock", worktree_path], repo_root, log="worktree unlock before retain failed")
+    try:
+        result = _git(["worktree", "lock", "--reason", f"hermes session={session_id} db={db_path}",
+                       worktree_path], repo_root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("worktree retain lock failed for %s: %s", worktree_path, exc)
+        return False
+    return result.returncode == 0
+
+
+def _retained_tree_is_live(db_path: str, worktree_path: str) -> bool:
+    """Whether a session that can still be resumed has its frozen cwd inside the retained tree:
+    a row with history or pending gateway work. A missing store means the profile is gone;
+    unreadable fails SAFE (live)."""
+    import sqlite3
+    from urllib.parse import quote
+
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    def key(value) -> str:  # native path identity: Windows is case-insensitive, either separator
+        return os.path.normcase(str(value)).replace("\\", "/").rstrip("/")
+
+    roots = {key(Path(worktree_path)), key(Path(worktree_path).resolve())}
+
+    def inside(cwd) -> int:
+        return int(bool(cwd) and any(key(cwd) == r or key(cwd).startswith(r + "/") for r in roots))
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True, timeout=2)
+        try:
+            conn.create_function("hermes_inside_tree", 1, inside, deterministic=True)
+            row = conn.execute(
+                "SELECT 1 FROM sessions s WHERE hermes_inside_tree(s.cwd) AND (s.message_count>0 OR EXISTS ("
+                "SELECT 1 FROM session_admissions a WHERE a.target_session_id=s.id AND a.status!='terminal')) "
+                "LIMIT 1").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.debug("retained worktree session check failed (%s); keeping tree", exc)
+        return True
+    return row is not None
+
+
+def _worktree_lock_reason(repo_root: str, worktree_path: str, timeout: int):
+    """``(found, reason)`` from the tree's admin dir (``gitdir:`` of its ``.git`` file, under
+    ``<common-dir>/worktrees/``); reason is ``None`` when unlocked and ``""`` for a bare lock.
+    Read raw and trimmed, as git does: ``list --porcelain -z`` needs git 2.36. Raises when git
+    or the admin dir cannot be read."""
+    common = _git_out(["rev-parse", "--git-common-dir"], repo_root, timeout=timeout)
+    if not common:
+        raise RuntimeError("not a git repository")
+    tree = Path(worktree_path)
+    if not (tree / ".git").is_file():
+        return False, None  # no tree there, or the main checkout
+    link = (tree / ".git").read_text(encoding="utf-8-sig")
+    if not link.startswith("gitdir:"):
+        raise RuntimeError(f"unreadable .git file in {tree}")
+    admin = (tree / link[len("gitdir:"):].strip()).resolve()
+    if admin.parent != (Path(repo_root) / common / "worktrees").resolve():
+        return False, None  # a checkout of another repository
+    try:
+        return True, (admin / "locked").read_text(encoding="utf-8-sig", errors="replace").strip(" \t\n\v\f\r")
+    except FileNotFoundError:
+        return True, None
+
+
 def _worktree_lock_is_live(repo_root: str, worktree_path: str, timeout: int = 10):
-    """Lock state: ``"live"`` (owning pid runs), ``"dead"`` (pid gone / non-hermes reason), None (unlocked).
+    """Lock state: ``"live"`` (owning pid runs / a resumable session works in the tree),
+    ``"dead"`` (pid and sessions gone / non-hermes reason), None (unlocked).
 
     ``hermes -w`` locks with reason ``hermes pid=<pid>``; ``worktree remove --force`` refuses
-    locked trees, so a crashed session's lock would keep its tree forever. Fails SAFE toward "live".
+    locked trees, so a crashed session's lock would keep its tree forever. A ``--tui -w`` tree
+    also names its profile's ``state.db`` from creation, so a launcher killed with its terminal
+    (SIGHUP skips the exit re-lock) still keeps the tree. Fails SAFE toward "live", including
+    a ``hermes`` reason this version cannot parse.
     """
     try:
-        listing = _git_out(["worktree", "list", "--porcelain"], repo_root, timeout=timeout)
+        found, reason = _worktree_lock_reason(repo_root, worktree_path, timeout)
     except Exception:
-        listing = None
-    if listing is None:
         return "live"
+    if not found or reason is None:
+        return None
+    if not reason.startswith("hermes "):
+        # A foreign lock here is a leftover; the age/dirty/unpushed gates already passed.
+        return "dead"
+    lock = _HERMES_LOCK_RE.fullmatch(reason)
+    if lock is None:
+        return "live"
+    pid, db_path = lock.groups()
+    if pid is not None:
+        if int(pid) == os.getpid():
+            return "live"
+        try:
+            from gateway.status import _pid_exists
+            if _pid_exists(int(pid)):
+                return "live"
+        except Exception:
+            return "live"
+    if db_path is not None:
+        return "live" if _retained_tree_is_live(db_path, worktree_path) else "dead"
+    return "dead" if pid is not None else "live"  # a session lock without its store: unverifiable
 
-    target = Path(worktree_path).resolve()
-    current: Optional[Path] = None
-    for line in listing.splitlines():
-        if line.startswith("worktree "):
-            try:
-                current = Path(line[len("worktree "):].strip()).resolve()
-            except Exception:
-                current = None
-        elif line == "locked" or line.startswith("locked "):
-            if current != target:
-                continue
-            reason = line[len("locked"):].strip()
-            m = re.search(r"hermes pid=(\d+)", reason)
-            if not m:
-                # A foreign lock here is a leftover; the age/dirty/unpushed gates already passed.
-                return "dead"
-            pid = int(m.group(1))
-            if pid == os.getpid():
-                return "live"
-            try:
-                from gateway.status import _pid_exists
-                return "live" if _pid_exists(pid) else "dead"
-            except Exception:
-                return "live"
-    return None
+
+# Trees Hermes names itself (``hermes -w`` sessions, subagent isolation) age on the base tier.
+_AUTO_TREE_PREFIXES = ("hermes-", "subagent-")
+
+
+def prune_tier_hours(name: str, max_age_hours: float) -> float:
+    """Idle hours before a tree may be reclaimed: *max_age_hours* for Hermes-made trees
+    (``hermes-*``, ``subagent-*``), 3x for deliberately named ones."""
+    return max_age_hours if name.startswith(_AUTO_TREE_PREFIXES) else max_age_hours * 3
 
 
 def _prune_candidates(worktrees_dir: Path, max_age_hours: int, now: float) -> list:
     """Phase 1, stat-only age filter -> ``[(entry, mtime, force)]`` for trees past their soft cutoff.
 
-    Kanban trees (``t_<hex>``) belong to the kanban gc. ``hermes-*`` trees age on *max_age_hours*,
-    deliberately named trees at 3x; *force* marks the hard (3x) tier.
+    Kanban trees (``t_<hex>``) belong to the kanban gc. Hermes-made trees age on *max_age_hours*,
+    deliberately named trees at 3x (``prune_tier_hours``); *force* marks the hard (3x) tier.
     """
     kanban_re = re.compile(r"^t_[0-9a-f]+$")
     candidates: list = []
     for entry in sorted(worktrees_dir.iterdir()):
         if not entry.is_dir() or kanban_re.match(entry.name):
             continue
-        tier_hours = max_age_hours if entry.name.startswith("hermes-") else max_age_hours * 3
+        tier_hours = prune_tier_hours(entry.name, max_age_hours)
         try:
             mtime = entry.stat().st_mtime
             if mtime > now - (tier_hours * 3600):
@@ -849,34 +944,26 @@ def _prune_candidates(worktrees_dir: Path, max_age_hours: int, now: float) -> li
     return candidates
 
 
-def _remote_heads_getter(repo_root: str):
-    """Lazy once-per-sweep ls-remote: only paid when a tree reaches the pushed tier (TUI runs this sync)."""
-    memo: dict = {}
-    lock = threading.Lock()
-
-    def get():
-        with lock:
-            if "heads" not in memo:
-                memo["heads"] = _fetch_remote_branch_heads(repo_root, timeout=10)
-            return memo["heads"]
-    return get
-
-
-def _classify_prune_candidates(repo_root: str, candidates: list, *, merge_cache=None,
-                               get_remote_heads=None) -> list:
+def _classify_prune_candidates(repo_root: str, candidates: list) -> list:
     """Phase 2, parallel read-only classification -> ``[(entry, mtime, force, verdict, lock_state)]``.
 
     verdict in ``dirty`` / ``unpushed`` / ``locked-live`` / ``reap`` / ``reap-keep-branch``. Each
     check is a read-only query on a distinct worktree (no repo-wide lock), so a bounded pool is
-    safe; mutation stays serial. ``git cherry`` verdicts are memoized on disk; a caller-supplied
-    *merge_cache* / *get_remote_heads* is shared across calls and the caller saves the cache.
+    safe; mutation stays serial. ``git cherry`` verdicts are memoized on disk.
     """
-    owns_cache = merge_cache is None
-    if owns_cache:
-        merge_cache = _load_worktree_merge_cache()
+    merge_cache = _load_worktree_merge_cache()
     cache_size_before = len(merge_cache)
     cache_lock = threading.Lock()
-    _get_remote_heads = get_remote_heads or _remote_heads_getter(repo_root)
+
+    # Lazy once-per-sweep ls-remote: only paid when a tree reaches the pushed tier (TUI runs this sync).
+    _remote_heads_memo: dict = {}
+    _remote_heads_lock = threading.Lock()
+
+    def _get_remote_heads():
+        with _remote_heads_lock:
+            if "heads" not in _remote_heads_memo:
+                _remote_heads_memo["heads"] = _fetch_remote_branch_heads(repo_root, timeout=10)
+            return _remote_heads_memo["heads"]
 
     def _classify(item):
         entry, mtime, force = item
@@ -920,7 +1007,7 @@ def _classify_prune_candidates(repo_root: str, candidates: list, *, merge_cache=
         logger.debug("Parallel worktree classification failed (%s); serial", e)
         verdicts = [_classify(c) for c in candidates]
 
-    if owns_cache and len(merge_cache) != cache_size_before:
+    if len(merge_cache) != cache_size_before:
         _save_worktree_merge_cache(merge_cache)
     return verdicts
 
@@ -929,27 +1016,23 @@ def _classify_prune_candidates(repo_root: str, candidates: list, *, merge_cache=
 _PRESERVE_REASONS = {"dirty": "uncommitted changes", "unpushed": "unpushed commits"}
 
 
-def _reap_prune_verdicts(repo_root: str, verdicts: list, stale_work_cutoff: float, *,
-                         merge_cache=None, get_remote_heads=None) -> tuple[list, set]:
+def removal_blocked(path: str) -> Optional[tuple[str, str]]:
+    """``(keep-action, reason)`` when deleting the clean tree at *path* would lose something no
+    branch holds (``worktree_retention.removal_blocker``: a checked-out submodule, an embedded
+    repository, a per-worktree ref); unverifiable counts as blocked."""
+    from hermes_cli.worktree_retention import removal_blocker
+    return removal_blocker(path)
+
+
+def _reap_prune_verdicts(repo_root: str, verdicts: list, stale_work_cutoff: float) -> tuple[list, set]:
     """Phase 3, serial unlock / remove / branch -D -> ``(preserved_stale, kept_branches)``.
 
     *kept_branches* must survive the orphaned-branch pass. Branch deletion is gated on
     ``worktree remove`` succeeding so a failed removal never orphans reachable commits.
     """
-    from hermes_cli._subprocess_compat import noninteractive_repo_git_env
     preserved_stale: list = []
     kept_branches: set = set()
     for entry, mtime, force, verdict, lock_state in verdicts:
-        # Keep the original candidate set, but refresh its destructive safety gates:
-        # classification can precede removal by a long parallel sweep.
-        if verdict in {"reap", "reap-keep-branch"}:
-            try:
-                (_, _, _, verdict, lock_state), = _classify_prune_candidates(
-                    repo_root, [(entry, mtime, force)], merge_cache=merge_cache,
-                    get_remote_heads=get_remote_heads)
-            except Exception as exc:
-                logger.debug("Could not revalidate worktree %s: %s", entry.name, exc)
-                continue
         reason = _PRESERVE_REASONS.get(verdict)
         if reason:
             if mtime <= stale_work_cutoff:
@@ -958,6 +1041,10 @@ def _reap_prune_verdicts(repo_root: str, verdicts: list, stale_work_cutoff: floa
         if verdict == "locked-live":
             logger.debug("Skipping live-locked worktree: %s", entry.name)
             continue
+        blocked = removal_blocked(str(entry))
+        if blocked:
+            preserved_stale.append(f"{entry.name} ({blocked[1]})")
+            continue
 
         if lock_state == "dead":
             _git_quiet(["worktree", "unlock", str(entry)], repo_root,
@@ -965,21 +1052,7 @@ def _reap_prune_verdicts(repo_root: str, verdicts: list, stale_work_cutoff: floa
 
         try:
             branch = _git(["branch", "--show-current"], str(entry), timeout=5).stdout.strip()
-            # Our own .worktreeinclude symlinks are the only untracked state a reap verdict
-            # allows; drop them so the plain (non --force) remove still succeeds.
-            for rel in _include_symlink_paths(str(entry), repo_root):
-                (entry / rel).unlink()
-            # Without --force, remove reads the tree's index, which runs core.fsmonitor.
-            remove_env = noninteractive_repo_git_env(str(entry))
-            if remove_env is None:
-                continue
-            remove_result = _git(["worktree", "remove", str(entry)], repo_root, timeout=15,
-                                 stdin=subprocess.DEVNULL, env=remove_env)
-            # Plain remove always refuses trees with submodules; --force only after a fresh clean check.
-            if (remove_result.returncode != 0 and "submodules" in remove_result.stderr
-                    and not _worktree_is_dirty(str(entry), repo_root)):
-                remove_result = _git(["worktree", "remove", "--force", str(entry)], repo_root,
-                                     timeout=15, stdin=subprocess.DEVNULL, env=remove_env)
+            remove_result = _git(["worktree", "remove", str(entry), "--force"], repo_root, timeout=15)
             if remove_result.returncode != 0:
                 logger.debug("Failed to remove worktree %s: %s", entry.name, remove_result.stderr.strip())
                 continue
@@ -998,13 +1071,38 @@ def _reap_prune_verdicts(repo_root: str, verdicts: list, stale_work_cutoff: floa
 def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     """Remove stale worktrees and orphaned branches on startup.
 
-    Guards at every tier and age: dirty trees are never removed; unpushed commits are never
-    removed UNLESS patch-equivalent to upstream, the PR is MERGED on GitHub, or the head EXACTLY
-    matches origin (tree reaped, branch kept). Live-locked trees are skipped; dead locks are
-    unlocked first. Trees preserved >7 days are listed in one WARNING so work can't rot silently.
-    Phases: ``_prune_candidates`` -> ``_classify_prune_candidates`` -> ``_reap_prune_verdicts``
-    -> ``_prune_orphaned_branches``.
+    Default (``worktrees.archive_dirty: true``): ``worktree_sweep.run_sweep`` — an idle dirty or
+    unpushed tree past its tier is archived to ``refs/hermes/archive/<tree>`` and then removed;
+    live trees (lock owner or any process inside) and Kanban trees are never touched.
+    ``archive_dirty: false`` (no size budget) runs the classic pass below: dirty trees are never
+    removed; unpushed commits are never removed UNLESS patch-equivalent to upstream, the PR is
+    MERGED on GitHub, or the head EXACTLY matches origin (tree reaped, branch kept). Live-locked
+    trees are skipped; dead locks are unlocked first. Phases: ``_prune_candidates`` ->
+    ``_classify_prune_candidates`` -> ``_reap_prune_verdicts`` -> ``_prune_orphaned_branches``.
     """
+    try:
+        _prune_stale_worktree_trees(repo_root, max_age_hours)
+    finally:
+        _reclaim_orphan_install_states()
+
+
+def _reclaim_orphan_install_states() -> None:
+    """Trees removed by any path (the prune pass, `git worktree remove` by hand, `rm -rf` of a
+    scratch clone) leave their ~200 MB dependency state under <home>/installs/; reclaim it on
+    every pass, including the early returns where no tree is old enough to prune. Startup
+    maintenance must never block a launch; the traceback goes to the debug log."""
+    try:
+        from pm.environments import installs_root
+        from pm.install_states import collect_orphan_install_states
+
+        reclaimed = collect_orphan_install_states(installs_root())
+        if reclaimed:
+            logger.info("Reclaimed %d dependency state dir(s) of deleted checkouts", len(reclaimed))
+    except Exception:
+        logger.debug("Orphan install-state reclaim failed", exc_info=True)
+
+
+def _prune_stale_worktree_trees(repo_root: str, max_age_hours: int) -> None:
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
         _prune_orphaned_branches(repo_root)
@@ -1014,23 +1112,21 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     if _repo_is_shallow(repo_root):
         _deepen_shallow_repo(repo_root)
 
+    from hermes_cli import worktree_sweep
+    settings = worktree_sweep.sweep_settings()
+    if not worktree_sweep.classic_mode(settings):
+        worktree_sweep.run_sweep(repo_root, max_age_hours, settings)
+        _warn_worktree_footprint(repo_root)
+        return
+
     now = time.time()
     candidates = _prune_candidates(worktrees_dir, max_age_hours, now)
     if not candidates:
         _prune_orphaned_branches(repo_root)
         return
 
-    # One disk cache + one ls-remote shared by classification and the per-tree revalidation.
-    merge_cache = _load_worktree_merge_cache()
-    cache_size_before = len(merge_cache)
-    get_remote_heads = _remote_heads_getter(repo_root)
-    verdicts = _classify_prune_candidates(repo_root, candidates, merge_cache=merge_cache,
-                                          get_remote_heads=get_remote_heads)
-    preserved_stale, kept_branches = _reap_prune_verdicts(
-        repo_root, verdicts, now - (7 * 24 * 3600), merge_cache=merge_cache,
-        get_remote_heads=get_remote_heads)
-    if len(merge_cache) != cache_size_before:
-        _save_worktree_merge_cache(merge_cache)
+    verdicts = _classify_prune_candidates(repo_root, candidates)
+    preserved_stale, kept_branches = _reap_prune_verdicts(repo_root, verdicts, now - (7 * 24 * 3600))
 
     if preserved_stale:
         logger.warning("Preserving %d worktree(s) older than 7 days with unmerged work "
@@ -1038,8 +1134,11 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
                        len(preserved_stale), ", ".join(sorted(preserved_stale)))
 
     _prune_orphaned_branches(repo_root, protect=kept_branches)
+    _warn_worktree_footprint(repo_root)
 
-    # The conservative startup pass accumulates trees it can never reclaim; say so once per launch.
+
+def _warn_worktree_footprint(repo_root: str) -> None:
+    """The startup pass can leave trees it may not reclaim; say so once per launch."""
     try:
         from hermes_cli.worktree_gc import worktrees_summary
 
@@ -1049,7 +1148,7 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
             logger.warning(".worktrees/ holds %d tree(s) (%s) — run `hermes worktree list` "
                            "to audit and `hermes worktree prune` to reclaim safely.", count, size_txt)
     except Exception:
-        pass
+        logger.debug("worktree summary failed", exc_info=True)
 
 
 def _prune_orphaned_branches(repo_root: str, protect: Optional[set] = None) -> None:
