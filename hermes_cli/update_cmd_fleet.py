@@ -1336,6 +1336,7 @@ def _restart_one_systemd_gateway_unit(
 
 def _restart_systemd_gateway_units(
     restarted_services, failed_or_stale_units, restarted_scoped_units, drain_budget, self_restart_pending=None,
+    failed_scoped_units=None,
 ):
     """Restart every active hermes-gateway*/hermes-serve* systemd unit (user + system).
 
@@ -1402,6 +1403,7 @@ def _restart_systemd_gateway_units(
             continue
         # Scope-qualify before the next unit; ``finally`` so a mid-pass abort keeps settled units.
         _scope_mark = len(restarted_services)
+        _failed_mark = len(failed_or_stale_units)
         try:
             _restart_one_systemd_gateway_unit(
                 svc_name,
@@ -1417,6 +1419,8 @@ def _restart_systemd_gateway_units(
             _on_unit_timeout(svc_name, exc)
         finally:
             restarted_scoped_units.update(f"{scope}/{name}" for name in restarted_services[_scope_mark:])
+            if failed_scoped_units is not None:
+                failed_scoped_units.update(f"{scope}/{name}" for name in failed_or_stale_units[_failed_mark:])
 
 
 def _unit_main_pid(scope_cmd: list, svc_name: str) -> int:
@@ -1450,6 +1454,9 @@ class _GatewayRestartOutcome:
     relaunched_profiles: list
     externally_supervised_profiles: list
     killed_pids: set
+    #: ``scope/name`` for units whose restart was declined or failed. Bare names above remain
+    #: the backwards-compatible receipt vocabulary; this companion preserves the recovery command.
+    failed_scoped_units: set = field(default_factory=set)
     #: Gateways stopped with NO successor (no profile mapping / relaunch could not be armed);
     #: the summary tells the user to restart them by hand, so the fleet probe must not expect
     #: a row for them.
@@ -1726,7 +1733,7 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
 
         _restart_systemd_gateway_units(
             out.restarted_services, out.failed_or_stale_units, restarted_scoped_units, _drain_budget,
-            out.self_restart_pending_pids,
+            out.self_restart_pending_pids, out.failed_scoped_units,
         )
 
         # macOS: EVERY ai.hermes.gateway* LaunchAgent (systemd parity).

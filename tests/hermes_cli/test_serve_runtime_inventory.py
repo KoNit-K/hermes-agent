@@ -111,6 +111,33 @@ def test_inventory_classifies_desktop_owned_serve(monkeypatch):
     assert serves[0].restart_via == "desktop"
 
 
+def test_inventory_classifies_system_scope_dashboard_from_its_verified_unit(monkeypatch):
+    """A ledger dashboard owned by a system unit must not be treated as manual serve."""
+    entry = _ledger_entry(purpose="dashboard")
+    fake_pi = SimpleNamespace(ledger_entries=lambda **k: [entry], spawner_is_dead=lambda e: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli.process_identity", fake_pi)
+    monkeypatch.setattr(main_dashboard, "_get_systemd_service_for_pid", lambda pid: "hermes-dashboard.service")
+    monkeypatch.setattr(main_dashboard, "_get_pid_cgroup_path", lambda pid: "/system.slice/hermes-dashboard.service")
+    plan = update_inventory.collect_runtime_inventory()
+    row = next(r for r in plan.runtimes if r.kind == "dashboard")
+    assert row.supervisor == "systemd"
+    assert row.detail["systemd_unit"] == "hermes-dashboard.service"
+    assert row.detail["systemd_scope"] == "system"
+
+
+def test_stale_system_dashboard_names_its_system_scope_restart(monkeypatch, capsys):
+    from hermes_cli import update_abort_recovery
+
+    monkeypatch.setattr(update_abort_recovery.sys, "platform", "linux")
+    update_abort_recovery._warn_stale_serve_runtimes([{
+        "pid": 4321, "kind": "dashboard", "profile": "default", "supervisor": "systemd",
+        "detail": {"systemd_unit": "hermes-dashboard.service", "systemd_scope": "system"},
+    }])
+    output = capsys.readouterr().out
+    assert "sudo systemctl restart hermes-dashboard.service" in output
+    assert "Ask their owner" not in output
+
+
 _SSH_ARGV = ("hermes serve --isolated --host 127.0.0.1 --port 0 "
              "--ssh-session-token-file /h/.hermes/desktop-ssh/a/b.token --ssh-owner-nonce 0123456789abcdef")
 

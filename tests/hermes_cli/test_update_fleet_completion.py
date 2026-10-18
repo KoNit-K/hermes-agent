@@ -60,3 +60,28 @@ def test_fleet_completion_preserves_runtime_verdict_and_restart_obligation(
     assert update_cmd_fleet._fleet_restart_obligation_armed() is (state != "current")
     assert migrated == ([True] if healthy else [])
     assert refreshed == [{"already_restarted_units": {"hermes-gateway"}}]
+
+
+def test_failed_system_dashboard_is_not_retried_and_its_followup_names_the_unit(monkeypatch):
+    """The fleet's no-sudo decision is final for this update (#141021)."""
+    refreshed, followups = [], []
+    restart = update_cmd_fleet._GatewayRestartOutcome(
+        incomplete=True, phase_errors=[], pre_restart_gateway_pids=[],
+        restarted_services=["hermes-gateway"], failed_or_stale_units=["hermes-dashboard.service"],
+        relaunched_profiles=[], externally_supervised_profiles=[], killed_pids=set(),
+        failed_scoped_units={"system/hermes-dashboard.service"},
+    )
+    monkeypatch.setattr(fleet_verify, "_print_legacy_units_warning", lambda: None)
+    monkeypatch.setattr(update_cmd, "_surviving_pre_update_serve_runtimes", lambda plan: [])
+    monkeypatch.setattr(update_cmd_maint, "_refresh_dashboard_after_update", lambda **kwargs: refreshed.append(kwargs) or set())
+    monkeypatch.setattr(fleet_verify, "_collect_fleet_snapshot", lambda *args: [])
+    monkeypatch.setattr(update_receipt, "print_fleet_version_matrix", lambda rows: False)
+    monkeypatch.setattr(update_receipt, "record_followup", lambda step, reason: followups.append((step, reason)))
+    monkeypatch.setattr(fleet_verify, "_record_owed_gateway_inventory", lambda *args: None)
+    monkeypatch.setattr(update_receipt, "finalize_update_receipt", lambda *args, **kwargs: None)
+
+    fleet_verify._verify_fleet_after_update(
+        restart, _pre_update_plan=None, _windows_gateway_resume=None, update_complete=True)
+
+    assert refreshed == [{"already_restarted_units": {"hermes-gateway", "hermes-dashboard.service"}}]
+    assert followups == [("gateway_restart", "dashboard service may still run pre-update code; recover with `sudo systemctl restart hermes-dashboard.service`")]

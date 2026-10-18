@@ -38,6 +38,7 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
                 "pid": pid, "kind": str(getattr(runtime, "kind", "")),
                 "profile": str(getattr(runtime, "profile", "")),
                 "supervisor": str(getattr(runtime, "supervisor", "")),
+                "detail": dict(detail) if isinstance(detail, dict) else {},
                 "_create_time": _numeric(detail.get("create_time") if isinstance(detail, dict) else None)}
     except Exception as exc:
         logger.debug("Could not read planned serve runtimes: %s", exc)
@@ -234,9 +235,22 @@ def _warn_stale_serve_runtimes(rows) -> None:
         print(
             f"      pid {row.get('pid')} — {row.get('kind')}"
             f" (profile {row.get('profile') or 'default'}, {row.get('supervisor') or 'unknown'})")
-    print("    Ask their owner to relaunch `hermes serve` / `hermes dashboard`, or reconnect Desktop for an SSH backend.")
-    if sys.platform == "linux" and any(row.get("supervisor") == "systemd" for row in rows):
-        print("    For unit-managed backends: `systemctl --user restart hermes-serve.service`.")
+    non_systemd = [row for row in rows if row.get("supervisor") != "systemd"]
+    if non_systemd:
+        print("    Ask their owner to relaunch `hermes serve` / `hermes dashboard`, or reconnect Desktop for an SSH backend.")
+    if sys.platform == "linux":
+        systemd_commands = set()
+        for row in rows:
+            if row.get("supervisor") != "systemd":
+                continue
+            detail = row.get("detail") or {}
+            unit = detail.get("systemd_unit")
+            scope = detail.get("systemd_scope")
+            if unit:
+                systemd_commands.add(
+                    f"systemctl --user restart {unit}" if scope == "user" else f"sudo systemctl restart {unit}")
+        for command in sorted(systemd_commands):
+            print(f"    For this unit-managed backend: `{command}`.")
     if sys.platform == "darwin" and any(row.get("supervisor") == "launchd" for row in rows):
         print("    For launchd-managed backends: `launchctl kickstart -k gui/$UID/<label>`.")
 

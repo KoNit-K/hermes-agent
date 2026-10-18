@@ -202,7 +202,11 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
     # a systemd-owned PID reads as clean stop and leaves the Cloudflare origin dead).
     # Already-restarted units aren't redone.
     # A dashboard it stopped and could not bring back is a promised restart that did not happen.
-    _dashboards_down = _refresh_dashboard_after_update(already_restarted_units=set(restart.restarted_services))
+    # A fleet unit is handled once this update has attempted it, not only once it
+    # restarted successfully. Retrying a system-scope dashboard here bypasses the
+    # fleet's non-interactive privilege check and invokes polkit a second time.
+    _handled_dashboard_units = set(restart.restarted_services) | set(restart.failed_or_stale_units)
+    _dashboards_down = _refresh_dashboard_after_update(already_restarted_units=_handled_dashboard_units)
     if _dashboards_down:
         restart.incomplete = True
 
@@ -330,11 +334,27 @@ def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_re
         # warns about it, and the next `hermes update` retries the restart.
         from hermes_cli.update_receipt import record_followup
         stopped = sorted(getattr(restart, "stopped_unmapped_pids", None) or ())
+        dashboard_units = sorted(
+            unit for unit in getattr(restart, "failed_scoped_units", ())
+            if unit.partition("/")[2].startswith("hermes-dashboard")
+        )
+        if dashboard_units:
+            commands = []
+            for scoped_unit in dashboard_units:
+                scope, _, unit = scoped_unit.partition("/")
+                command = f"systemctl --user restart {unit}" if scope == "user" else f"sudo systemctl restart {unit}"
+                commands.append(command)
+            reason = "dashboard service may still run pre-update code; recover with " + ", ".join(
+                f"`{command}`" for command in commands)
+        else:
+            reason = (
+                "gateways may still run pre-update code or were stopped without a successor"
+                + (f" (stopped PIDs {', '.join(map(str, stopped))})" if stopped else "")
+                + "; recover with `hermes gateway restart`"
+            )
         record_followup(
             "gateway_restart",
-            "gateways may still run pre-update code or were stopped without a successor"
-            + (f" (stopped PIDs {', '.join(map(str, stopped))})" if stopped else "")
-            + "; recover with `hermes gateway restart`",
+            reason,
         )
         with _best_effort('Fleet restart inventory not recorded: %s'):
             _record_owed_gateway_inventory(_pre_update_plan, stopped)

@@ -271,6 +271,18 @@ def _is_desktop_ssh_ledger_entry(entry: dict) -> bool:
         return False
 
 
+def _systemd_owner_for_ledger_entry(pid: int) -> tuple[str, str | None] | None:
+    """Return the owning systemd unit and scope for a ledger backend, if proven."""
+    with suppress(Exception):
+        from hermes_cli import main_dashboard as dashboard
+
+        unit = dashboard._get_systemd_service_for_pid(pid)
+        if unit:
+            cgroup = dashboard._get_pid_cgroup_path(pid)
+            return unit, dashboard._extract_scope_from_cgroup(cgroup or "")
+    return None
+
+
 def _collect_ledger_runtimes(plan: UpdatePlan, seen: set[int]) -> None:
     """Serve/dashboard backends from the spawn ledger — runtimes the gateway collectors can never see
     (a manual `hermes serve --host <ip>` for a remote Desktop, a long-lived `hermes dashboard`).
@@ -294,8 +306,12 @@ def _collect_ledger_runtimes(plan: UpdatePlan, seen: set[int]) -> None:
                 "port": entry.get("port"), "create_time": entry.get("create_time"),
             }
             job = _launchd_owner_for_ledger_entry(entry, pid, launchd_jobs) if launchd_jobs else None
+            systemd_owner = _systemd_owner_for_ledger_entry(pid)
             if job:
                 supervisor, detail["launchd_domain"], detail["launchd_label"] = "launchd", job[0], job[1]
+            elif systemd_owner:
+                supervisor, detail["systemd_unit"], detail["systemd_scope"] = (
+                    "systemd", systemd_owner[0], systemd_owner[1])
             elif _is_desktop_ssh_ledger_entry(entry):
                 # No local spawner, so the probe below would read manual-serve and file a reminder
                 # nobody here can discharge; its token file and owner nonce belong to the client.
