@@ -85,6 +85,7 @@ def _make_manager(
         upload_fn=MagicMock(),
         delete_fn=MagicMock(),
         bulk_download_fn=bulk_download_fn,
+        get_remote_time_fn=time.time,
     )
     if seed_pushed_state:
         # Seed _pushed_hashes so sync_back's "nothing previously pushed"
