@@ -18,6 +18,7 @@ import time
 import threading
 from unittest.mock import patch
 
+from hermes_cli import web_server_app
 import hermes_cli.web_server as web_server_mod
 import hermes_cli.web_server_lifecycle as _web_server_lifecycle
 
@@ -63,7 +64,7 @@ def test_lifespan_warmup_is_synchronous(monkeypatch):
 
 
 def test_lifespan_enters_and_exits_as_an_async_context_manager(monkeypatch):
-    """FastAPI gets ``_lifespan`` as an async context manager, never a bare async generator
+    """FastAPI gets ``app_lifespan`` as an async context manager, never a bare async generator
     (Starlette's deprecated path), and entering it runs the desktop's first-install check."""
     from hermes_cli import anon_auth, install_state
 
@@ -74,7 +75,7 @@ def test_lifespan_enters_and_exits_as_an_async_context_manager(monkeypatch):
     monkeypatch.setattr(install_state, "probe", lambda: probed.append(True))
 
     async def _run() -> None:
-        async with web_server_mod._lifespan(web_server_mod.app):
+        async with web_server_mod.app_lifespan(web_server_mod.app):
             assert probed == [True]
 
     asyncio.run(_run())
@@ -85,10 +86,10 @@ def test_lifespan_registers_configured_shell_hooks(monkeypatch):
     registered: list[bool] = []
     monkeypatch.setattr(web_server_mod, "_warm_gateway_module", lambda: None)
     monkeypatch.setattr(web_server_mod, "_eager_reconcile_own_session_db", lambda: None)
-    monkeypatch.setattr(web_server_mod, "_register_configured_shell_hooks", lambda: registered.append(True))
+    monkeypatch.setattr(web_server_app, "_register_configured_shell_hooks", lambda: registered.append(True))
 
     async def _run() -> None:
-        async with web_server_mod._lifespan(web_server_mod.app):
+        async with web_server_mod.app_lifespan(web_server_mod.app):
             assert registered == [True]
 
     asyncio.run(_run())
@@ -100,14 +101,14 @@ def test_register_configured_shell_hooks_uses_launch_config(monkeypatch):
 
     config = {"hooks": {"on_session_start": [{"command": "hook-command"}]}}
     calls: list[tuple[object, bool]] = []
-    monkeypatch.setattr(web_server_mod, "load_config", lambda: config)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
     monkeypatch.setattr(
         shell_hooks,
         "register_from_config",
         lambda actual_config, accept_hooks=False: calls.append((actual_config, accept_hooks)),
     )
 
-    web_server_mod._register_configured_shell_hooks()
+    web_server_app._register_configured_shell_hooks()
 
     assert calls == [(config, False)]
 
