@@ -7,6 +7,8 @@ The authority test is "does this worker act for a ROUTED home", exactly as ``ser
 decides it. The secret scope bound around the env build is what supplies B's OWN values for the
 dispatcher's declared ``terminal.env_passthrough`` names.
 """
+from pathlib import Path
+
 import pytest
 
 from hermes_cli import kanban_db_dispatch
@@ -101,3 +103,13 @@ def test_launch_profiles_own_worker_keeps_its_credentials(tmp_path, monkeypatch)
         kanban_db_dispatch._default_spawn(task, str(tmp_path / "ws"))
 
     assert captured and captured[0].get("OPENAI_API_KEY") == "dispatcher-launch-key"
+
+
+def test_worker_for_another_profile_bootstraps_without_dispatcher_pythonpath(profile_b, monkeypatch):
+    """A routed worker starts from the installation-bound bootstrap, not PYTHONPATH."""
+    monkeypatch.setenv("PYTHONPATH", "/stale/import/root")
+    argv = kanban_db_dispatch._worker_argv(None, "b", str(profile_b))
+    assert argv[1:3] == ["-I", "-c"]
+    assert "hermes_bootstrap" in argv[3]
+    assert "hermes_cli.kanban_worker_client" in argv[3]
+    assert "os.environ.pop('PYTHONPATH', None)" in argv[3]

@@ -563,12 +563,13 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
     from tools import process_registry
 
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
+    monkeypatch.setattr(process_registry, "_IS_LINUX", True)
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
     monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
     monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
 
     def spawn_via_real_boundary(task, workspace, board=None):
-        kbd._restart_safe_worker_argv(task, ["hermes", "chat"])  # raises: real probe verdict, real _degrade()
+        kbd._restart_safe_worker_argv(task, ["hermes", "chat"])
         raise AssertionError("unreachable")
 
     with kbc.connect() as conn:
@@ -1593,7 +1594,6 @@ def test_resolve_hermes_argv_prefers_bootstrap_command_over_path_shim(monkeypatc
 
 
 
-
 def test_resolve_hermes_argv_bootstraps_from_isolated_worker_cwd(tmp_path):
     """A PM-isolated worker boots without the dispatcher's import path (#137079)."""
     import subprocess
@@ -1605,7 +1605,7 @@ def test_resolve_hermes_argv_bootstraps_from_isolated_worker_cwd(tmp_path):
         os.environ.pop("HERMES_BIN", None)
         with mock.patch.object(shutil, "which", return_value=None):
             argv = kbd._resolve_hermes_argv()
-    env = {**os.environ, "PYTHONPATH": ""}
+    env = {**os.environ, "PYTHONPATH": "", "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9", "NO_PROXY": "", "no_proxy": ""}
     r = subprocess.run(
         argv + ["--version"], cwd=tmp_path, env=env,
         capture_output=True, text=True, timeout=30, check=False,
@@ -1616,8 +1616,8 @@ def test_resolve_hermes_argv_bootstraps_from_isolated_worker_cwd(tmp_path):
     )
 
 
-def test_default_spawn_does_not_rely_on_worker_pythonpath(tmp_path, monkeypatch):
-    """The default worker command owns its bootstrap, not ``PYTHONPATH`` (#137079)."""
+def test_default_spawn_uses_runtime_bootstrap_for_worker_client(tmp_path, monkeypatch):
+    """The real receipt-client spawn owns PM bootstrap, not ``PYTHONPATH`` (#137079)."""
     import os
     import sys
     from pathlib import Path
@@ -1649,13 +1649,12 @@ def test_default_spawn_does_not_rely_on_worker_pythonpath(tmp_path, monkeypatch)
         claim_expires=None, tenant=None, branch_name=None,
     )
 
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: [sys.executable, "-c", "pass"])
+    monkeypatch.setenv("PYTHONPATH", "/stale/import/root")
     kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert "PYTHONPATH" not in captured["env"]
-
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["/opt/hermes/bin/hermes"])
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert "PYTHONPATH" not in captured["env"]
+    assert captured["cmd"][1:3] == ["-I", "-c"]
+    assert "hermes_bootstrap" in captured["cmd"][3]
+    assert "hermes_cli.kanban_worker_client" in captured["cmd"][3]
+    assert "os.environ.pop('PYTHONPATH', None)" in captured["cmd"][3]
 
 
 # ---------------------------------------------------------------------------

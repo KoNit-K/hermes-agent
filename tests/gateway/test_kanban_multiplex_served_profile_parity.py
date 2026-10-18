@@ -44,8 +44,8 @@ def served(tmp_path, monkeypatch):
 
 
 def test_worker_for_served_profile_gets_its_own_env_and_toolset_pin(served, monkeypatch):
-    """The dispatcher (root context) spawns alpha's worker: no launch-profile settings leak into the
-    child and the ``--toolsets`` pin (whose probes read credentials) is resolved under alpha's scope."""
+    """The dispatcher (root context) spawns alpha's worker client: no launch-profile settings leak
+    into the child; the toolset pin is resolved by alpha's owner (``kanban.run``), not the dispatcher."""
     kb.init_db()
     conn = kbc.connect()
     try:
@@ -62,13 +62,15 @@ def test_worker_for_served_profile_gets_its_own_env_and_toolset_pin(served, monk
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(kbd, "_open_worker_log", lambda task, board: open("/dev/null", "w"))
-    monkeypatch.setattr(kbd, "_hermes_argv", lambda: ["hermes"], raising=False)
     kbd._default_spawn(task, str(served.alpha), board=None)
 
     env = spawned["env"]
     assert env["HERMES_HOME"] == str(served.alpha)
     assert "HERMES_MODEL" not in env and "TERMINAL_ENV" not in env
-    assert "--toolsets" in spawned["argv"]
+    assert spawned["argv"][1:3] == ["-I", "-c"]
+    assert "hermes_bootstrap" in spawned["argv"][3]
+    assert "hermes_cli.kanban_worker_client" in spawned["argv"][3]
+    assert "os.environ.pop('PYTHONPATH', None)" in spawned["argv"][3]
 
 
 class RecordingAdapter:

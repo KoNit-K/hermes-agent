@@ -712,12 +712,11 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     assert "--skills" not in cmd, (
         f"spawn argv should not auto-load any skill: {cmd}"
     )
-    assert "--accept-hooks" in cmd, f"spawn argv missing --accept-hooks: {cmd}"
-    assert cmd.index("--accept-hooks") < cmd.index("chat"), (
-        f"--accept-hooks must come before 'chat' in argv: {cmd}"
-    )
-    # Assignee + task env are still present
-    assert "some-profile" in cmd
+    assert cmd[1:3] == ["-I", "-c"]
+    assert "hermes_bootstrap" in cmd[3]
+    assert "hermes_cli.kanban_worker_client" in cmd[3]
+    assert "os.environ.pop('PYTHONPATH', None)" in cmd[3]
+    # Assignee + task identity reaches the owner client; policy is read from the board.
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
