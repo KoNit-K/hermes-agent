@@ -2,7 +2,7 @@
 
 import pytest
 
-import hermes_cli.gateway as gateway
+from hermes_cli import gateway
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry
 
