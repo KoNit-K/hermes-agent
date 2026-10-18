@@ -356,6 +356,17 @@ def settle_unrecovered_error(
     # An attended session on the free model does not sit through a long cooldown: end the attempt
     # cycle now (fallback, else the reset time and the ways forward); the copy counts attempts made.
     attempts_made = min(retry_count, max_retries)
+    if (
+        is_rate_limited
+        and getattr(agent, "_provider_fallback_active", False)
+        and agent._restore_primary_runtime()
+    ):
+        # The fallback's cooldown belongs to that route, not the original primary. Re-probe a
+        # recovered primary before parking this turn on the fallback's Retry-After window.
+        logger.info("Fallback rate-limited; restored the primary runtime for an immediate retry")
+        _retry.has_retried_429 = False
+        retry_count = 0
+        return _verdict("continue")
     if is_rate_limited and retry_count < max_retries and free_tier_cooldown_ends_turn(agent, api_error, _base):
         logger.info("%sFree-tier cooldown outlasts the attended wait — ending retries after attempt %s",
                     agent.log_prefix, retry_count)
