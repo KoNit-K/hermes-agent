@@ -151,8 +151,8 @@ export async function confirmSharedGatewayRestart(owner?: ResolvedOwner): Promis
 // `void runGatewayRestart()`, and a failure is the only thing that toasts.
 // Resolves `true` when the restart child completed cleanly (callers that keep
 // a "restart needed" banner clear it on that signal only).
-export async function runGatewayRestart(owner = resolveOwnerNow()): Promise<boolean> {
-  const context = captureActionOwner(owner)
+export async function runGatewayRestart(owner: ResolvedOwner | string = resolveOwnerNow()): Promise<boolean> {
+  const context = captureActionOwner(typeof owner === 'string' ? resolveOwnerNow({ profile: owner }) : owner)
   const shared = await confirmSharedGatewayRestart(context.owner)
 
   if (shared === false || !context.isCurrent()) {
