@@ -12,6 +12,7 @@ per-server exponential backoff so a chronically failing server is retried
 on a schedule, isolated from the rest of the bridge.
 """
 
+import time
 from unittest.mock import patch
 
 import pytest
@@ -58,6 +59,18 @@ class TestConnectCooldownHelpers:
         assert d1 == now + mcp_mod._CONNECT_RETRY_BASE_BACKOFF_SEC
         assert d2 == now + mcp_mod._CONNECT_RETRY_BASE_BACKOFF_SEC * 2
         assert mcp_mod._server_connect_failures["bad"] == 2
+
+    def test_persistent_cooldown_survives_a_fresh_process_ledger(self, tmp_path, monkeypatch):
+        """Regression for #141030: cron workers must share a failed server's cooldown."""
+        cfg = {"command": "bad-cmd", "args": ["--once"]}
+        monkeypatch.setattr(_mcp_discovery, "_connect_cooldown_path", lambda: tmp_path / "cooldown.json")
+
+        _mcp_discovery._record_connect_failure("bad", cfg)
+        mcp_mod._server_connect_retry_after.clear()
+        mcp_mod._server_connect_failures.clear()
+
+        assert _mcp_discovery._connect_cooldown_active("bad", cfg)
+        assert not _mcp_discovery._connect_cooldown_active("bad", {"command": "fixed-cmd"})
 
 
 @pytest.mark.skipif(not mcp_mod._MCP_AVAILABLE, reason="mcp SDK not installed")
@@ -109,7 +122,9 @@ class TestRegisterMcpServersIsolation:
 
             mcp_mod._server_connect_retry_after["bad"] = mcp_mod.time.monotonic() - 1
             attempts.clear()
-            _mcp_discovery.register_mcp_servers(cfg)
+            with patch("tools.mcp_tool_discovery.time.time",
+                       return_value=time.time() + mcp_mod._CONNECT_RETRY_BASE_BACKOFF_SEC + 1):
+                _mcp_discovery.register_mcp_servers(cfg)
             assert "bad" in attempts, "elapsed cooldown should permit a retry"
 
 

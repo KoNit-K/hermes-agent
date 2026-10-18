@@ -6,6 +6,8 @@ helpers) is read through ``_core`` so ``mock.patch("tools.mcp_tool.X")`` keeps w
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from contextlib import contextmanager
@@ -19,6 +21,7 @@ from tools import mcp_tool_loop as _loop
 from tools import mcp_tool_registration as _registration
 from tools.mcp_tool_schema import MCP_TOOL_NAME_PREFIX
 from tools.mcp_tool_scope import _key_name, _key_scope, _key_visible_in_scope, _resolve_server_key, _server_key
+from utils import atomic_json_write, read_json_or_empty
 
 logger = logging.getLogger("tools.mcp_tool")
 
@@ -43,25 +46,103 @@ def _discovery_connect_concurrency() -> int:
     return raw
 
 
-def _record_connect_failure(server_name: str) -> None:
-    """Stamp a geometric, capped retry cooldown after a failed connect (under ``_lock``)."""
+def _connect_cooldown_path() -> Path:
+    """Per-profile on-disk cooldown ledger, resolved at use time for multiplexing."""
+    from hermes_constants import get_hermes_home
+    return (_owner_scope_home() or Path(get_hermes_home())) / "cache" / "mcp-connect-backoff.json"
+
+
+def _connect_config_fingerprint(config: dict) -> str:
+    """Stable, non-secret identifier for the config that produced a failed connection."""
+    encoded = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _locked_connect_cooldowns():
+    """Return the cooldown ledger while holding its process-shared file lock."""
+    from hermes_cli.active_sessions import _FileLock
+    path = _connect_cooldown_path()
+    return _FileLock(path.with_suffix(".lock")), path
+
+
+def _persistent_cooldown_active(server_name: str, config: dict) -> tuple[bool, int, float]:
+    """Read this profile's matching config cooldown, returning failures and wall deadline too."""
+    lock, path = _locked_connect_cooldowns()
+    try:
+        with lock:
+            record = read_json_or_empty(path).get(server_name)
+    except Exception as exc:
+        logger.debug("MCP cooldown ledger unavailable for %r: %s", server_name, exc)
+        return False, 0, 0.0
+    if not isinstance(record, dict) or record.get("fingerprint") != _connect_config_fingerprint(config):
+        return False, 0, 0.0
+    failures, retry_after = record.get("failures"), record.get("retry_after")
+    if isinstance(failures, bool) or not isinstance(failures, int) or failures < 1:
+        return False, 0, 0.0
+    if isinstance(retry_after, bool) or not isinstance(retry_after, (int, float)):
+        return False, 0, 0.0
+    return time.time() < retry_after, failures, float(retry_after)
+
+
+def _record_connect_failure(server_name: str, config: Optional[dict] = None) -> None:
+    """Stamp a geometric, capped retry cooldown and persist it when config is available."""
     key = _server_key(server_name)
-    n = _core._server_connect_failures.get(key, 0) + 1
+    # A changed config is a distinct connection identity, so it begins a fresh backoff series.
+    n = 1 if config is not None else _core._server_connect_failures.get(key, 0) + 1
+    if config is not None:
+        lock, path = _locked_connect_cooldowns()
+        try:
+            with lock:
+                records = read_json_or_empty(path)
+                record = records.get(server_name)
+                if isinstance(record, dict) and record.get("fingerprint") == _connect_config_fingerprint(config):
+                    disk_failures = record.get("failures")
+                    if isinstance(disk_failures, int) and not isinstance(disk_failures, bool):
+                        n = max(n, disk_failures + 1)
+                backoff = min(_core._CONNECT_RETRY_BASE_BACKOFF_SEC * (2 ** (n - 1)),
+                              _core._CONNECT_RETRY_MAX_BACKOFF_SEC)
+                records[server_name] = {
+                    "failures": n,
+                    "fingerprint": _connect_config_fingerprint(config),
+                    "retry_after": time.time() + backoff,
+                }
+                atomic_json_write(path, records, indent=None, sort_keys=True, mode=0o600)
+        except Exception as exc:
+            logger.debug("Could not persist MCP cooldown for %r: %s", server_name, exc)
     _core._server_connect_failures[key] = n
     backoff = min(_core._CONNECT_RETRY_BASE_BACKOFF_SEC * (2 ** (n - 1)), _core._CONNECT_RETRY_MAX_BACKOFF_SEC)
     _core._server_connect_retry_after[key] = time.monotonic() + backoff
 
 
-def _clear_connect_failure(server_name: str) -> None:
+def _clear_connect_failure(server_name: str, config: Optional[dict] = None) -> None:
     """Clear the connect-cooldown state after a successful connection."""
     key = _server_key(server_name)
     _core._server_connect_failures.pop(key, None)
     _core._server_connect_retry_after.pop(key, None)
+    if config is None:
+        return
+    lock, path = _locked_connect_cooldowns()
+    try:
+        with lock:
+            records = read_json_or_empty(path)
+            record = records.get(server_name)
+            if isinstance(record, dict) and record.get("fingerprint") == _connect_config_fingerprint(config):
+                records.pop(server_name, None)
+                atomic_json_write(path, records, indent=None, sort_keys=True, mode=0o600)
+    except Exception as exc:
+        logger.debug("Could not clear MCP cooldown for %r: %s", server_name, exc)
 
 
-def _connect_cooldown_active(server_name: str) -> bool:
+def _connect_cooldown_active(server_name: str, config: Optional[dict] = None) -> bool:
     """True if ``server_name`` is still within its retry cooldown (this scope's connection: one
     profile's failing ``x`` must not shadow another profile's healthy ``x``)."""
+    if config is not None:
+        active, failures, retry_after = _persistent_cooldown_active(server_name, config)
+        if active:
+            key = _server_key(server_name)
+            _core._server_connect_failures[key] = failures
+            _core._server_connect_retry_after[key] = time.monotonic() + max(0.0, retry_after - time.time())
+        return active
     deadline = _core._server_connect_retry_after.get(_server_key(server_name))
     return deadline is not None and time.monotonic() < deadline
 
@@ -215,14 +296,17 @@ def _resolve_server_lazy(name: str, config: dict) -> bool:
     return _parse_boolish(config.get("lazy", False), default=False)
 
 
-def _note_connect_failure(name: str, exc: BaseException) -> str:
+def _note_connect_failure(name: str, exc: BaseException, config: Optional[dict] = None) -> str:
     """Record a failed connect (under ``_lock``): error text for status, cooldown stamp."""
     message = _errors._format_connect_error(exc)
     with _core._lock:
         key = _server_key(name)
         _core._server_connecting.discard(key)
         _core._server_connect_errors[key] = message
-        _record_connect_failure(name)
+        if config is None:
+            _record_connect_failure(name)
+        else:
+            _record_connect_failure(name, config)
     return message
 
 
@@ -240,13 +324,16 @@ def _stderr_tail_note(name: str) -> str:
     return f"\n  child stderr tail (full log: mcp-stderr.log):\n{indented}"
 
 
-def _note_connect_success(name: str) -> None:
+def _note_connect_success(name: str, config: Optional[dict] = None) -> None:
     """Clear connecting/error/cooldown state after a successful connect (under ``_lock``)."""
     with _core._lock:
         key = _server_key(name)
         _core._server_connecting.discard(key)
         _core._server_connect_errors.pop(key, None)
-        _clear_connect_failure(name)
+        if config is None:
+            _clear_connect_failure(name)
+        else:
+            _clear_connect_failure(name, config)
 
 
 def _adopt_server(name: str, server: _core.MCPServerTask) -> None:
@@ -373,7 +460,7 @@ def _select_new_servers(servers: dict[str, dict]) -> dict[str, dict]:
             k: v for k, v in servers.items()
             if keys[k] not in _core._servers and keys[k] not in _core._server_connecting
             and keys[k] not in _core._lazy_server_configs
-            and mcp_server_enabled(v) and not _connect_cooldown_active(k)}
+            and mcp_server_enabled(v) and not _connect_cooldown_active(k, v)}
         stale_cached = [_core._servers[keys[k]] for k, v in servers.items()
                         if keys[k] in _core._servers and mcp_server_enabled(v)
                         and getattr(_core._servers[keys[k]], "session", None) is None]
@@ -455,12 +542,12 @@ async def _discover_all(new_servers: dict[str, dict]) -> None:
     for name, result in zip(new_servers, results):
         if isinstance(result, BaseException):
             command = new_servers.get(name, {}).get("command")
-            message = _note_connect_failure(name, result)
+            message = _note_connect_failure(name, result, new_servers[name])
             logger.warning("Failed to connect to MCP server '%s'%s: %s%s",
                            name, f" (command={command})" if command else "", message,
                            _stderr_tail_note(name))
         else:
-            _note_connect_success(name)
+            _note_connect_success(name, new_servers[name])
 
 
 def _run_discovery_pass(new_servers: dict[str, dict]) -> None:
@@ -497,7 +584,7 @@ def _run_discovery_pass(new_servers: dict[str, dict]) -> None:
                         _server_key(_sn), f"Connection attempt {how} during discovery")
                     # Its attempt is still running on the MCP loop; without a cooldown the next
                     # reconcile tick would spawn a second one beside it.
-                    _record_connect_failure(_sn)
+                    _record_connect_failure(_sn, new_servers[_sn])
         raise
     finally:
         if _was_interrupted:
