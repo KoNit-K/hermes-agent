@@ -7,8 +7,10 @@ import { COMPOSER_HEIGHT_VAR, COMPOSER_SURFACE_HEIGHT_VAR } from '@/app/chat/sur
 import { useComposerMetrics } from './use-composer-metrics'
 
 vi.mock('@assistant-ui/react', () => ({
-  useAuiState: (selector: (state: { composer: { text: string } }) => unknown) => selector({ composer: { text: '' } })
+  useAuiState: (selector: (state: { composer: { text: string } }) => unknown) => selector({ composer: { text: composerText } })
 }))
+
+let composerText = ''
 
 // The shared ResizeObserver delivers once per observed element after
 // observe(); replay that by hand so the hook's initial measurement runs where
@@ -56,20 +58,37 @@ const sized =
     ref.current = node
   }
 
-function Harness({ dockHeight, surfaceHeight }: { dockHeight: number; surfaceHeight: number }) {
+function Harness({
+  dockHeight,
+  editorScrollHeight = 0,
+  surfaceHeight
+}: {
+  dockHeight: number
+  editorScrollHeight?: number
+  surfaceHeight: number
+}) {
   const composerDockRef = useRef<HTMLDivElement | null>(null)
   const composerRef = useRef<HTMLFormElement | null>(null)
   const composerSurfaceRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<HTMLDivElement | null>(null)
 
-  useComposerMetrics({ composerDockRef, composerRef, composerSurfaceRef, editorRef, poppedOut: false })
+  const metrics = useComposerMetrics({ composerDockRef, composerRef, composerSurfaceRef, editorRef, poppedOut: false })
 
   return (
     <div data-chat-surface="">
       <div ref={sized(composerDockRef, dockHeight)}>
         <form ref={composerRef}>
           <div ref={sized(composerSurfaceRef, surfaceHeight)}>
-            <div ref={editorRef} />
+            <div
+              ref={node => {
+                if (node) {
+                  Object.defineProperty(node, 'scrollHeight', { configurable: true, value: editorScrollHeight })
+                }
+
+                editorRef.current = node
+              }}
+              data-stacked={metrics.stacked}
+            />
           </div>
         </form>
       </div>
@@ -82,6 +101,7 @@ const surfaceOf = (container: HTMLElement) => container.querySelector<HTMLElemen
 describe('useComposerMetrics — published clearance survives an effect replay', () => {
   beforeEach(() => {
     observers.length = 0
+    composerText = ''
     vi.stubGlobal('ResizeObserver', FakeResizeObserver)
   })
 
@@ -106,5 +126,18 @@ describe('useComposerMetrics — published clearance survives an effect replay',
 
     expect(surface.style.getPropertyValue(COMPOSER_HEIGHT_VAR)).toBe('200px')
     expect(surface.style.getPropertyValue(COMPOSER_SURFACE_HEIGHT_VAR)).toBe('120px')
+  })
+
+  it('keeps the stacked layout when a tall resting editor is emptied', () => {
+    composerText = 'two lines'
+    const view = render(<Harness dockHeight={200} editorScrollHeight={78} surfaceHeight={120} />)
+
+    deliverResize()
+    expect(view.container.querySelector('[data-stacked="true"]')).not.toBeNull()
+
+    composerText = ''
+    view.rerender(<Harness dockHeight={200} editorScrollHeight={78} surfaceHeight={120} />)
+
+    expect(view.container.querySelector('[data-stacked="true"]')).not.toBeNull()
   })
 })
