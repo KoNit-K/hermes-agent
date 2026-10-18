@@ -1116,12 +1116,13 @@ def _config_declares_model(
         configured_provider = model_cfg.get("provider", "")
         if (
             isinstance(configured_provider, str)
+            and configured_provider.strip()
             and normalize_provider(configured_provider) == normalize_provider(target_provider)
             and new_model == model_cfg.get("default", "")
         ):
             return True
     except Exception:
-        pass
+        logger.debug("Could not read configured default model", exc_info=True)
     return False
 
 
