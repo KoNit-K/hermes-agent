@@ -327,6 +327,7 @@ class GatewayTurnPersistenceMixin:
         replaying the oversized context forever. Never on a lock-contended defer — that is the
         OPPOSITE case (a concurrent path holds the lock and is shrinking it). Returns
         ``(response, session_entry)``."""
+        agent_result["compression_reset_session_id"] = None
         # When compression is exhausted, the session is permanently too large to process. (#9893) Never wipe
         # the session for that — retry-next-message semantics apply (#69870 lock-skip consumer; salvaged
         # from #49874).
@@ -344,8 +345,11 @@ class GatewayTurnPersistenceMixin:
             logger.info("Keeping API session %s after compression exhaustion.",
                         session_entry.session_id if session_entry else "?")
         elif agent_result.get("compression_exhausted") and session_entry and session_key:
+            old_session_id = session_entry.session_id
             if not self._hmwa_defer_exhaustion_reset(session_entry, session_key, source):
                 session_entry = await self._hmwa_rotate_exhausted_session(session_entry, session_key, source)
+                if session_entry and session_entry.session_id and session_entry.session_id != old_session_id:
+                    agent_result["compression_reset_session_id"] = session_entry.session_id
             response = (response or "") + t("gateway.session.auto_reset_context_exhausted")
         return response, session_entry
 
@@ -359,6 +363,8 @@ class GatewayTurnPersistenceMixin:
             or event.internal
             or getattr(event, "_gateway_compression_replay_attempted", False)
             or agent_result.get("already_sent")
+            or agent_result.get("stream_visible_output") is not False
+            or not agent_result.get("compression_reset_session_id")
         ):
             return False
         messages = agent_result.get("messages", [])
@@ -565,6 +571,35 @@ class GatewayTurnPersistenceMixin:
         # the coherence guard snapshots at agent-BUILD time, so our own writes would otherwise
         # trigger a rebuild next turn (destroying prompt caching).
         await self._refresh_agent_cache_message_count(session_key, sid)
+
+    @staticmethod
+    def _run_agent_stream_confirmed_final_delivery(consumer, final_text: str, *, previewed: bool = False) -> bool:
+        """True only when the actual final reply reached the user: a finalize call may carry only the
+        last preview snapshot, so reconcile against the recorded payload — a demonstrable mismatch
+        (False) overrides the flag; None keeps legacy trust."""
+        if consumer is None:
+            return False
+        if getattr(consumer, "final_response_sent", False):
+            matcher = getattr(consumer, "delivered_final_matches", None)
+            if callable(matcher):
+                with suppress(Exception):
+                    if matcher(final_text) is False:
+                        return False
+            return True
+        # Exact-text match against what the consumer DURABLY delivered (commentary, segments, and the
+        # visible prefix only once a real send landed) — safe without the ``previewed`` flag. The codex
+        # app-server bridge delivers the final agentMessage through the commentary path and never sets
+        # response_previewed (#74248 / #80519); gating on the flag re-sent every such reply. Mismatching
+        # commentary still returns False, so a distinct final answer is never suppressed (#65919). Draft
+        # frames are ephemeral and must not count: after draft streaming + a failed finalize send this
+        # predicate must stay False so the fallback final send still fires (#51828 / #33793).
+        has_delivered_text = getattr(consumer, "has_durably_delivered_text", None)
+        if callable(has_delivered_text):
+            try:
+                return bool(has_delivered_text(final_text))
+            except Exception:
+                return False
+        return False
 
     async def _hmwa_deliver_turn_response(
         self, event, source, session_entry, session_key, run_generation,
