@@ -3151,6 +3151,9 @@ _AUX_UNHEALTHY_TTL_SECONDS = 600  # 10 minutes
 _aux_unhealthy_until: dict[Any, float] = {}
 _aux_unhealthy_logged_at: dict[Any, float] = {}
 _aux_unhealthy_reason: dict[Any, str] = {}
+_AUX_TIMEOUT_QUARANTINE_THRESHOLD = 2
+_AUX_TIMEOUT_QUARANTINE_TTL_SECONDS = 60
+_aux_consecutive_timeouts: dict[Any, int] = {}
 # resolved_provider / explicit-config names → chain labels.
 _AUX_UNHEALTHY_LABEL_ALIASES = {
     "openrouter": "openrouter", "nous": "nous", "custom": "local/custom",
@@ -3192,6 +3195,34 @@ def _mark_provider_unhealthy(
     )
 
 
+def _clear_provider_timeout_streak(provider: str, base_url: Optional[str] = None) -> None:
+    """A successful response proves this endpoint is not currently wedged."""
+    label = _normalize_chain_label(provider)
+    if label:
+        _aux_consecutive_timeouts.pop(_unhealthy_cache_key(label, base_url), None)
+
+
+def _record_provider_timeout(provider: str, base_url: Optional[str], exc: Exception) -> None:
+    """Quarantine an endpoint after consecutive full-budget timeouts only.
+
+    A no-progress stream deadline is a short first-token probe, not proof that the
+    request spent its complete configured timeout budget.
+    """
+    if not _is_timeout_error(exc) or "no-progress timeout" in str(exc):
+        return
+    label = _normalize_chain_label(provider)
+    if not label:
+        return
+    key = _unhealthy_cache_key(label, base_url)
+    count = _aux_consecutive_timeouts.get(key, 0) + 1
+    _aux_consecutive_timeouts[key] = count
+    if count >= _AUX_TIMEOUT_QUARANTINE_THRESHOLD:
+        _mark_provider_unhealthy(
+            label, ttl=_AUX_TIMEOUT_QUARANTINE_TTL_SECONDS, base_url=base_url,
+            reason="consecutive full-budget request timeouts",
+        )
+
+
 def _is_provider_unhealthy(label: str, base_url: Optional[str] = None) -> bool:
     """True iff this provider endpoint is unhealthy and unexpired; lazily evicts expired entries."""
     if not label:
@@ -3229,6 +3260,7 @@ def _reset_aux_unhealthy_cache() -> None:
     _aux_unhealthy_until.clear()
     _aux_unhealthy_logged_at.clear()
     _aux_unhealthy_reason.clear()
+    _aux_consecutive_timeouts.clear()
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
@@ -4136,7 +4168,7 @@ def _call_fallback_candidate_sync(
     )
 
     def _send(client: Any, request_kwargs: dict[str, Any], dest: _FallbackDestination) -> Any:
-        return _validate_llm_response(
+        response = _validate_llm_response(
             _relay_sync_completion(
                 client, request_kwargs, provider=dest.provider, api_mode=dest.api_mode,
                 create=lambda request: _create_with_progress(
@@ -4146,6 +4178,8 @@ def _call_fallback_candidate_sync(
             ),
             task,
         )
+        _clear_provider_timeout_streak(dest.provider, dest.base_url)
+        return response
     from agent.auxiliary_fallback_recovery import send_with_parameter_rungs
 
     def _send_recovering(client: Any, request_kwargs: dict[str, Any], dest: _FallbackDestination) -> Any:
@@ -4193,11 +4227,13 @@ async def _call_fallback_candidate_async(
 
     async def _send(client: Any, request_kwargs: dict[str, Any], dest: _FallbackDestination) -> Any:
         import asyncio
-        return await asyncio.to_thread(
+        response = await asyncio.to_thread(
             _validate_llm_response,
             await _relay_async_completion(client, request_kwargs, provider=dest.provider, api_mode=dest.api_mode),
             task,
         )
+        _clear_provider_timeout_streak(dest.provider, dest.base_url)
+        return response
     from agent.auxiliary_fallback_recovery import send_with_parameter_rungs_async
 
     async def _send_recovering(client: Any, request_kwargs: dict[str, Any], dest: _FallbackDestination) -> Any:
@@ -7860,6 +7896,7 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
             _recoverable_pool_provider(resolved_provider, route.client, main_runtime=route.main_runtime)
             or resolved_provider, base_url=route.base_info)
     if reason == "request timed out":
+        _record_provider_timeout(resolved_provider, route.base_info, first_err)
         # WARNING, naming the endpoint, the budget and the knob: the only other trace of a slow
         # local model is the fallback provider's complaint about a model it never had (#89445).
         stalled = "Auxiliary chat stream" in str(first_err)
@@ -8209,7 +8246,9 @@ def _call_llm_impl(
         # transient blips before escalating to fallback — a dropped connection shouldn't
         # abandon a healthy provider (matters for pinned MoA advisors).
         try:
-            return _primary(provider=request_provider, base_url=req.base_info)
+            response = _primary(provider=request_provider, base_url=req.base_info)
+            _clear_provider_timeout_streak(request_provider, req.base_info)
+            return response
         except Exception as transient_err:
             if not _should_retry_same_provider(task, transient_err, ""):
                 raise
@@ -8222,7 +8261,9 @@ def _call_llm_impl(
                             task or "call", _attempt, _max_transient_retries, _backoff, _last_transient)
                 time.sleep(_backoff)
                 try:
-                    return _primary()
+                    response = _primary()
+                    _clear_provider_timeout_streak(request_provider, req.base_info)
+                    return response
                 except Exception as retry_transient:
                     if not _is_transient_transport_error(retry_transient):
                         raise
@@ -8368,14 +8409,18 @@ async def _async_call_llm_impl(
                     create=_acreate),
                 task, **validate_kw)
         try:
-            return await _primary(provider=request_provider, base_url=req.base_info)
+            response = await _primary(provider=request_provider, base_url=req.base_info)
+            _clear_provider_timeout_streak(request_provider, req.base_info)
+            return response
         except Exception as transient_err:
             # The async Codex adapter wraps the sync stream via to_thread: same TimeoutError here.
             if not _should_retry_same_provider(task, transient_err, " (async)"):
                 raise
             logger.info("Auxiliary %s (async): transient transport error; retrying "
                         "once on the same provider before fallback: %s", task or "call", transient_err)
-            return await _primary()
+            response = await _primary()
+            _clear_provider_timeout_streak(request_provider, req.base_info)
+            return response
     except Exception as first_err:
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)

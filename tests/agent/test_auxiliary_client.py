@@ -81,9 +81,11 @@ def _clean_env(monkeypatch):
     import agent.auxiliary_client as _aux_mod
     _aux_mod._aux_unhealthy_until.clear()
     _aux_mod._aux_unhealthy_logged_at.clear()
+    _aux_mod._aux_consecutive_timeouts.clear()
     yield
     _aux_mod._aux_unhealthy_until.clear()
     _aux_mod._aux_unhealthy_logged_at.clear()
+    _aux_mod._aux_consecutive_timeouts.clear()
 
 
 class TestResolveTaskProviderModel:
@@ -4500,6 +4502,38 @@ class TestAuxUnhealthyCache:
             )
             # After the 402, OpenRouter is in the unhealthy cache.
             assert _is_provider_unhealthy("openrouter") is True
+
+    def test_two_full_timeouts_quarantine_endpoint_but_success_resets_streak(self):
+        """Regression for #141016: only consecutive full-budget stalls bench a route."""
+        from agent.auxiliary_client import call_llm, _is_provider_unhealthy
+
+        class _Timeout(Exception):
+            pass
+        _Timeout.__name__ = "APITimeoutError"
+
+        endpoint = "http://127.0.0.1:8001/v1"
+        primary = MagicMock(base_url=endpoint)
+        fallback = MagicMock(base_url="https://fallback.example/v1")
+        fallback.chat.completions.create.return_value = _DummyResponse("fallback")
+        primary.chat.completions.create.side_effect = [
+            _Timeout("Request timed out."), _DummyResponse("primary"),
+            _Timeout("Request timed out."), _Timeout("Request timed out."),
+        ]
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("custom", "local", endpoint, "key", None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(primary, "local")),
+            patch("agent.auxiliary_client._try_configured_fallback_chain", return_value=(None, None, "")),
+            patch("agent.auxiliary_client._try_main_agent_model_fallback",
+                  return_value=(fallback, "fallback", "openai")),
+        ):
+            for _ in range(3):
+                call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+            assert _is_provider_unhealthy("custom", endpoint) is False
+            call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+
+        assert _is_provider_unhealthy("custom", endpoint) is True
 
     def test_custom_billing_failure_keeps_distinct_endpoint_eligible(self):
         """A hosted custom endpoint's billing state must not quarantine a local custom endpoint."""
