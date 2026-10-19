@@ -6,6 +6,7 @@ agent resource finalizer stops returning after the model turn has ended.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import Future
@@ -118,6 +119,25 @@ def test_title_fallback_does_not_escape_after_timeout_disables_session_db():
         assert session_db.lineage_calls == 0
     finally:
         release.set()
+
+
+def test_title_fallback_logs_lineage_failure_and_uses_bare_title(caplog):
+    """A failed lineage lookup keeps its traceback and does not block finalization."""
+    session_db = MagicMock()
+    session_db.get_compression_tip.return_value = None
+    session_db.set_session_title.side_effect = [RuntimeError("title collision"), True]
+    lineage_error = RuntimeError("lineage unavailable")
+    session_db.get_next_title_in_lineage.side_effect = lineage_error
+    session_db.session_lifecycle_statuses.return_value = {}
+    agent = MagicMock()
+
+    with caplog.at_level(logging.DEBUG, logger="cron.scheduler"), \
+         patch("hermes_state_registry.release_or_close"):
+        _finalize_cron_session(session_db, agent, "lineage-failure", "Lineage failure", "cron_lineage")
+
+    assert session_db.set_session_title.call_args.args == ("cron_lineage", "cron lineage-failure ineage")
+    assert agent._end_session_on_close is False
+    assert any(record.exc_info and record.exc_info[1] is lineage_error for record in caplog.records)
 
 
 def test_agent_teardown_is_bounded():

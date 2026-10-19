@@ -2148,8 +2148,9 @@ def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_s
             try:
                 _fallback_titles.insert(
                     0, _session_db.get_next_title_in_lineage(f"cron {job_id}"))
-            except (Exception, KeyboardInterrupt):
-                pass
+            except (Exception, KeyboardInterrupt) as e:
+                logger.debug(
+                    "Job '%s': failed to resolve fallback cron session title: %s", job_id, e, exc_info=True)
         for _fallback in _fallback_titles:
             try:
                 if _set_cron_session_title(_session_db, _final_cron_session_id, _fallback):
