@@ -228,10 +228,13 @@ async def test_no_pending_cleans_up_normally():
 
 
 @pytest.mark.asyncio
-async def test_drain_drops_completion_consumed_after_busy_admission():
+async def test_drain_drops_completion_consumed_after_busy_admission(monkeypatch):
     """A wait/log result consumed after admission must not re-wake the finished turn."""
-    from tools.process_registry import process_registry
+    from tools import process_registry as processes
+    from gateway.process_completion_provenance import stamp_completion_provenance
 
+    process_registry = processes.ProcessRegistry()
+    monkeypatch.setattr(processes, "process_registry", process_registry)
     adapter = _make_adapter()
     sk = _sk()
     process_id = "pending-completion-consumed"
@@ -245,8 +248,15 @@ async def test_drain_drops_completion_consumed_after_busy_admission():
     completion.internal = True
     completion.metadata.update({
         "notification_origin": "process_registry_synthetic",
+        "gateway_session_key": sk,
         "gateway_process_session_ids": [process_id],
     })
+    entries = []
+    for session_id in completion.metadata["gateway_process_session_ids"]:
+        session = processes.ProcessSession(id=session_id, command="build", started_at=123.0, session_key=sk, exited=True)
+        process_registry._running[session_id] = session
+        entries.append(dict(type="completion", session_id=session_id, started_at=session.started_at, session_key=sk))
+    stamp_completion_provenance(completion, entries)
     adapter._message_handler = handler
     adapter._active_sessions[sk] = asyncio.Event()
     process_registry._completion_consumed.add(process_id)
@@ -264,10 +274,13 @@ async def test_drain_drops_completion_consumed_after_busy_admission():
 
 
 @pytest.mark.asyncio
-async def test_drain_keeps_batched_completion_with_an_unconsumed_result():
+async def test_drain_keeps_batched_completion_with_an_unconsumed_result(monkeypatch):
     """A coalesced completion remains runnable until every process result is consumed."""
-    from tools.process_registry import process_registry
+    from tools import process_registry as processes
+    from gateway.process_completion_provenance import stamp_completion_provenance
 
+    process_registry = processes.ProcessRegistry()
+    monkeypatch.setattr(processes, "process_registry", process_registry)
     adapter = _make_adapter()
     sk = _sk()
     consumed_process_id = "batch-completion-consumed"
@@ -281,8 +294,15 @@ async def test_drain_keeps_batched_completion_with_an_unconsumed_result():
     completion.internal = True
     completion.metadata.update({
         "notification_origin": "process_registry_synthetic",
+        "gateway_session_key": sk,
         "gateway_process_session_ids": [consumed_process_id, pending_process_id],
     })
+    entries = []
+    for session_id in completion.metadata["gateway_process_session_ids"]:
+        session = processes.ProcessSession(id=session_id, command="build", started_at=123.0, session_key=sk, exited=True)
+        process_registry._running[session_id] = session
+        entries.append(dict(type="completion", session_id=session_id, started_at=session.started_at, session_key=sk))
+    stamp_completion_provenance(completion, entries)
     adapter._message_handler = handler
     adapter._active_sessions[sk] = asyncio.Event()
     process_registry._completion_consumed.add(consumed_process_id)

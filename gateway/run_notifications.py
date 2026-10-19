@@ -890,6 +890,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 metadata=metadata,
             )
+            from gateway.process_completion_provenance import stamp_completion_provenance
+            stamp_completion_provenance(synth_event, evt.get("_process_completion_entries") or [evt])
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
@@ -1310,6 +1312,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     candidate_evt,
                     _display_text=display_text,
                     process_session_ids=process_session_ids,
+                    _process_completion_entries=[event for _text, event, _future in entries_to_deliver],
                 )
                 if getattr(self, 'session_authority', None) is not None:
                     candidate_evt = dict(candidate_evt, _automation_identities=[
