@@ -136,7 +136,7 @@ class TestSendText:
     """Outbound text-message path."""
 
     def test_reply_to_mode_reads_shared_platform_config(self):
-        from gateway.platforms.whatsapp_cloud import WhatsAppCloudAdapter
+        from plugins.platforms.whatsapp_cloud.adapter import WhatsAppCloudAdapter
 
         adapter = WhatsAppCloudAdapter(PlatformConfig(
             enabled=True,

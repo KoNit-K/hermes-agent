@@ -26,7 +26,7 @@ from gateway.config import Platform, load_gateway_config
 @pytest.mark.parametrize("send_kind", ["text", "interactive", "media"])
 @pytest.mark.asyncio
 async def test_yaml_reply_mode_graph_payloads(tmp_path, monkeypatch, setting, quoted_chunks, send_kind):
-    from gateway.platforms.whatsapp_cloud import WhatsAppCloudAdapter
+    from plugins.platforms.whatsapp_cloud.adapter import WhatsAppCloudAdapter
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
