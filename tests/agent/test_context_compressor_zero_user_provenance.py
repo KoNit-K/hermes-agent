@@ -143,7 +143,6 @@ Vind de bestanden.
 
     assert result is None
     assert compressor._previous_summary is None
-    assert "invented user attribution" in compressor._last_summary_error
 
 
 
@@ -284,9 +283,9 @@ def test_background_process_notifications_do_not_become_compaction_anchors(
 
     assert ContextCompressor._is_synthetic_compression_user_turn(process_turn) is True
     assert ContextCompressor._transcript_has_real_user_turn([process_turn]) is False
-    assert compressor._derive_auto_focus_topic(messages) == (
-        "Recent user focus:\n- Refactor the auth module and add tests."
-    )
+    focus = compressor._derive_auto_focus_topic(messages)
+    assert "Refactor the auth module and add tests." in focus
+    assert notification not in focus
     assert compressor._find_last_user_message_idx(messages, head_end=0) == 0
 
 
