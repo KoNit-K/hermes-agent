@@ -1049,7 +1049,9 @@ def _import_members_exclusive(
                 if before and after and after[1] < before[1]:
                     db_shrunk.append((rel, before, after))
                 kanban_after = _count_kanban_rows(target) if kanban_before else None
-                if kanban_before and kanban_after and kanban_after[1] < kanban_before[1]:
+                if kanban_before and kanban_after and (
+                    kanban_after[0] < kanban_before[0] or kanban_after[1] < kanban_before[1]
+                ):
                     kanban_shrunk.append((rel, kanban_before, kanban_after))
             else:
                 _extract_member_atomically(zf, member, target, new_file_mode)
