@@ -18,6 +18,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSearch,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   ErrorState,
@@ -707,8 +708,14 @@ function DependencyEditor({
   taskId: string
 }) {
   const k = useKanban()
+  const [search, setSearch] = useState('')
   const linked = new Set([...links.parents, ...links.children, taskId])
-  const options = candidates.filter(candidate => !linked.has(candidate.id))
+  const query = search.trim().toLowerCase()
+  const available = candidates.filter(candidate => !linked.has(candidate.id))
+
+  const options = available.filter(candidate =>
+    `${candidate.title} ${candidate.body ?? ''} ${candidate.id}`.toLowerCase().includes(query)
+  )
 
   return (
     <Section label={k.dependencies}>
@@ -718,13 +725,19 @@ function DependencyEditor({
             <span className="text-[0.6875rem] text-(--ui-text-tertiary)">{side === 'parents' ? k.blockedBy : k.blocks}</span>
             <div className="flex flex-wrap items-center gap-1">
               <LinkChips ids={links[side]} linkTitles={linkTitles} onOpen={onOpen} />
-              <DropdownMenu>
+              <DropdownMenu onOpenChange={() => setSearch('')}>
                 <DropdownMenuTrigger asChild>
                   <Button aria-label={side === 'parents' ? k.addBlockedBy : k.addBlocks} size="icon-xs" variant="ghost">
                     <Codicon name="add" size="0.75rem" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
+                  <DropdownMenuSearch
+                    aria-label={k.filterCards}
+                    onValueChange={setSearch}
+                    placeholder={k.filterCards}
+                    value={search}
+                  />
                   {options.length > 0 ? (
                     options.map(candidate => (
                       <DropdownMenuItem key={candidate.id} onSelect={() => onAdd(side, candidate.id)}>
@@ -732,7 +745,7 @@ function DependencyEditor({
                       </DropdownMenuItem>
                     ))
                   ) : (
-                    <DropdownMenuItem disabled>{k.noDependencyCandidates}</DropdownMenuItem>
+                    <DropdownMenuItem disabled>{available.length > 0 ? k.noMatch : k.noDependencyCandidates}</DropdownMenuItem>
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
