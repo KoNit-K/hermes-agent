@@ -3,7 +3,7 @@
 
 def test_display_section_warns_when_personality_overrides_manual_prompt(capsys):
     """A config listing must make the ignored manual prompt visible (#136882)."""
-    from hermes_cli.config import _show_display_section
+    from hermes_cli.config_show import _show_display_section
 
     _show_display_section({
         "display": {"personality": "concise"},
@@ -16,7 +16,7 @@ def test_display_section_warns_when_personality_overrides_manual_prompt(capsys):
 
 
 def test_display_section_omits_warning_without_manual_prompt(capsys):
-    from hermes_cli.config import _show_display_section
+    from hermes_cli.config_show import _show_display_section
 
     _show_display_section({"display": {"personality": "concise"}, "agent": {}})
 
