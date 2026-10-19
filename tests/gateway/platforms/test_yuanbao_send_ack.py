@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.platforms.yuanbao import MessageSender, YuanbaoAdapter
-from gateway.platforms.yuanbao_proto import _s, _v
+from plugins.platforms.yuanbao.adapter import MessageSender, YuanbaoAdapter
+from plugins.platforms.yuanbao.yuanbao_proto import _s, _v
 
 
 def _run(coro):
@@ -22,7 +22,7 @@ def _run(coro):
 
 
 def _adapter_for_dispatch(response):
-    async def send_biz_request(encoded, req_id, timeout=None):  # noqa: ANN001, ARG001
+    async def send_biz_request(encoded, req_id, timeout=None):
         return response
 
     return SimpleNamespace(
@@ -97,7 +97,7 @@ def test_oversized_unsplittable_fence_is_not_dispatched():
 
     dispatched = []
 
-    async def _should_not_send(*args, **kwargs):  # noqa: ANN001, ARG001
+    async def _should_not_send(*args, **kwargs):
         dispatched.append(True)
         raise AssertionError("oversized leftover chunk must not be dispatched")
 
