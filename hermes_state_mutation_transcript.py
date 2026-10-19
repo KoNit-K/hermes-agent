@@ -32,7 +32,7 @@ def rewind_in_transaction(self, conn, session_id, target_message_id, *,
     conn.execute(
         "UPDATE sessions SET rewind_count = COALESCE(rewind_count, 0) + 1 WHERE id = ?", (session_id,))
     message_count, tool_call_count = self._active_transcript_counts(conn, session_id)
-    activity_at = self._newest_message_timestamp([replacement] if replacement is not None else [])
+    activity_at = replacement["timestamp"] if replacement is not None else None
     conn.execute(f"""{_SET_COUNTERS_SQL}, last_activity_at = CASE
                   WHEN ? IS NOT NULL AND (last_activity_at IS NULL OR last_activity_at < ?) THEN ?
                   ELSE last_activity_at END WHERE id = ?""",
