@@ -5,36 +5,36 @@ answered -32601. Each action is the typed slash command the button stands for, r
 ``execute_command`` (the gateway's own /goal /loop /heartbeat /subgoal handlers, with their
 capability, local-source, admission and busy rules), answered with the owner's control snapshot.
 """
+import logging
+
 from hermes_state_runtime import RuntimeStoreError
+
+logger = logging.getLogger(__name__)
 
 _ACTION_COMMANDS = {
     'goal.pause': ('goal', 'pause'), 'goal.resume': ('goal', 'resume'),
     'goal.clear': ('goal', 'clear'), 'goal.unwait': ('goal', 'unwait'),
     'loop.pause': ('loop', 'pause'), 'loop.resume': ('loop', 'resume'), 'loop.stop': ('loop', 'stop'),
     'heartbeat.pause': ('heartbeat', 'pause'), 'heartbeat.resume': ('heartbeat', 'resume'),
-    'heartbeat.clear': ('heartbeat', 'clear'), 'subgoal.clear': ('subgoal', 'clear'),
+    'heartbeat.clear': ('heartbeat', 'clear'),
 }
 _SET_ACTIONS = frozenset({'goal.set', 'goal.wait_time', 'loop.set', 'heartbeat.set'})
+_SUBGOAL_ACTIONS = frozenset({'subgoal.add', 'subgoal.remove', 'subgoal.clear'})
 _ENVELOPE = ('type', 'output', 'notice', 'message', 'display')
 
 
-def _command(action, args):
-    """``(name, arg)`` of the slash command for *action*, or ``('subgoal', None)`` for an add, whose
-    free text must not be parsed as a /subgoal verb ("clear the cache" is a criterion, not a clear)."""
+def _validate(action, args):
     if not isinstance(args, dict) or set(args) - {'text', 'index'}:
         raise RuntimeStoreError('invalid_params')
-    if action in _ACTION_COMMANDS:
-        return _ACTION_COMMANDS[action]
     if action == 'subgoal.remove':
         index = args.get('index')
         if type(index) is not int or index < 1:
             raise RuntimeStoreError('invalid_params')
-        return 'subgoal', f'remove {index}'
     if action == 'subgoal.add':
         if not isinstance(args.get('text'), str) or not args['text'].strip():
             raise RuntimeStoreError('invalid_params')
-        return 'subgoal', None
-    raise RuntimeStoreError('invalid_params')
+    if action not in _ACTION_COMMANDS and action not in _SUBGOAL_ACTIONS:
+        raise RuntimeStoreError('invalid_params')
 
 
 def _set_args(action, args):
@@ -115,15 +115,15 @@ async def _set_control(connection, ref, params, action, args):
     return {'type': 'exec', 'output': '✓ Control set.'}
 
 
-async def _add_subgoal(connection, ref, params, text):
-    """``/subgoal <text>``'s add branch (``slash_commands_goals``) on the session's goal manager."""
+async def _subgoal(connection, ref, params, action, args):
+    """Mutate one goal criterion through the session's live goal manager."""
     from pathlib import Path
     from agent.i18n import t
     from gateway.platforms.base import MessageEvent
     from gateway.run import _profile_runtime_scope
     from gateway.session_busy_controls import authorize
     from gateway.session_local import authorize_local_source
-    from gateway.slash_commands_goals import _mgr_call
+
     authority = connection.authority
     authorize(connection, ref, params, 'session:control')
     live = authority.sessions[ref.session_id]
@@ -134,12 +134,41 @@ async def _add_subgoal(connection, ref, params, text):
         mgr, _entry = await authority.runner._get_goal_manager_for_event(
             MessageEvent(text='/subgoal', source=live.source))
         if mgr is None:
-            return {'type': 'exec', 'output': t('gateway.goal.unavailable')}
+            raise RuntimeStoreError('command_unavailable', detail=t('gateway.goal.unavailable'))
         if not mgr.has_goal():
-            return {'type': 'exec', 'output': t('gateway.subgoal.no_goal')}
-        added, err = _mgr_call('/subgoal', mgr.add_subgoal, text)
-        index = len(mgr.state.subgoals) if mgr.state else 0
-    return {'type': 'exec', 'output': err or t('gateway.subgoal.added', index=index, text=added)}
+            raise RuntimeStoreError('goal_not_active', detail=t('gateway.subgoal.no_goal'))
+        try:
+            if action == 'subgoal.add':
+                added = mgr.add_subgoal(args['text'].strip())
+                output = t('gateway.subgoal.added', index=len(mgr.state.subgoals), text=added)
+            elif action == 'subgoal.remove':
+                removed = mgr.remove_subgoal(args['index'])
+                output = t('gateway.subgoal.removed', index=args['index'], text=removed)
+            else:
+                count = mgr.clear_subgoals()
+                output = (t('gateway.subgoal.cleared_one' if count == 1 else 'gateway.subgoal.cleared_other', count=count)
+                          if count else t('gateway.subgoal.none_to_clear'))
+        except IndexError as exc:
+            raise RuntimeStoreError('invalid_params', field='index', detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise RuntimeStoreError('invalid_params', detail=str(exc)) from exc
+    return {'type': 'exec', 'output': output}
+
+
+def publish(authority, session_id, *, only_if_present=False):
+    """Push one live session's control snapshot to every viewer as ``session.control.update``."""
+    live = authority.sessions.get(session_id) if authority is not None else None
+    if live is None:
+        return
+    from gateway.session_ancillary import control_snapshot
+    from gateway.session_contract import SessionRef
+    try:
+        snapshot = control_snapshot(authority, SessionRef(authority.profile_id, session_id))
+    except RuntimeStoreError:
+        logger.debug('session.control.update skipped for %s', session_id, exc_info=True)
+        return
+    if not only_if_present or snapshot['revision']:
+        live.event_stream.publish(session_id, {'control': snapshot}, event_type='session.control.update')
 
 
 async def control(connection, ref, params):
@@ -150,24 +179,23 @@ async def control(connection, ref, params):
         raise RuntimeStoreError('invalid_params')
     args = {} if params.get('args') is None else params['args']
     action = action.strip()
-    setter = action in _SET_ACTIONS
-    if setter:
+    if action in _SET_ACTIONS:
         args = _set_args(action, args)
     else:
-        name, arg = _command(action, args)
+        _validate(action, args)
     if ref.session_id not in connection.authority.sessions:
         raise RuntimeStoreError('not_found')
     scope = {key: params[key] for key in ('session_id', 'profile') if key in params}
-    if setter:
+    if action in _SET_ACTIONS:
         result = await _set_control(connection, ref, scope, action, args)
-    elif arg is None:
-        result = await _add_subgoal(connection, ref, scope, args['text'].strip())
+        publish(connection.authority, ref.session_id)
+    elif action in _SUBGOAL_ACTIONS:
+        result = await _subgoal(connection, ref, scope, action, args)
+        publish(connection.authority, ref.session_id)
     else:
         from gateway.session_commands import execute_command
+        name, arg = _ACTION_COMMANDS[action]
         result = await execute_command(connection, ref, {**scope, 'name': name, 'arg': arg}, dispatch=True)
     from gateway.session_ancillary import read
     snapshot = await read(connection, ref, scope, kind='control')
-    # Other viewers (another Desktop window, Ink) repaint their cards from this event, not the reply.
-    connection.authority.sessions[ref.session_id].event_stream.publish(
-        ref.session_id, snapshot, event_type='session.control.update')
     return {**snapshot, 'dispatch': {key: result.get(key) for key in _ENVELOPE}}

@@ -102,15 +102,18 @@ async def _control(authority, ws, reader, sid, marker, receipt):
         params = {'action': action, **({'args': args} if args else {})}
         return await rpc(ws, 'session.control', session_id=sid, **params)
 
-    for command in ('goal ship the owned fixture', 'loop every 10m CHECK_LOOP', 'heartbeat every 10m PING_HEARTBEAT'):
-        typed = await rpc(ws, 'slash.exec', session_id=sid, command=command)
-        assert 'result' in typed, (command, typed)
-    denied = await _call(reader, 'session.control', session_id=sid, action='goal.pause')
-    assert _error(denied) == 'permission_denied', denied
-    # Every other viewer of the session: what its card repaints from.
+    # Every viewer's cards repaint from the owner event stream.
     updates = []
     authority.sessions[sid].event_stream.observers.add(
         lambda frame: frame['params']['type'] == 'session.control.update' and updates.append(frame['params']))
+    for command, kind in (('goal ship the owned fixture', 'goal'), ('loop every 10m CHECK_LOOP', 'loop'),
+                          ('heartbeat every 10m PING_HEARTBEAT', 'heartbeat')):
+        typed = await rpc(ws, 'slash.exec', session_id=sid, command=command)
+        assert 'result' in typed, (command, typed)
+        assert updates and updates.pop()['payload']['control'][kind]['status'] == 'active', (command, updates)
+    denied = await _call(reader, 'session.control', session_id=sid, action='goal.pause')
+    assert _error(denied) == 'permission_denied', denied
+    # The structured setters use the same repaint path.
     created = await control('goal.set', title='Ship the structured controls', max_turns=7,
                             contract={'outcome': 'Setters work', 'verification': 'Run focused tests'})
     assert created['result']['control']['goal']['title'] == 'Ship the structured controls', created
@@ -120,6 +123,8 @@ async def _control(authority, ws, reader, sid, marker, receipt):
     assert loop_set['result']['control']['loop']['mode'] == 'self_paced', loop_set
     heartbeat_set = await control('heartbeat.set', prompt='PING_HEARTBEAT', interval_seconds=60)
     assert heartbeat_set['result']['control']['heartbeat']['interval_seconds'] == 60, heartbeat_set
+    assert len(updates) == 4, updates
+    updates.clear()
     for action, check in [
             ('goal.pause', lambda c: c['goal']['status'] == 'paused'),
             ('goal.resume', lambda c: c['goal']['status'] == 'active'),
@@ -140,6 +145,8 @@ async def _control(authority, ws, reader, sid, marker, receipt):
     assert added['result']['control']['goal']['subgoals'] == ['clear the cache first'], added
     removed = await control('subgoal.remove', index=1)
     assert removed['result']['control']['goal']['subgoals'] == [], removed
+    cleared = await control('subgoal.clear')
+    assert cleared['result']['control']['goal']['subgoals'] == [], cleared
     for action, args in [('goal.gate.add', {}), ('nonsense', {}), ('subgoal.remove', {'index': 0}),
                          ('subgoal.add', {'text': '  '})]:
         rejected = await control(action, **args)
