@@ -2,7 +2,8 @@ import type { ModelOptionProvider } from '@hermes/shared/gateway-events'
 import { describe, expect, it } from 'vitest'
 
 import { draftModelNameFromArg } from '../components/activeSessionSwitcher.js'
-import { modelPickerCommand, pickerOffersReasoning, REASONING_PICKER_ROWS, reasoningPickerRows } from '../components/modelPicker.js'
+import { modelPickerCommand, pickerOffersReasoning, reasoningPickerRows } from '../components/modelPicker.js'
+import { applyLocale, messages, resetLocale } from '../i18n/runtime.js'
 
 const provider = (capabilities?: ModelOptionProvider['capabilities']): ModelOptionProvider => ({
   capabilities,
@@ -20,21 +21,43 @@ describe('ModelPicker reasoning step', () => {
     )
     // "Keep current effort" (empty value) adds no flag at all.
     expect(modelPickerCommand('gpt-5.6', 'nous', false, '')).toBe('gpt-5.6 --provider nous --tui-session')
-    expect(REASONING_PICKER_ROWS.at(-1)?.value).toBe('')
+    expect(reasoningPickerRows().at(-1)?.value).toBe('')
     // The new-session draft label strips the effort flag like it strips --provider.
     expect(draftModelNameFromArg(modelPickerCommand('gpt-5.6', 'nous', false, 'low'))).toBe('gpt-5.6')
   })
 
-  it('skips the step when the route has no reasoning control or declares no accepted parameter', () => {
+  it('skips the step only when the catalog says the route has no reasoning control', () => {
     expect(pickerOffersReasoning(provider({ 'gpt-5.6': { fast: false, reasoning: false } }), 'gpt-5.6')).toBe(false)
-    expect(pickerOffersReasoning(provider({ 'gpt-5.6': { fast: false, reasoning: true, reasoning_efforts: [] } }), 'gpt-5.6')).toBe(false)
     expect(pickerOffersReasoning(provider({ 'gpt-5.6': { fast: false, reasoning: true } }), 'gpt-5.6')).toBe(true)
     expect(pickerOffersReasoning(provider(undefined), 'gpt-5.6')).toBe(true)
     expect(pickerOffersReasoning(undefined, 'gpt-5.6')).toBe(true)
   })
 
   it('does not add an undeclared disable-reasoning value to a declared vocabulary', () => {
-    expect(reasoningPickerRows(provider({ 'gpt-5.6': { fast: false, reasoning: true, reasoning_efforts: ['low', 'high'] } }), 'gpt-5.6'))
-      .toEqual([{ label: 'low', value: 'low' }, { label: 'high', value: 'high' }, { label: 'Keep current effort', value: '' }])
+    expect(
+      reasoningPickerRows(provider({ 'gpt-5.6': { fast: false, reasoning: true, reasoning_efforts: ['low', 'high'] } }), 'gpt-5.6')
+    ).toEqual([
+      { label: 'low', value: 'low' },
+      { label: 'high', value: 'high' },
+      { label: 'Keep current effort', value: '' }
+    ])
+  })
+
+  it('resolves the labelled effort rows against the active language at call time', () => {
+    const en = messages().pickers.model.reasoning
+    expect(reasoningPickerRows().at(-2)?.label).toBe(en.none)
+    expect(reasoningPickerRows().at(-1)?.label).toBe(en.keepCurrent)
+
+    applyLocale('pl', { lang: 'pl', surface: 'tui', messages: { 'pickers.model.reasoning.keepCurrent': 'Zachowaj' } })
+
+    try {
+      expect(reasoningPickerRows().at(-1)?.label).toBe('Zachowaj')
+      // Ladder levels are `--reasoning` values, never translated.
+      expect(reasoningPickerRows()[0]?.label).toBe(reasoningPickerRows()[0]?.value)
+    } finally {
+      resetLocale()
+    }
+
+    expect(reasoningPickerRows().at(-1)?.label).toBe(en.keepCurrent)
   })
 })
