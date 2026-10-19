@@ -1,6 +1,6 @@
 import type * as HermesSdk from '@hermes/plugin-sdk'
 import { host } from '@hermes/plugin-sdk'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { WritableAtom } from 'nanostores'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
@@ -131,6 +131,9 @@ function pendingCreation() {
   request.mockImplementation(async (_route, method, params) => {
     if (method === 'groups.capabilities') {return { driver: true, persistent_process: true }}
 
+    // A legacy room with no gateway room of its name yet (#140805 lookup answers empty).
+    if (method === 'groups.list') {return { rooms: [], next_offset: null }}
+
     if (method === 'groups.create') {
       const room = { room_id: params.room_id, name: params.name, members: params.members }
       serverRooms.set(room.room_id, room)
@@ -149,7 +152,7 @@ it.each(refused)('classifies %j as unavailable on both surfaces: no legacy rende
   await act(async () => { render(<GroupChatWorkspace group="Existing" members={roster} />) })
   expect(screen.getByText(unavailable)).toBeTruthy()
   expect(screen.queryByRole('textbox')).toBeNull()
-  expect((screen.getByRole('button', { name: 'Retry' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((screen.getByRole('button', { name: 'Start gateway group' }) as HTMLButtonElement).disabled).toBe(true)
   cleanup()
 
   const { onCreated, onClose } = await submitDialog()
@@ -201,46 +204,14 @@ it.each(['profile', 'gateway', 'same-route-activation'] as const)('dialog: a cre
   expect(request.mock.calls[1][0]).toMatchObject({ connectionId: 'local', profile: 'default' })
 })
 
-it('resolves a restarted name entry to its existing gateway room instead of creating a fork', async () => {
-  request.mockImplementation(async (_route, method) => {
-    if (method === 'groups.capabilities') {return { driver: true, persistent_process: true }}
-
-    if (method === 'groups.list') {
-      return { rooms: [{ room_id: 'original-room', name: 'Existing', members: [] }], next_offset: null }
-    }
-
-    if (method === 'groups.state') {return { room: { name: 'Existing' }, driver_status: {} }}
-
-    if (method === 'groups.log') {return { events: [], has_more: false }}
-
-    throw new Error(`Unexpected RPC: ${method}`)
-  })
-
-  render(<GroupChatWorkspace group="Existing" members={roster} />)
-
-  await waitFor(() => expect($canonicalGroupBindings.get()).toEqual({
-    'canonical:local:default:original-room': {
-      connectionId: 'local', profile: 'default', roomId: 'original-room', roomName: 'Existing'
-    }
-  }))
+it.each(['profile', 'gateway', 'same-route-activation'] as const)('workspace: a capability read before the %s moved neither creates nor opens a room', async kind => {
+  const pending = pendingCreation()
+  await act(async () => { render(<GroupChatWorkspace group="Existing" members={roster} />) })
+  const button = screen.getByRole('button', { name: 'Start gateway group' })
+  expect((button as HTMLButtonElement).disabled).toBe(false)
+  // Click after the source moved but before React re-renders: the stale capability must not create.
+  await act(async () => { moveSource(kind); fireEvent.click(button) })
   expect(request.mock.calls.filter(call => call[1] === 'groups.create')).toHaveLength(0)
-})
-
-it('fails closed when a restarted name has no matching gateway room', async () => {
-  request.mockImplementation(async (_route, method) => {
-    if (method === 'groups.capabilities') {return { driver: true, persistent_process: true }}
-
-    if (method === 'groups.list') {return { rooms: [], next_offset: null }}
-
-    throw new Error(`Unexpected RPC: ${method}`)
-  })
-
-  render(<GroupChatWorkspace group="Missing" members={roster} />)
-
-  const retry = await screen.findByRole('button', { name: 'Retry' })
-  expect((retry as HTMLButtonElement).disabled).toBe(false)
-  expect(screen.getByRole('alert').textContent).toContain('Gateway group not found')
-  fireEvent.click(retry)
-  await waitFor(() => expect(request.mock.calls.filter(call => call[1] === 'groups.list')).toHaveLength(2))
-  expect(request.mock.calls.filter(call => call[1] === 'groups.create')).toHaveLength(0)
+  expect(pending.serverRooms.size).toBe(0)
+  expect(openWorkspace).not.toHaveBeenCalled()
 })

@@ -40,11 +40,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
 import { isBackfilledFacePng } from './avatar-image'
-import { groupExecutionMode } from './canonical-group-capabilities'
+import { groupCreationSource, groupExecutionMode } from './canonical-group-capabilities'
 import type { GroupExecutionMode } from './canonical-group-capabilities'
-import { $canonicalGroupBindings, registerCanonicalGroup } from './canonical-group-registry'
+import type { CanonicalGroupOrigin } from './canonical-group-registry'
+import {
+  $canonicalGroupBindings,
+  canonicalGroupBindingFor,
+  canonicalGroupKeyRoute,
+  publishCanonicalGroup,
+  registerCanonicalGroup,
+  resolveCanonicalGroup
+} from './canonical-group-registry'
 import { CanonicalGroupWorkspace } from './canonical-group-workspace'
-import { canonicalGroupRequest, discoverCanonicalGroups } from './canonical-groups'
+import { canonicalGroupRequest, createCanonicalGroup } from './canonical-groups'
 import {
   $botMeta,
   $lastRoster,
@@ -102,6 +110,7 @@ import {
   groupComposerDraftSnapshot,
   migrateGroupComposerDraft,
   recordGroupMainTab,
+  recordGroupOpenOrigin,
   restoreGroupComposerDraft,
   updateGroupComposerDraft
 } from './group-panes'
@@ -364,7 +373,7 @@ export async function renameGroupChat(oldName: string, newName: string, members:
 
   if (groupChatMainTabs.has(oldName)) {
     closeGroupChatMainTab(oldName)
-    openGroupChat(next)
+    openGroupChat(next, 'name')
   }
 
   // Same convergence as disband: drop the pre-rename roster snapshot so the
@@ -568,6 +577,9 @@ function GroupChatSettingsDialog({
 
 interface GroupChatWorkspaceProps {
   group: string
+  /** Where `group` came from (see CanonicalGroupOrigin). Defaults to 'name',
+   *  which fails closed: a name never parses as a `canonical:` key. */
+  origin?: CanonicalGroupOrigin
   members: GroupMember[]
   onBack?: () => void
   visible?: boolean
@@ -575,7 +587,9 @@ interface GroupChatWorkspaceProps {
 
 export function GroupChatWorkspace(props: GroupChatWorkspaceProps) {
   const bindings = useValue($canonicalGroupBindings)
-  const binding = bindings[props.group]
+  const connectionId = useValue(host.state.connectionId)
+  const profile = useValue(host.state.profile)
+  const binding = canonicalGroupBindingFor(bindings, { connectionId: connectionId ?? '', profile }, props.group, props.origin ?? 'name')
 
   if (binding) {return <CanonicalGroupWorkspace binding={binding} onBack={props.onBack} visible={props.visible} />}
 
@@ -584,6 +598,7 @@ export function GroupChatWorkspace(props: GroupChatWorkspaceProps) {
 
 function GroupExecutionGate(props: GroupChatWorkspaceProps) {
   const b = useBots()
+  const { t } = useI18n()
   const connectionId = useValue(host.state.connectionId)
   const profile = useValue(host.state.profile)
   const gateway = useValue(host.state.gateway)
@@ -592,7 +607,34 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
   const [capability, setCapability] = useState<{ source: string; mode: GroupExecutionMode } | null>(null)
   const mode = capability?.source === source ? capability.mode : 'checking'
   const [error, setError] = useState('')
-  const [refresh, setRefresh] = useState(0)
+  const [busy, setBusy] = useState(false)
+  // #140805: 'found' means the binding was adopted and the workspace re-renders
+  // onto it; only 'missing' (the authority answered, no such room) may offer creation.
+  const [lookup, setLookup] = useState<{ source: string; status: 'pending' | 'missing' | 'failed' } | null>(null)
+  const [lookupAttempt, setLookupAttempt] = useState(0)
+  const lookupStatus = lookup?.source === source ? lookup.status : 'pending'
+  useEffect(() => {
+    if (mode !== 'canonical') {return}
+    let cancelled = false
+    setLookup({ source, status: 'pending' })
+    setError('')
+    const route = { connectionId: connectionId ?? '', profile }
+    const origin = props.origin ?? 'name'
+    void resolveCanonicalGroup(route, props.group, origin)
+      .then(resolved => {
+        if (cancelled) {return}
+
+        if (resolved) {publishCanonicalGroup(route, props.group, resolved, origin)} else {setLookup({ source, status: 'missing' })}
+      })
+      .catch(e => {
+        if (!cancelled) {
+          setLookup({ source, status: 'failed' })
+          setError(e instanceof Error ? e.message : String(e))
+        }
+      })
+
+    return () => { cancelled = true }
+  }, [mode, source, props.group, props.origin, lookupAttempt, connectionId, profile])
   useEffect(() => {
     let cancelled = false
     setCapability(null)
@@ -604,39 +646,8 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
       return
     }
 
-    const route = { connectionId: connectionId ?? '', profile }
-    void canonicalGroupRequest<unknown>(route, 'groups.capabilities')
-      .then(result => {
-        if (cancelled) {return}
-
-        const nextMode = groupExecutionMode(result)
-        if (nextMode !== 'canonical') {
-          setCapability({ source, mode: nextMode })
-
-          return
-        }
-
-        void discoverCanonicalGroups(route)
-          .then(groups => {
-            if (cancelled) {return}
-
-            const room = groups.rooms.find(candidate => candidate.name === props.group)
-            if (room) {
-              registerCanonicalGroup(route, room)
-
-              return
-            }
-
-            setCapability({ source, mode: 'canonical' })
-            setError('Gateway group not found. Retry to refresh the room list.')
-          })
-          .catch(e => {
-            if (!cancelled) {
-              setCapability({ source, mode: 'unavailable' })
-              setError(String(e))
-            }
-          })
-      })
+    void canonicalGroupRequest<unknown>({ connectionId: connectionId ?? '', profile }, 'groups.capabilities')
+      .then(result => { if (!cancelled) {setCapability({ source, mode: groupExecutionMode(result) })} })
       .catch(e => {
         if (!cancelled) {
           setCapability({ source, mode: 'unavailable' })
@@ -645,15 +656,44 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
       })
 
     return () => { cancelled = true }
-  }, [connectionId, profile, gateway, props.group, refresh, source])
+  }, [connectionId, profile, gateway, source])
 
   if (mode === 'legacy') {return <LegacyGroupChatWorkspace {...props} />}
 
+  // A `canonical:` key names an existing room; it never seeds a new one.
+  const canCreate = mode === 'canonical' && lookupStatus === 'missing' && canonicalGroupKeyRoute(props.group, props.origin ?? 'name') === null
+
+  const message = mode !== 'canonical'
+    ? mode === 'unavailable' ? b.canonical.driverUnavailable : 'Checking group driver…'
+    : lookupStatus === 'pending' ? t.gatewayGroupOpen.opening
+      : lookupStatus === 'failed' ? t.gatewayGroupOpen.lookupFailed
+        : canCreate ? 'This is a legacy Desktop room. Start a gateway-owned group with these members; the old history stays here and is not replayed.'
+          : t.gatewayGroupOpen.missing
+
   return <div className="grid gap-3 p-3">
     <h2>{props.group}</h2>
-    <p>{mode === 'canonical' ? 'This gateway group could not be found. Retry to refresh the room list.' : mode === 'unavailable' ? b.canonical.driverUnavailable : 'Checking group driver…'}</p>
+    <p>{message}</p>
     {error && <p role="alert">{error}</p>}
-    <Button disabled={mode !== 'canonical'} onClick={() => setRefresh(value => value + 1)}>Retry</Button>
+    {mode === 'canonical' && lookupStatus !== 'pending' && !canCreate &&
+      <Button onClick={() => setLookupAttempt(value => value + 1)} variant="secondary">{t.common.retry}</Button>}
+    <Button disabled={!canCreate || busy} onClick={() => {
+      const route = { connectionId: connectionId ?? '', profile }
+
+      const sourceCurrent = groupCreationSource(route, activationEpoch)
+
+      if (!canCreate || !sourceCurrent()) {
+        setError(b.canonical.driverUnavailable)
+
+        return
+      }
+
+      setBusy(true)
+      void createCanonicalGroup(route, props.group, props.members)
+        .then(({ room }) => {
+          if (sourceCurrent()) {openGroupChat(registerCanonicalGroup(route, room), 'key')}
+        })
+        .catch(e => { if (sourceCurrent()) {setError(String(e))} }).finally(() => setBusy(false))
+    }}>Start gateway group</Button>
   </div>
 }
 
@@ -1669,9 +1709,10 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
  *  visible edge to re-anchor its log to the bottom (#89835 follow-up). */
 interface GroupChatMainViewProps {
   group: string
+  origin: CanonicalGroupOrigin
 }
 
-function GroupChatMainView({ group }: GroupChatMainViewProps) {
+function GroupChatMainView({ group, origin }: GroupChatMainViewProps) {
   const allMeta = useValue($botMeta)
   // Subscribe: membership changes ride bot meta AND the room record.
   useValue($groupChats)
@@ -1691,7 +1732,7 @@ function GroupChatMainView({ group }: GroupChatMainViewProps) {
   const visible = useValue($visible)
 
   return (
-    <GroupChatWorkspace group={group} members={members} onBack={() => closeGroupChatMainTab(group)} visible={visible} />
+    <GroupChatWorkspace group={group} members={members} onBack={() => closeGroupChatMainTab(group)} origin={origin} visible={visible} />
   )
 }
 
@@ -1705,7 +1746,7 @@ function GroupChatMainView({ group }: GroupChatMainViewProps) {
  *  in-pane fallback painted alongside the main tab, and because the map
  *  write itself repaints nothing, the duplicate stuck until an unrelated
  *  re-render. */
-export function openGroupChat(group: string): void {
+export function openGroupChat(group: string, origin: CanonicalGroupOrigin): void {
   // A room selection supersedes any bot-open transition still hydrating.
   // The in-flight host navigation may complete underneath this workspace,
   // but it may not later close or visually steal the room the user chose.
@@ -1714,6 +1755,7 @@ export function openGroupChat(group: string): void {
     ...$groupNeedsYou.get(),
     [group]: false
   })
+  recordGroupOpenOrigin(group, origin)
   const ownerKey = groupWorkspaceOwnerKey(group)
   setBotsWorkspaceOwner(ownerKey, null, 'New group conversations start in the group composer.')
   // #93813: what reached the members' room sessions while nobody drove them
@@ -1723,12 +1765,13 @@ export function openGroupChat(group: string): void {
 
   if (typeof host.openWorkspace === 'function') {
     try {
-      const title = $canonicalGroupBindings.get()[group]?.roomName || group
+      const route = { connectionId: host.state.connectionId.get() ?? '', profile: host.state.profile.get() }
+      const title = canonicalGroupBindingFor($canonicalGroupBindings.get(), route, group, origin)?.roomName || group
 
       const close = host.openWorkspace(`${ID}:group:${slugifyProfileName(group)}`, {
         title,
         minWidth: '24rem',
-        render: () => <GroupChatMainView group={group} />,
+        render: () => <GroupChatMainView group={group} origin={origin} />,
         onClose: () => {
           dropGroupMainTab(group)
 
