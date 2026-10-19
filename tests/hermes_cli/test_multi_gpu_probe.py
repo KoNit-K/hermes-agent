@@ -25,9 +25,10 @@ def _margin(total_bytes: int) -> int:
 
 
 def _install_smi(monkeypatch, memory_csv: str, facts_csv: str = ""):
-    """Route both hardware and local-models nvidia-smi calls through mocked CSV."""
+    """Return the cached six-column nvidia-smi query from compact test fixtures."""
     monkeypatch.setattr(hw, "_smi_path_cache", None)
     monkeypatch.setattr(hw, "_pool_probe_cache", None)
+    monkeypatch.setattr(hw, "_gpu_query_cache", None)
     monkeypatch.setattr(hw, "_nvidia_smi_path", lambda: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(hw, "_device_pool_view", lambda: None)
     monkeypatch.setattr(hw, "_ram_bytes", lambda: (64 * GIB, 32 * GIB))
@@ -35,9 +36,17 @@ def _install_smi(monkeypatch, memory_csv: str, facts_csv: str = ""):
     def fake_run(argv, **kwargs):
         joined = " ".join(str(a) for a in argv)
         if "memory.total,memory.free" in joined:
-            return _Smi(memory_csv)
-        if "name,utilization.gpu,memory.used" in joined:
-            return _Smi(facts_csv)
+            facts = [line.split(",") for line in facts_csv.strip().splitlines() if line.strip()]
+            rows = []
+            for i, line in enumerate(memory_csv.strip().splitlines()):
+                memory = [part.strip() for part in line.split(",")]
+                if len(memory) != 2:
+                    rows.append(line)
+                    continue
+                name, util, used = (facts[i] if i < len(facts) and len(facts[i]) == 3
+                                   else [f"GPU {i}", "0", "0"])
+                rows.append(f"{memory[0]},{memory[1]},{name},N/A,{used},{util}")
+            return _Smi("\n".join(rows))
         return _Smi("", 1)
 
     monkeypatch.setattr(hw.subprocess, "run", fake_run)
@@ -80,6 +89,18 @@ def test_two_cards_live_sums_per_card_free_minus_margin(monkeypatch):
     assert b.usable_vram_bytes == max(0, free0 - margin) + max(0, free1 - margin)
 
 
+def test_launch_budget_reweights_split_for_uneven_free_cards(monkeypatch):
+    _install_smi(monkeypatch, _two_16gib_csv())
+    capacity = hw.probe_budget(planning=True)
+    _install_smi(monkeypatch, "16384, 15000\n16384, 2048\n")
+    live = hw.launch_budget(capacity)
+    assert live is not None
+    assert live.tensor_split is not None
+    assert live.tensor_split[0] > 0.9
+    assert live.tensor_split[1] < 0.1
+    assert live.usable_vram_bytes < capacity.usable_vram_bytes
+
+
 # ── 2) Fail-open: one card ───────────────────────────────────
 
 
@@ -114,6 +135,10 @@ def test_uneven_cards_ratio_aware_tensor_split_in_preset(tmp_path, monkeypatch):
     assert abs(ratios[1] - u8 / (u24 + u8)) < 1e-9
     assert abs(ratios[0] - 0.5) > 0.1
     assert abs(sum(ratios) - 1.0) < 1e-9
+    _install_smi(monkeypatch, "24576, 24000\n8192, 2048\n")
+    live = hw.launch_budget(b)
+    assert live is not None and live.tensor_split is not None
+    assert live.tensor_split[0] > ratios[0]
 
     import hermes_cli.local_runtime.presets as presets_mod
     from hermes_cli.local_runtime.estimator import LayerKind, ModelProfile
@@ -132,7 +157,7 @@ def test_uneven_cards_ratio_aware_tensor_split_in_preset(tmp_path, monkeypatch):
     monkeypatch.setattr(presets_mod, "profile_from_gguf", lambda h: profile)
 
     preset = tmp_path / "presets.ini"
-    presets_mod.generate_presets(mdir, b, preset)
+    presets_mod.generate_presets(mdir, b, preset, live=live)
     ini = preset.read_text(encoding="utf-8")
     assert "tensor-split" in ini
     line = next(ln for ln in ini.splitlines() if ln.startswith("tensor-split"))
@@ -140,7 +165,7 @@ def test_uneven_cards_ratio_aware_tensor_split_in_preset(tmp_path, monkeypatch):
     parsed = [float(x) for x in raw.split(",")]
     assert len(parsed) == 2
     assert abs(parsed[0] - 0.5) > 0.1
-    assert abs(parsed[0] - ratios[0]) < 1e-3
+    assert abs(parsed[0] - live.tensor_split[0]) < 1e-3
     assert abs(sum(parsed) - 1.0) < 1e-3
 
 
@@ -195,10 +220,9 @@ def hardware_client(tmp_path, monkeypatch):
 
 def test_hardware_api_exposes_gpus_array(hardware_client, monkeypatch):
     facts = "NVIDIA GeForce RTX 5070 Ti, 10, 2048\nNVIDIA GeForce RTX 5060 Ti, 5, 1024\n"
-    fake_run = _install_smi(monkeypatch, _two_16gib_csv(), facts)
+    _install_smi(monkeypatch, _two_16gib_csv(), facts)
     from hermes_cli.web_routers import local_models as lm
 
-    monkeypatch.setattr(lm.subprocess, "run", fake_run)
     monkeypatch.setattr(lm.hardware, "_nvidia_smi_path", lambda: "/usr/bin/nvidia-smi")
 
     data = hardware_client.get("/api/local-models/hardware").json()
