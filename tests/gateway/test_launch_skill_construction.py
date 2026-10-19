@@ -12,11 +12,18 @@ from agent.system_prompt import build_system_prompt_parts
 from tests.agent.test_system_prompt import _make_agent
 
 
-def test_worker_keeps_skills_separate_from_personality(tmp_path):
-    policy = replace(build_policy({'cwd': str(tmp_path)}, {}), skills_prompt="SKILL BYTES")
+def test_worker_keeps_skills_separate_from_personality(tmp_path, monkeypatch):
+    from gateway.run_config_loaders import GatewayConfigLoadersMixin
+
+    prefill = [{'role': 'user', 'content': 'SESSION PREFILL'}]
+    (tmp_path / "prefill.json").write_text(json.dumps(prefill))
+    monkeypatch.setenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "DAEMON PERSONALITY")
+    policy = replace(build_policy({
+        'cwd': str(tmp_path), 'client_env': {'HERMES_EPHEMERAL_SYSTEM_PROMPT': 'PERSONALITY'},
+    }, {'prefill_messages_file': 'prefill.json'}), skills_prompt="SKILL BYTES")
     runner = SimpleNamespace(
         config=None, _prefill_messages=None, _refresh_fallback_model=lambda: None,
-        _get_system_prompt_for_channel=lambda *a: "PERSONALITY",
+        _get_system_prompt_for_channel=lambda *a: GatewayConfigLoadersMixin._load_ephemeral_system_prompt(),
     )
     authority = SimpleNamespace(runner=runner, profile_id=str(tmp_path))
     inputs = construct_inputs(authority, policy, "chat")
@@ -26,29 +33,36 @@ def test_worker_keeps_skills_separate_from_personality(tmp_path):
     assert "SKILL BYTES" in parts['stable']
     assert "PERSONALITY" not in "\n\n".join(parts.values())
     assert agent.ephemeral_system_prompt == "PERSONALITY"
+    assert agent.prefill_messages == prefill
 
 
 def test_in_process_constructor_forwards_stable_skills(tmp_path, monkeypatch):
     from gateway.session_execution import GatewaySessionAgentMixin
 
-    policy = replace(build_policy({'cwd': str(tmp_path)}, {}), skills_prompt="SKILL BYTES")
+    prefill = [{'role': 'user', 'content': 'SESSION PREFILL'}]
+    (tmp_path / "prefill.json").write_text(json.dumps(prefill))
+    policy = replace(build_policy({'cwd': str(tmp_path)}, {'prefill_messages_file': 'prefill.json'}),
+                     skills_prompt="SKILL BYTES")
     monkeypatch.setattr("gateway.session_policy.policy_for_source", lambda *a: policy)
     monkeypatch.setattr("gateway.run._checkpoint_agent_kwargs", lambda cfg: {})
     monkeypatch.setattr("gateway.session_execution.api_runtime_locked", lambda: True)
     source = SimpleNamespace(**dict.fromkeys(
         ('user_id', 'user_id_alt', 'user_name', 'chat_id', 'chat_name', 'chat_type', 'thread_id')))
+    source.chat_id = "session"
     constructor = lambda **kwargs: _make_agent(**kwargs)
     host = SimpleNamespace(
         _ctx=SimpleNamespace(source=source, AIAgent=constructor, user_config={}, enabled_toolsets=[],
                              disabled_toolsets=[], session_id="session", session_key="key"),
         _runner=SimpleNamespace(_prefill_messages=None, _service_tier=None, _session_db=None),
     )
+    host._runner.session_authority = SimpleNamespace(runner=host._runner, profile_id=str(tmp_path))
     agent = GatewaySessionAgentMixin._build_fresh_agent(host, {'model': 'm', 'runtime': {}}, 'cli',
                                               'PERSONALITY', 10, None, {}, False)
     parts = build_system_prompt_parts(agent)
     assert "SKILL BYTES" in parts['stable']
     assert "PERSONALITY" not in "\n\n".join(parts.values())
     assert agent.ephemeral_system_prompt == "PERSONALITY"
+    assert agent.prefill_messages == prefill
 
 
 @pytest.mark.parametrize("surface", ["gateway", "tui", "oneshot"])

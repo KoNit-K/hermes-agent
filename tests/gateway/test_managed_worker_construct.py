@@ -74,9 +74,10 @@ def _serve(cls):
     return server
 
 
-def run_pair(tmp_path, extra_config, turn, **create_params):
+def run_pair(tmp_path, extra_config, turn, *, before_create=None, **create_params):
     """Boot one ordinary daemon; create an in-process and a managed session from the same config;
-    run ``turn(ws, sid, name, settle, servers)`` for each and return its results by session."""
+    run ``turn(ws, sid, name, settle, servers)`` for each and return its results by session.
+    ``before_create(home)`` edits the profile after the daemon started, before each create."""
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
@@ -112,6 +113,8 @@ def run_pair(tmp_path, extra_config, turn, **create_params):
     async def exercise(desc):
         async with websocket(home, desc) as ws:
             for name in ('inproc', 'managed'):
+                if before_create is not None:
+                    before_create(home)
                 if name == 'managed':
                     edited = json.loads((home / 'config.yaml').read_text())
                     edited['gateway']['managed_workers'] = True
@@ -174,8 +177,37 @@ def test_managed_turn_sends_configured_instruction_and_prefill(tmp_path):
         assert found == {'system_mark': [True], 'prefill': ['PREFILL_Q_MARK', 'PREFILL_A_MARK'], 'stored': False}, (name, results)
 
 
+@pytest.mark.platforms("linux")
+def test_new_sessions_send_the_profiles_current_prefill(tmp_path):
+    """CFG-7: a ``prefill_messages_file`` path and contents edited after the daemon started reach the
+    next new session, in process and managed, as a new ``hermes chat`` process read them on main."""
+    def pair(home, name, mark):
+        (home / name).write_text(json.dumps([{'role': 'user', 'content': f'PREFILL_{mark}_Q'},
+                                             {'role': 'assistant', 'content': f'PREFILL_{mark}_A'}]))
+
+    def extra(home):
+        pair(home, 'boot.json', 'BOOT')
+        return {'prefill_messages_file': 'boot.json'}
+
+    def edit(home):
+        pair(home, 'edited.json', 'EDITED')
+        config = json.loads((home / 'config.yaml').read_text())
+        config['prefill_messages_file'] = 'edited.json'
+        (home / 'config.yaml').write_text(json.dumps(config))
+
+    async def turn(ws, sid, name, settle, servers):
+        start = len(servers.primary.requests)
+        assert (await settle(ws, sid, name + '-plain', 'PLAIN_TURN'))['final_response'] == 'PRIMARY_OK'
+        [request] = servers.primary.requests[start:]
+        return {'prefill': [m['content'] for m in request['messages'] if 'PREFILL_' in str(m.get('content'))]}
+    results = run_pair(tmp_path, extra, turn, before_create=edit)
+    for name in ('inproc', 'managed'):
+        assert results[name]['prefill'] == ['PREFILL_EDITED_Q', 'PREFILL_EDITED_A'], (name, results)
+
+
 def test_construct_inputs_follow_the_session_mode(tmp_path, monkeypatch):
-    """Ordinary: the owner's per-turn profile refresh, configured prompt and prefill; config-only:
+    """Ordinary: the owner's per-turn profile refresh, configured prompt and the session's own prefill
+    (none configured here; never the runner's daemon-start copy); config-only:
     the frozen snapshot's chain and launch skills only, never the profile; safe mode: nothing.
     The child accepts only the closed shape."""
     from gateway.session_local import _bypass_policy
@@ -193,7 +225,7 @@ def test_construct_inputs_follow_the_session_mode(tmp_path, monkeypatch):
     safe = _bypass_policy({**launch, 'safe_mode': True}, private_secrets={})
     assert construct_inputs(authority, ordinary, 'c') == {
         'fallback_model': chain, 'ephemeral_system_prompt': 'SYS', 'preloaded_skills_prompt': None,
-        'prefill_messages': runner._prefill_messages}
+        'prefill_messages': None}
     assert profile_reads == ['fallback', 'prompt']
     empty = {'fallback_model': None, 'ephemeral_system_prompt': None, 'preloaded_skills_prompt': None,
              'prefill_messages': None}
@@ -201,8 +233,10 @@ def test_construct_inputs_follow_the_session_mode(tmp_path, monkeypatch):
     assert construct_inputs(authority, safe, 'c') == empty and profile_reads == ['fallback', 'prompt']
     frame = {'policy': {'request_json': json.dumps({'construct_v1': construct_inputs(authority, ordinary, 'c')})}}
     assert construct_kwargs(frame)['fallback_model'] == chain
+    legacy = {key: value for key, value in empty.items() if key != 'preloaded_skills_prompt'}
+    assert construct_kwargs({'policy': {'request_json': json.dumps({'construct_v1': legacy})}}) == empty
     assert construct_kwargs({'policy': {'request_json': '{}'}}) == {}
     for bad in ({**empty, 'fallback_model': 'x'}, {**empty, 'extra': 1}, {**empty, 'ephemeral_system_prompt': 1},
-                {**empty, 'prefill_messages': ['x']}, []):
+                {**empty, 'preloaded_skills_prompt': 1}, {**empty, 'prefill_messages': ['x']}, []):
         with pytest.raises(ValueError):
             construct_kwargs({'policy': {'request_json': json.dumps({'construct_v1': bad})}})
