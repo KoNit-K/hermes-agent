@@ -1,4 +1,5 @@
 import { getQueuedPrompts, type QueuedPromptEntry, writeSessionQueue } from './composer-queue'
+import { $sessions, resolveComposerSessionKey } from './session'
 
 // One localStorage key per (session, admission). Every Desktop window of the origin shares this
 // storage with last-writer-wins per KEY, so a single journal blob let one window's
@@ -14,6 +15,8 @@ interface PendingSubmission {
   status?: string
   /** Where in the session's event order the owner last listed this admission as pending. */
   seen?: PendingSnapshotFence
+  /** The snapshot's queued-row controls; carried to the card only, never journaled. */
+  controls?: string[]
 }
 
 /** A canonical pending snapshot's place in its session's event order: the replay epoch and the
@@ -36,74 +39,130 @@ const parse = <T>(raw: null | string, fallback: T): T => {
 
 /** Every tracked/observed pending submission of one session, keyed by id. */
 export function readPendingSubmissions(session: string): Record<string, PendingSubmission> {
-  const entries: Record<string, PendingSubmission> = {
-    ...parse(window.localStorage.getItem(LEGACY_KEY), {} as Record<string, Record<string, PendingSubmission>>)[session]
-  }
+  const entries: Record<string, PendingSubmission> = { ...parse(window.localStorage.getItem(LEGACY_KEY), {} as Record<string, Record<string, PendingSubmission>>)[session] }
 
   for (let index = 0; index < window.localStorage.length; index += 1) {
     const key = window.localStorage.key(index)
 
-    if (!key?.startsWith(ENTRY_PREFIX)) {
-      continue
-    }
+    if (!key?.startsWith(ENTRY_PREFIX)) { continue }
     const [owner, id] = parse(key.slice(ENTRY_PREFIX.length), [] as unknown[])
     const entry = parse<null | PendingSubmission>(window.localStorage.getItem(key), null)
 
-    if (owner === session && typeof id === 'string' && entry) {
-      entries[id] = entry
-    }
+    if (owner === session && typeof id === 'string' && entry) { entries[id] = entry }
   }
 
   return entries
 }
 
-function writeEntries(
-  session: string,
-  before: Record<string, PendingSubmission>,
-  after: Record<string, PendingSubmission>
-): void {
+/** One admission's record without enumerating the journal: its v2 key, else the legacy blob. */
+function readPendingSubmission(session: string, id: string): PendingSubmission | undefined {
+  return parse<null | PendingSubmission>(window.localStorage.getItem(entryKey(session, id)), null) ??
+    parse(window.localStorage.getItem(LEGACY_KEY), {} as Record<string, Record<string, PendingSubmission>>)[session]?.[id]
+}
+
+function writeEntries(session: string, before: Record<string, PendingSubmission>, after: Record<string, PendingSubmission>): void {
   for (const id of Object.keys(before)) {
-    if (!(id in after)) {
-      window.localStorage.removeItem(entryKey(session, id))
-    }
+    if (!(id in after)) { window.localStorage.removeItem(entryKey(session, id)) }
   }
 
   for (const [id, entry] of Object.entries(after)) {
-    if (JSON.stringify(before[id]) !== JSON.stringify(entry)) {
-      window.localStorage.setItem(entryKey(session, id), JSON.stringify(entry))
-    }
+    if (JSON.stringify(before[id]) !== JSON.stringify(entry)) { window.localStorage.setItem(entryKey(session, id), JSON.stringify(entry)) }
   }
 
   // Upgrade: once this session's entries live in v2 keys, drop its slice of the legacy blob.
   const legacy = parse(window.localStorage.getItem(LEGACY_KEY), {} as Record<string, unknown>)
 
   if (session in legacy) {
-    for (const [id, entry] of Object.entries(after)) {
-      window.localStorage.setItem(entryKey(session, id), JSON.stringify(entry))
-    }
+    for (const [id, entry] of Object.entries(after)) { window.localStorage.setItem(entryKey(session, id), JSON.stringify(entry)) }
     delete legacy[session]
 
-    if (Object.keys(legacy).length) {
-      window.localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy))
-    } else {
-      window.localStorage.removeItem(LEGACY_KEY)
-    }
+    if (Object.keys(legacy).length) { window.localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy)) }
+    else { window.localStorage.removeItem(LEGACY_KEY) }
   }
 }
-
-// Not an outbox: an uncertain accepted input must never be replayed automatically.
-export function trackPendingSubmission(key: string, entry: PendingSubmission): void {
-  window.localStorage.setItem(entryKey(key, entry.id), JSON.stringify(entry))
-}
-
-// Array.isArray narrows `unknown` to `any[]`; the helpers keep that wire shape.
-type RawReceipts = any[]
 
 // An admission only moves forward: queued -> started -> (unknown after an owner restart) ->
 // retired (gone from the pending set: terminal). Snapshots can arrive out of order (a resume
 // result racing the live fanout, a replayed session.info), so a receipt weaker than the strongest
 // state already observed for its admission is stale and never repaints the queue.
 const STATUS_RANK: Record<string, number> = { queued: 0, started: 1, unknown: 2, retired: 3 }
+
+// The one journal identity for tracking and reconciliation: the key the queue panel reads. After
+// compression that is the lineage root, not the tip a submit targets or the runtime reports.
+const journalKey = (storedId: string) => resolveComposerSessionKey(storedId, $sessions.get()) ?? storedId
+
+const rank = (entry: PendingSubmission) => STATUS_RANK[entry.status ?? ''] ?? -1
+
+// Within one numbering the later sequence; across epochs they cannot be compared, keep the first.
+const laterFence = (a?: PendingSnapshotFence, b?: PendingSnapshotFence) =>
+  a && b && a.epoch === b.epoch && b.sequence > a.sequence ? b : (a ?? b)
+
+/** Two records of one admission as one: the stronger status (the newer on a tie), the text and
+ *  display text either knows, and the later fence. A retirement stays bare. */
+function mergeReceipt(held: PendingSubmission | undefined, next: PendingSubmission): PendingSubmission {
+  if (!held) {
+    return next
+  }
+
+  const [strong, weak] = rank(next) >= rank(held) ? [next, held] : [held, next]
+
+  if (strong.status === 'retired') {
+    return strong
+  }
+
+  const seen = laterFence(strong.seen, weak.seen)
+
+  return {
+    ...weak,
+    ...strong,
+    text: strong.text || weak.text,
+    displayText: strong.displayText ?? weak.displayText,
+    ...(seen ? { seen } : {})
+  }
+}
+
+/** Fold a journal kept under `from` into `to` once `from` resolves there (a tip journaled before
+ *  its lineage row loaded), so its status, display text and fences keep guarding the card. */
+function adoptJournal(from: string, to: string): void {
+  const stray = from === to ? {} : readPendingSubmissions(from)
+
+  if (!Object.keys(stray).length) {
+    return
+  }
+
+  const before = readPendingSubmissions(to)
+  const merged = { ...before }
+
+  for (const [id, entry] of Object.entries(stray)) {
+    merged[id] = mergeReceipt(merged[id], entry)
+  }
+
+  writeEntries(to, before, merged)
+  writeEntries(from, stray, {})
+}
+
+// Tip->root lineages whose tip journal tracking already folded. Adoption enumerates the journal,
+// so a send pays for it only when it first observes the lineage; reconciliation still adopts
+// whatever another window journals under the tip afterwards.
+const adoptedLineages = new Set<string>()
+
+// Not an outbox: an uncertain accepted input must never be replayed automatically.
+export function trackPendingSubmission(storedId: string, entry: PendingSubmission): void {
+  const key = journalKey(storedId)
+  const lineage = JSON.stringify([storedId, key])
+
+  if (storedId !== key && !adoptedLineages.has(lineage)) {
+    adoptJournal(storedId, key)
+    adoptedLineages.add(lineage)
+  }
+
+  const held = readPendingSubmission(key, entry.id)
+  window.localStorage.setItem(entryKey(key, entry.id), JSON.stringify(mergeReceipt(held, entry)))
+}
+
+// Array.isArray narrows `unknown` to `any[]`; the helpers keep that wire shape.
+type RawReceipts = any[]
+
 // Retired identities are remembered per session only as long as a late snapshot can matter.
 const RETIRED_MEMORY = 200
 
@@ -136,7 +195,8 @@ function collectReceipts(value: RawReceipts, known: Record<string, PendingSubmis
       ...known[id],
       id,
       text: typeof raw.user === 'string' ? raw.user : (known[id]?.text ?? ''),
-      status: stale ? known[id].status : raw.status
+      status: stale ? known[id].status : raw.status,
+      ...(Array.isArray(raw.controls) ? { controls: raw.controls.filter((c: unknown) => typeof c === 'string') } : {})
     })
   }
 
@@ -157,6 +217,9 @@ function projectQueue(
   admissionByInput: Map<string, string>,
   stillPending: Set<string>
 ): QueuedPromptEntry[] {
+  // The owner lists its admissions in FIFO order: a card it lists is shown in that order, so an
+  // admission back in its queue place (a steer that never reached the turn) is not shown last.
+  const order = new Map([...receipts.keys()].map((id, index) => [id, index]))
   const next: QueuedPromptEntry[] = []
 
   for (const entry of current) {
@@ -164,7 +227,7 @@ function projectQueue(
 
     if (receipt) {
       if (receipt.status !== 'started') {
-        next.push({ ...entry, id: receipt.id, serverStatus: receipt.status })
+        next.push({ ...entry, id: receipt.id, serverStatus: receipt.status, serverControls: receipt.controls })
       }
 
       receipts.delete(receipt.id)
@@ -181,28 +244,34 @@ function projectQueue(
         displayText: receipt.displayText,
         attachments: [],
         queuedAt: Date.now(),
-        serverStatus: receipt.status
+        serverStatus: receipt.status,
+        serverControls: receipt.controls
       })
     }
   }
 
+  return inOwnerOrder(next, order)
+}
+
+/** Listed cards take the owner's order among the slots they hold; every other card keeps its slot. */
+function inOwnerOrder(entries: QueuedPromptEntry[], order: Map<string, number>): QueuedPromptEntry[] {
+  const slots = entries.flatMap((entry, index) => (order.has(entry.id) ? [index] : []))
+  const listed = slots.map(index => entries[index]).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+  const next = [...entries]
+
+  slots.forEach((slot, index) => {
+    next[slot] = listed[index]
+  })
+
   return next
 }
 
-function updateKnownReceipts(
-  known: Record<string, PendingSubmission>,
-  value: RawReceipts,
-  fence?: PendingSnapshotFence
-): void {
+function updateKnownReceipts(known: Record<string, PendingSubmission>, value: RawReceipts, fence?: PendingSnapshotFence): void {
   // Only observed server records may be retired by their later absence. The retirement is kept
   // (text dropped) so a stale snapshot that still lists the admission cannot resurrect its card.
   for (const [id, entry] of Object.entries(known)) {
-    if (
-      entry.status &&
-      entry.status !== 'retired' &&
-      !value.some(raw => raw?.admission_id === id) &&
-      !predates(fence, entry.seen)
-    ) {
+    if (entry.status && entry.status !== 'retired' && !value.some(raw => raw?.admission_id === id) &&
+        !predates(fence, entry.seen)) {
       known[id] = { id, text: '', status: 'retired' }
     }
   }
@@ -221,7 +290,9 @@ function updateKnownReceipts(
         ...previous,
         id: raw.admission_id,
         text: raw.user ?? previous?.text ?? '',
-        status: raw.status,
+        // A steer in transfer reads `started` but can still go back to its queue place: it never
+        // raises the admission's rank, so the owner's later `queued` listing repaints its card.
+        status: raw.steering === true ? (previous?.status ?? 'queued') : raw.status,
         ...(fence && !predates(fence, previous?.seen) ? { seen: fence } : {})
       }
     }
@@ -230,26 +301,23 @@ function updateKnownReceipts(
 
 /** Project one pending snapshot onto the session's queue. `fence` orders canonical snapshots so a
  *  delayed older one cannot retire an admission a newer one still listed. */
-export function reconcilePendingSubmissions(key: string, value: unknown, fence?: PendingSnapshotFence): void {
+export function reconcilePendingSubmissions(storedId: string, value: unknown, fence?: PendingSnapshotFence): void {
   if (!Array.isArray(value)) {
     return
   }
+
+  // Project onto the key the queue panel reads: only snapshots projected there can retire a card
+  // shown there. Receipts journaled under the tip before the lineage was known move along.
+  const key = journalKey(storedId)
+  adoptJournal(storedId, key)
 
   const before = readPendingSubmissions(key)
   const known = { ...before }
   const { receipts, admissionByInput } = collectReceipts(value, known)
 
-  const stillPending = new Set(
-    Object.values(known)
-      .filter(
-        entry =>
-          entry.status &&
-          entry.status !== 'retired' &&
-          predates(fence, entry.seen) &&
-          !value.some(raw => raw?.admission_id === entry.id)
-      )
-      .map(entry => entry.id)
-  )
+  const stillPending = new Set(Object.values(known).filter(entry =>
+    entry.status && entry.status !== 'retired' && predates(fence, entry.seen) &&
+    !value.some(raw => raw?.admission_id === entry.id)).map(entry => entry.id))
 
   const current = getQueuedPrompts(key)
   const next = projectQueue(current, receipts, admissionByInput, stillPending)

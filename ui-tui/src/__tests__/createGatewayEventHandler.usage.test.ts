@@ -79,4 +79,16 @@ describe('canonical session.usage tick', () => {
     expect(usage).not.toHaveProperty('context_max')
     expect(usage).not.toHaveProperty('avg_tps')
   })
+
+  it('maps a partial tick to only the figures it carries', () => {
+    expect(usageFromTick({ input_tokens: 1200, output_tokens: 80 })).toEqual({ input: 1200, output: 80 })
+    expect(usageFromTick({ api_calls: 3 })).toEqual({ calls: 3 })
+    expect(usageFromTick({ context_length: 10000, last_prompt_tokens: 4200 })).toMatchObject({
+      context_max: 10000,
+      context_percent: 42,
+      context_used: 4200
+    })
+    expect(usageFromTick({ input_tokens: 0, prompt_tokens: 1000 })).toEqual({ input: 1000, prompt: 1000 })
+    expect(usageFromTick({ model: 'only-a-model' })).toBeUndefined()
+  })
 })

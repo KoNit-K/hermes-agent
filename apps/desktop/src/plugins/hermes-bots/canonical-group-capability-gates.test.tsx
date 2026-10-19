@@ -164,6 +164,9 @@ function pendingCreation() {
       return { driver: true, persistent_process: true }
     }
 
+    // A legacy room with no gateway room of its name yet (#140805 lookup answers empty).
+    if (method === 'groups.list') {return { rooms: [], next_offset: null }}
+
     if (method === 'groups.create') {
       const room = { room_id: params.room_id, name: params.name, members: params.members }
       serverRooms.set(room.room_id, room)
