@@ -82,6 +82,9 @@ scope = secret_scope.build_profile_secret_scope(home)
 token = secret_scope.set_secret_scope(scope, profile_home=str(home))
 try:
     from tools.environments.local import build_subprocess_env
+    from tools.env_passthrough import register_env_passthrough
+    # Explicit skill passthrough must still resolve through the routed scope.
+    register_env_passthrough(["OP_SERVICE_ACCOUNT_TOKEN", "BWS_ACCESS_TOKEN"])
     tool_env = build_subprocess_env()
     secret = secret_scope.get_secret("OP_SERVICE_ACCOUNT_TOKEN")
 finally:
