@@ -236,7 +236,7 @@ def test_auto_codex_empty_store_does_not_spend_openrouter_fallback(monkeypatch):
     """Never-configured Codex must fail closed before a paid auto fallback."""
     from hermes_cli import auth_codex, runtime_provider
 
-    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
+    monkeypatch.setattr(runtime_provider, "_get_model_config", dict)
     monkeypatch.setattr(runtime_provider, "_resolve_requested_shortcuts", lambda *_args: None)
     monkeypatch.setattr(runtime_provider, "_resolve_named_custom_runtime", lambda **_kwargs: None)
     monkeypatch.setattr(runtime_provider, "_local_endpoint_bypass", lambda *_args: None)
@@ -430,7 +430,7 @@ def test_auto_runtime_ladder_stops_after_provider_missing(provider, monkeypatch)
     monkeypatch.setattr(runtime_provider, "_resolve_named_custom_runtime", lambda **_kwargs: None)
     monkeypatch.setattr(runtime_provider, "_local_endpoint_bypass", lambda *_args: None)
     monkeypatch.setattr(runtime_provider, "resolve_provider", lambda *_args, **_kwargs: provider)
-    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
+    monkeypatch.setattr(runtime_provider, "_get_model_config", dict)
     monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
     monkeypatch.setattr(
         runtime_provider,
@@ -467,7 +467,7 @@ def test_auto_azure_shortcut_missing_category_does_not_fallback(monkeypatch):
     monkeypatch.setattr(runtime_provider, "_resolve_requested_shortcuts", missing_shortcut)
     monkeypatch.setattr(runtime_provider, "_resolve_named_custom_runtime", lambda **_kwargs: None)
     monkeypatch.setattr(runtime_provider, "resolve_provider", lambda *_args, **_kwargs: "openrouter")
-    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
+    monkeypatch.setattr(runtime_provider, "_get_model_config", dict)
     monkeypatch.setattr(runtime_provider, "load_pool", lambda _provider: None)
     monkeypatch.setattr(
         runtime_provider,

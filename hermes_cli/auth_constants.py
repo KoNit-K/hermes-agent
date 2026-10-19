@@ -153,6 +153,29 @@ class AuthError(RuntimeError):
         self.category = category
 
 
+# Resolve-time operator misconfig: fail closed. Do not silently spend a different paid provider.
+NON_FALLBACK_AUTH_CODES = frozenset({
+    "missing_api_key",
+    "no_provider_configured",
+    "invalid_provider",
+    "missing_external_process_cli",
+})
+
+
+def is_configuration_auth_error(error: Exception) -> bool:
+    return (
+        isinstance(error, AuthError)
+        and (
+            getattr(error, "category", None) == AUTH_ERROR_CATEGORY_MISSING_CREDENTIAL
+            or getattr(error, "code", None) in NON_FALLBACK_AUTH_CODES
+        )
+    )
+
+
+def should_try_fallback_on_auth_error(error: Exception) -> bool:
+    return not is_configuration_auth_error(error)
+
+
 def _provider_error_factory(provider: str) -> Callable[..., AuthError]:
     def factory(
         message: str,
