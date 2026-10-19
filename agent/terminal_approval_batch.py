@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextvars
 import copy
-import json
 import threading
 import time
 from contextlib import contextmanager
@@ -36,7 +35,6 @@ class _TerminalSlot:
         self.args = None
         self.decision = None
         self.guard_key = None
-        self.regated = False
         self.claimed = False
 
     def check_cancelled(self):
@@ -59,14 +57,12 @@ class _TerminalSlot:
                     turn_id=getattr(self.batch.agent, "_current_turn_id", "") or "",
                 )
                 try:
-                    self.guard_key = (ref.args["command"], config["env_type"], tt._docker_has_host_access(config))
-                    decision = tt._check_all_guards(*self.guard_key)
-                    # A failed earlier slot may withdraw this request while
-                    # its worker is still blocked in the approval wait.  That
-                    # withdrawal is not a user denial and must not become a
-                    # prepared decision when the wait unwinds.
-                    if not self.regated or (isinstance(decision, dict) and decision.get("outcome") == "denied"):
-                        self.decision = decision
+                    # Key on what will actually run: a foreground `cmd &` executes as `cmd`.
+                    command = ref.args["command"]
+                    if not ref.args.get("background"):
+                        command = tt.trailing_amp_background_command(command) or command
+                    self.guard_key = (command, config["env_type"], tt._docker_has_host_access(config))
+                    self.decision = tt._check_all_guards(*self.guard_key)
                 finally:
                     reset_current_observability_context(tokens)
         finally:
@@ -103,10 +99,15 @@ class _TerminalBatch:
         self.agent, self.messages, self.task_id = agent, messages, task_id
         self.cancelled = threading.Event()
         self.pending_approvals = []  # guarded by tools.approval._lock
-        self.failed_slot_index: int | None = None
         self.authorization_gate = _ConcurrentToolAuthorizationGate()
         self.executor = DaemonThreadPoolExecutor(max_workers=len(parsed))
         self.slots = [_TerminalSlot(self, pc, i) for i, pc in enumerate(parsed)]
+        # Set once ANY slot in the batch has published a failed result (or a
+        # denied/blocked one). Informed consent is per the batch state the user
+        # SAW: after a failure, a later slot's pre-collected approval no longer
+        # describes the world its command will run in, so it must not be
+        # consumed — the guard re-runs live instead (#113158).
+        self.failure_seen = False
 
     def start(self):
         from agent.tool_executor import _resolve_sequential_tool_timeout
@@ -131,11 +132,11 @@ class _TerminalBatch:
         # notify_cb. Thread interrupts alone leave those requests actionable.
         with approval._lock:
             self.cancelled.set()
-            for _slot, session_key, entry in self.pending_approvals:
+            for session_key, entry in self.pending_approvals:
                 queue = approval._gateway_queues.get(session_key, [])
                 if entry in queue:
                     queue.remove(entry)
-                    entry.cancelled = "terminal approval batch closed"
+                    entry.result = "deny"
                     entry.event.set()
                 if not queue:
                     approval._gateway_queues.pop(session_key, None)
@@ -146,40 +147,6 @@ class _TerminalBatch:
                 _interrupt_worker_tids(self.agent, slot.tids)
                 slot.future.cancel()
         self.executor.shutdown(wait=False, cancel_futures=True)
-
-    def regate_after_failure(self, call_id):
-        """Discard consent prepared ahead of a failed terminal call."""
-        failed_slot = next((slot for slot in self.slots
-                            if slot.parsed.ref(self.task_id).call_id == call_id), None)
-        if failed_slot is None:
-            return
-        from tools import approval
-        with approval._lock:
-            if self.failed_slot_index is not None:
-                return
-            self.failed_slot_index = failed_slot.index
-            retained = []
-            for slot, session_key, entry in self.pending_approvals:
-                if slot.index <= failed_slot.index:
-                    retained.append((slot, session_key, entry))
-                    continue
-                queue = approval._gateway_queues.get(session_key, [])
-                if entry in queue:
-                    queue.remove(entry)
-                    entry.cancelled = "superseded after an earlier terminal failure"
-                    entry.event.set()
-                if not queue:
-                    approval._gateway_queues.pop(session_key, None)
-            self.pending_approvals = retained
-            for slot in self.slots[failed_slot.index + 1:]:
-                slot.regated = True
-                # A completed denial is a safety boundary, not stale positive
-                # consent.  Keep its key too: otherwise consume_prepared_guard
-                # falls through to a fresh guard, which can auto-approve under
-                # a session/always grant or yolo policy.
-                if isinstance(slot.decision, dict) and slot.decision.get("approved"):
-                    slot.decision = None
-                    slot.guard_key = None
 
 
 def prepare_current_terminal(ref):
@@ -246,25 +213,7 @@ def register_prepared_approval(session_key, entry):
     slot = _slot.get()
     if slot is not None:
         slot.check_cancelled()
-        slot.batch.pending_approvals.append((slot, session_key, entry))
-
-
-def regate_after_terminal_failure(call_id, function_result):
-    """Require fresh consent for later prepared calls after a terminal failure."""
-    batch = _batch.get()
-    if batch is None:
-        return
-    if isinstance(function_result, str):
-        try:
-            result = json.loads(function_result)
-        except (TypeError, ValueError):
-            return
-    else:
-        result = function_result
-    if not isinstance(result, dict):
-        return
-    if result.get("exit_code", 0) != 0 or result.get("status") in {"error", "blocked"}:
-        batch.regate_after_failure(call_id)
+        slot.batch.pending_approvals.append((session_key, entry))
 
 
 def consume_prepared_guard(command, env_type, has_host_access):
@@ -272,17 +221,48 @@ def consume_prepared_guard(command, env_type, has_host_access):
     if slot is None or slot.preparing:
         return None
     slot.check_cancelled()
+    # Re-gate after an earlier slot in the same batch failed (#113158): the
+    # user approved a batch where every command was expected to run; once one
+    # failed, that informed consent is stale for the commands after it, so
+    # drop the pre-made decision and let the guard run its live flow
+    # (allowlist, human approval). Nothing is auto-denied: an explicit
+    # human answer still wins; the prepared (often auto/policy) decision is
+    # simply not consumed.
+    if slot.batch.failure_seen and slot.decision is not None:
+        slot.decision = None
+        return None
     from tools.approval_context import _approval_tool_call_id
     if (_approval_tool_call_id.get() != slot.parsed.ref(slot.batch.task_id).call_id
             or slot.guard_key != (command, env_type, has_host_access)):
         return None
     decision, slot.decision = slot.decision, None  # single-use, even for identical calls
+    # Batching exists to publish the human asks together. An approval nobody answered (/yolo,
+    # approvals.mode off, the allowlist, a clean command) is policy, and the policy in force NOW
+    # governs: switching YOLO or "Approvals: off" off mid-batch must stop the later commands.
+    if decision is not None and decision.get("approved") and not decision.get("user_approved"):
+        from tools.approval_context import _get_approval_mode
+        if not (decision.get("smart_approved") and _get_approval_mode() == "smart"):
+            return None
     return decision
 
 
 def preparing_terminal_approval():
     slot = _slot.get()
     return slot is not None and slot.preparing
+
+
+def mark_batch_outcome(failed: bool) -> None:
+    """Record that the batch's current slot published a failed result.
+
+    Called by the sequential publisher AFTER a result is committed, so the
+    flag lands only for failures the model actually sees (a wedged worker's
+    late result never publishes). Sticky for the batch: one failure re-gates
+    every later prepared slot (#113158); successes leave it alone — a later
+    success must not un-stale an approval after an even earlier failure.
+    """
+    batch = _batch.get()
+    if batch is not None and failed:
+        batch.failure_seen = True
 
 
 def validate_prepared_terminal(args):
@@ -334,7 +314,12 @@ def terminal_approval_batch(agent, calls, messages, task_id):
                 batch.start()
             except (_CancelledPreparation, TimeoutError) as exc:
                 batch.close()
-                agent.interrupt(str(exc))
+                # A cancellation means a stop is already published (or our own
+                # close() ran): re-interrupting would overwrite the user's queued
+                # message/redirect. A timeout is a system stop: tool_reason only, no
+                # message (callers re-queue _interrupt_message as the user's next turn).
+                if isinstance(exc, TimeoutError):
+                    agent.interrupt(tool_reason="terminal batch preparation timeout")
                 # The sequential path must still persist a result for every
                 # assistant tool call, even if preparation never finished.
         yield
