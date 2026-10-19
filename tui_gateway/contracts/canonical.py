@@ -83,14 +83,18 @@ class SessionMutateParams(Params):
     """``operation`` + ``payload`` are validated by ``hermes_state_mutations.validate_action``;
     ``expected_generation`` is required for delete/rewind/reset/branch/model/compress/reasoning/workspace.
     ``reasoning`` (``{effort}``) and ``workspace`` (``{cwd}``, refused ``session_busy`` mid-turn) rewrite
-    the session's frozen policy: session-scope ``/reasoning`` and Desktop's Move to project."""
+    the session's frozen policy: session-scope ``/reasoning`` and Desktop's Move to project. ``edit_policy``
+    (``{policy}``: ask / workspace_session / session) is an ACP session's edit approval (main's ACP modes)."""
 
     session_id: str
     request_id: str
-    expected_revision: int
+    expected_revision: int | None
     operation: str
     payload: dict[str, JsonValue]
     expected_generation: int | None = None
+    # Dashboard-only compatibility for releases that predate the HTTP CAS fields. The authority
+    # revalidates this as sidebar/delete with both fences absent before committing it.
+    legacy_unfenced: bool = False
 
 
 class SessionMutateResult(OpenModel):
@@ -105,7 +109,7 @@ class SessionMutateResult(OpenModel):
 
 canonical_method("session.mutate", params=SessionMutateParams, result=SessionMutateResult,
                  doc="Revision-fenced, retry-idempotent session edit (rename, archive, sidebar, branch, "
-                     "delete, rewind, reset, model, reasoning, workspace, compress, import).")
+                     "delete, rewind, reset, model, reasoning, workspace, edit_policy, compress, import).")
 
 
 class SessionPruneParams(Params):
@@ -182,6 +186,8 @@ class CanonicalSessionInfo(SessionInventoryFields, OpenModel):
     desktop_protocol: str
     profile_name: str
     cwd: str | None = None
+    # An ACP session's edit approval policy (``session.mutate edit_policy``): ask / workspace_session / session.
+    edit_approval_policy: Literal["ask", "workspace_session", "session"] | None = None
     launch_request: dict[str, JsonValue] | None = None
     reasoning_effort: str | None = None
     reasoning_effort_wire: str | None = None
@@ -262,6 +268,28 @@ class RollbackSessionDiffResult(Result):
 canonical_method("rollback.session_diff", params=RollbackSessionDiffParams, result=RollbackSessionDiffResult,
                  doc="The classic CLI's /diff session: everything changed since the session's earliest "
                      "retained checkpoint, as data for its terminal renderer.")
+
+
+class SessionExportParams(Params):
+    """``format``: json (default) / md / markdown / html / snapshot (``normalize_save_format``)."""
+
+    session_id: str
+    profile: str | None = None
+    format: str = "json"
+    redact: bool = False
+
+
+class SessionExportResult(Result):
+    """``gateway/session_tui_ops.py::export_session``: the rendered ``/save`` body and its default
+    file name. The client writes it (the gateway may be remote); nothing is written on the host."""
+
+    format: str
+    filename: str
+    content: str
+
+
+canonical_method("session.export", params=SessionExportParams, result=SessionExportResult,
+                 doc="The /save transcript rendered for the client to write (the gateway writes nothing).")
 
 
 class SessionAutomationParams(Params):

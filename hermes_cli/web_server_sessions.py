@@ -186,7 +186,7 @@ def _mutate_offline_store(profile, actor, params, *, legacy_unfenced=False):
     return _with_session_maintenance(profile, run)
 
 
-async def _mutate_via_gateway_owner(profile, actor, params):
+async def _mutate_via_gateway_owner(profile, actor, params, *, legacy_unfenced=False):
     """Forward a standalone dashboard mutation to the live gateway owner.
 
     While a gateway serves the same home, a separately launched ``hermes
@@ -231,6 +231,8 @@ async def _mutate_via_gateway_owner(profile, actor, params):
             ('session_id', 'request_id', 'expected_revision', 'operation', 'payload') if key in params}
     if params.get('expected_generation') is not None:
         call['expected_generation'] = params['expected_generation']
+    if legacy_unfenced:
+        call['legacy_unfenced'] = True
     try:
         async with connect_gateway(endpoint=endpoint, subject=actor.subject) as client:
             return await client.rpc('session.mutate', **call)
@@ -287,10 +289,14 @@ async def _mutate_session_request(request, profile, session_id, *, request_id,
         if authority is None:
             # A live gateway owner answers first; only an owner-less home takes
             # the offline store (whose reservation loses to that same owner).
-            result = await _mutate_via_gateway_owner(profile, actor, params)
+            result = await _mutate_via_gateway_owner(profile, actor, params,
+                                                      legacy_unfenced=legacy_unfenced)
             if result is None:
-                result = await asyncio.to_thread(_mutate_offline_store, profile, actor, params,
-                                                  legacy_unfenced=legacy_unfenced)
+                if legacy_unfenced:
+                    result = await asyncio.to_thread(_mutate_offline_store, profile, actor, params,
+                                                      legacy_unfenced=True)
+                else:
+                    result = await asyncio.to_thread(_mutate_offline_store, profile, actor, params)
         else:
             with _native_history_transport(request, authority, actor):
                 result = await mutate_session(authority, actor, SessionRef(authority.profile_id, session_id), params,
