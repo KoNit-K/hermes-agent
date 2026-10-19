@@ -137,6 +137,25 @@ def test_transcript_and_unit_metadata_follow_actual_children(tmp_path, backgroun
                 assert parent.model not in text
 
 
+def test_dispatch_reports_inherited_child_model_when_config_model_is_blank():
+    """The async completion label keeps the route selected for an unpinned child."""
+    child = _ok_child()
+    child.model = "inherited/model"
+    unit = SimpleNamespace(
+        children=[(0, {"goal": "Research a sufficiently detailed topic"}, child)],
+        creds={"model": None},
+        task_list=[{"goal": "Research a sufficiently detailed topic"}],
+        context=None,
+        top_role="leaf",
+        live_writers=[None],
+    )
+
+    with patch("tools.async_delegation.dispatch_async_delegation_batch", return_value={}) as dispatch:
+        _dispatch_unit(unit, "unit-id", None, {})
+
+    assert dispatch.call_args.kwargs["model"] == "inherited/model"
+
+
 @pytest.mark.parametrize("background", [False, True])
 def test_execution_or_background_fallback_charges_once(background, tmp_path):
     parent = _make_mock_parent()

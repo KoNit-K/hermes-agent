@@ -397,8 +397,10 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
     child_agents = [c for (_, _, c) in unit.children]
     from tools.delegate_tool import _task_has_route_pin
     from tools.delegation_live_log import batch_route_metadata
-    # Untouched calls retain the original shared-route metadata contract.
-    model = unit.creds["model"]
+    # Untouched calls retain the upstream shared-route metadata contract: when delegation.model is blank,
+    # completion metadata reports the child route actually selected at construction.
+    model = unit.creds["model"] or next(
+        (getattr(c, "model", None) for c in child_agents if getattr(c, "model", None)), None)
     if any(_task_has_route_pin(task) for task in unit.task_list):
         model = batch_route_metadata(_child_route_metadata(unit.children))["model"]
 
