@@ -388,6 +388,25 @@ def test_bot_turn_does_not_publish_runtime_status():
         assert msg_event.get_command() == "new"
 
 
+def test_configured_mattermost_bot_is_authorized(monkeypatch):
+    """#137027: peer bots use Mattermost's registered bot-admission policy."""
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionSource
+
+    for name in ("MATTERMOST_ALLOW_BOTS", "MATTERMOST_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS"):
+        monkeypatch.delenv(name, raising=False)
+    runner = object.__new__(GatewayRunner)
+    runner.pairing_store = SimpleNamespace(is_approved=lambda *_a, **_kw: False)
+    source = SessionSource(
+        platform=Platform.MATTERMOST, chat_id="dm_456", chat_type="dm", user_id="peer_bot",
+        user_name="Peer Bot", is_bot=True,
+    )
+
+    assert runner._is_user_authorized(source) is False
+    monkeypatch.setenv("MATTERMOST_ALLOW_BOTS", "mentions")
+    assert runner._is_user_authorized(source) is True
+
+
 # ---------------------------------------------------------------------------
 # Mention behavior (require_mention + free_response_channels)
 # ---------------------------------------------------------------------------
