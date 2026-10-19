@@ -71,6 +71,28 @@ describe('SectionSync', () => {
     expect(saveHermesConfig).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the provider paired with the delegated model', async () => {
+    saveHermesConfig.mockResolvedValue({ ok: true })
+
+    render(
+      <SectionSync
+        fields={['delegation.model', 'delegation.provider']}
+        profile="default"
+        source={{ delegation: { model: 'Hermes-4', provider: 'nous' } }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sync section' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to selected profiles' }))
+
+    await waitFor(() =>
+      expect(saveHermesConfig).toHaveBeenCalledWith(
+        { delegation: { model: 'Hermes-4', provider: 'nous' } },
+        'research'
+      )
+    )
+  })
+
   it('keeps the selector open and reports a failed target write', async () => {
     saveHermesConfig.mockResolvedValue({ ok: false })
 
